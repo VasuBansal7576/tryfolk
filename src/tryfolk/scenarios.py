@@ -234,7 +234,7 @@ def matching_context(scenario, seed):
 def select_plan(catalog, bank, target, count, manual_ids=None):
     by_id = {s["id"]: s for s in catalog["scenarios"]}
     omitted = [
-        {"scenario_id": s["id"], "reason": reason}
+        {"scenario_id": s["id"], "reason": reason, "required_capabilities": s["required_capabilities"]}
         for s in catalog["scenarios"]
         if (reason := unavailable(s, target))
     ]
@@ -254,7 +254,11 @@ def select_plan(catalog, bank, target, count, manual_ids=None):
         chosen = [eligible[i % len(eligible)] for i in range(count)] if eligible else []
     selected_ids = {s["id"] for s in chosen}
     omitted += [
-        {"scenario_id": s["id"], "reason": "budget_limited_N"}
+        {
+            "scenario_id": s["id"],
+            "reason": "budget_limited_N",
+            "required_capabilities": s["required_capabilities"],
+        }
         for s in eligible
         if s["id"] not in selected_ids
     ]
@@ -442,42 +446,39 @@ def validate_population(population, plan):
             )
 
 
-def coverage(plan, population, outcomes, events):
+def coverage(plan, population, outcomes, events, run, findings, evidence_root):
     if not plan:
         return None
+    from .scenario_evidence import observed
+
+    population_error = None
+    try:
+        validate_population(population, plan)
+    except ValueError as error:
+        population_error = str(error)
     cases = []
     for persona in population:
         result = outcomes.get(persona["id"], {})
-        # Generation, scenario assignment, expected outcome, or paid truth alone do
-        # not prove that the scenario-specific condition was actually exercised.
         cases.append(
             {
                 "persona_id": persona["id"],
                 "assigned_scenario": persona.get("assigned_scenario"),
-                "observed_scenario_result": {
-                    "classification": "not_exercised",
-                    "condition_fixture_verified": False,
-                    "journey_outcome": result.get("outcome"),
-                    "journey_classification": result.get("classification"),
-                    "measured": result.get("measured", False),
-                    "payment_verified": result.get("payment_verified", False),
-                    "entitlement_verified": result.get("entitlement_verified", False),
-                    "capability_checked": result.get("capability_checked", False),
-                    "capability_available": result.get("capability_available"),
-                    "evidence_event_ids": [
-                        e["id"]
-                        for e in events
-                        if e["persona_id"] == persona["id"] and e["kind"] == "verification"
-                    ],
-                    "exercise_gate": "Scenario-specific fixture and independent verification evidence binding not implemented.",
-                },
+                "observed_scenario_result": observed(
+                    run, persona, result, events, findings, evidence_root, population_error
+                ),
             }
         )
     return {
         "catalog_case_count": plan["catalog_case_count"],
         "requested_personas": plan["requested_personas"],
         "assigned_case_ids": plan["selection_rationale"]["selected_case_ids"],
-        "exercised_case_ids": [],
+        "exercised_case_ids": list(
+            dict.fromkeys(
+                c["observed_scenario_result"]["scenario_id"]
+                for c in cases
+                if c["observed_scenario_result"]["exercised"]
+            )
+        ),
         "cases": cases,
         "counting_basis": "actual_saved_persona_journeys",
         "whole_catalog_coverage_claimed": False,

@@ -70,7 +70,7 @@ export function renderPersonaDetail(current: Run, person: Persona): string {
   const assignment = saved?.persona_index === person.index && saved.scenario_id === saved.scenario_snapshot.id ? saved : null;
   const scenario = assignment?.scenario_snapshot;
   const observed = coverage?.observed_scenario_result;
-  const result = observed && assignment && (!('scenario_id' in observed) || observed.scenario_id === assignment.scenario_id) ? observed : null;
+  const result = observed ?? null;
   const preferences = Object.fromEntries(Object.entries(person.profile).filter(([key]) => /prefer|patience|constraint/i.test(key)));
   const payment = Object.fromEntries([...Object.entries(scenario?.customer_context ?? {}), ...Object.entries(person.profile), ...Object.entries(person.conditions)].filter(([key]) => /payment|billing|currency|budget|price/i.test(key)));
   const goal = person.profile.goal ?? person.profile.customer_goal ?? scenario?.customer_goal;
@@ -102,12 +102,17 @@ export function renderPersonaDetail(current: Run, person: Persona): string {
   })}${canonicalScenario(assignment.scenario_snapshot_json)}</details>` : '';
   const observedVerification = result ? section('Reported journey and scenario verification', `
     <p class="small muted">${result.measured ? 'Measured provider evidence' : 'Fixture or unmeasured evidence'} · ${escape(humanize(result.classification))}</p>
-    ${readable({ payment_verified: result.payment_verified, entitlement_verified: result.entitlement_verified,
+    ${readable({ reported_scenario_id: 'scenario_id' in result ? result.scenario_id : undefined,
+      provider: 'provider' in result ? result.provider : undefined,
+      finding_ids: 'finding_ids' in result ? result.finding_ids : undefined,
+      scenario_exercised: result.exercised,
+      payment_verified: result.payment_verified, entitlement_verified: result.entitlement_verified,
       capability_checked: result.capability_checked, capability_available: result.capability_available,
       condition_fixture_verified: result.condition_fixture_verified,
       evidence_event_ids: result.evidence_event_ids,
-      ...('journey_outcome' in result ? { journey_outcome: result.journey_outcome, journey_classification: result.journey_classification, scenario_exercise_gate: result.exercise_gate } : { finding_ids: result.finding_ids }) })}
-    <p class="small muted">These are separate service-reported checks. An expected decline or provider challenge is not an app defect merely because payment did not succeed.</p>
+      ...('journey_outcome' in result ? { journey_outcome: result.journey_outcome, journey_classification: result.journey_classification, scenario_exercise_gate: result.exercise_gate } : {}) })}
+    ${'scenario_id' in result && result.scenario_id !== assignment?.scenario_id ? '<p class="small muted">This observation does not identify the saved assigned case. Its journey checks and findings remain inspectable; it adds no exercised coverage for that assignment.</p>' : ''}
+    <p class="small muted">These are separate service-reported checks. Only an explicit exercised flag establishes reported case exercise. An expected decline or provider challenge is not an app defect merely because payment did not succeed.</p>
   `) : '';
   return `
     <p class="sample-label">Saved customer #${number(person.index + 1)} · ${current.pass === 'before' ? 'Initial pass' : 'After pass'}</p>

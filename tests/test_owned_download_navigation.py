@@ -354,6 +354,21 @@ async def test_actual_download_event_consumes_exact_fresh_preparation_before_fil
         assert download.cancelled
 
 
+async def test_download_evidence_retains_the_actual_authenticated_order_and_selected_artwork(monkeypatch):
+    guard, page, _, identity, session, calls = await owned_fixture(monkeypatch)
+    session["body"]["orders"][0]["expected_product_id"] = "owned-product"
+    destination = guard.policy.origin + "/api/target/download?artwork=2"
+    await guard.prepare_owned_navigation(destination)
+    download = SimpleNamespace(page=page, url=destination)
+    await guard.admit_owned_download(download)
+    assert guard.events[-1]["download_binding"] == {
+        **identity["ownership"],
+        **{key: identity[key] for key in ("order_id", "checkout_session_id", "payment_id")},
+        "expected_product_id": "owned-product", "artwork_id": 2, "download_url": destination,
+    }
+    assert calls == ["poll"]  # Existing independent identity read, no additional provider call.
+
+
 @pytest.mark.parametrize("field", ["id", "loaderId", "url", "identityEpoch"])
 async def test_download_document_failure_retains_closed_per_field_comparisons(monkeypatch, field):
     guard, page, _state, _identity, _session, _calls = await owned_fixture(monkeypatch)

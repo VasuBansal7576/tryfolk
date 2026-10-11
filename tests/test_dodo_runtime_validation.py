@@ -113,12 +113,21 @@ def artifacts(tmp_path):
                         "payment_id": "unit-payment",
                     },
                 },
-            ] + [
-                {"url": "https://api.custom.hs.dodopayments.com" + path,
-                 "decision": "widget_bootstrap_response", "method": "GET", "status": 200,
-                 "child_frame": True, "page_identity": "primary", "config_bound": True,
-                 "independent_identity_rechecked": True, "config_id": "f" * 64,
-                 "response_target_guarded": True, "native_preflight_bound": True}
+            ]
+            + [
+                {
+                    "url": "https://api.custom.hs.dodopayments.com" + path,
+                    "decision": "widget_bootstrap_response",
+                    "method": "GET",
+                    "status": 200,
+                    "child_frame": True,
+                    "page_identity": "primary",
+                    "config_bound": True,
+                    "independent_identity_rechecked": True,
+                    "config_id": "f" * 64,
+                    "response_target_guarded": True,
+                    "native_preflight_bound": True,
+                }
                 for path in ("/account/payment_methods", "/customers/payment_methods")
             ],
             "filled_fields": fields,
@@ -199,6 +208,24 @@ def artifacts(tmp_path):
         },
     )
     return preflight, capture, association, healthy
+
+
+@pytest.mark.parametrize(
+    "dependency",
+    ["src/tryfolk/scenario_evidence.py", "src/tryfolk/scenarios.py", "src/tryfolk/verification.py"],
+)
+@pytest.mark.parametrize("change", ["omitted", "changed"])
+def test_scenario_evidence_dependency_closure_cannot_reuse_stale_runtime_proofs(tmp_path, dependency, change):
+    assert dependency in ADAPTER_FILES
+    paths = artifacts(tmp_path)
+    if change == "omitted":
+        preflight = json.loads(paths[0].read_text())
+        preflight["adapter_files"].pop(dependency)
+        save(paths[0], preflight)
+    else:
+        (tmp_path / dependency).write_text("# Changed unit-only source dependency")
+    with pytest.raises(ValueError):
+        write_validation(*paths, output=tmp_path / "result.json", root=tmp_path)
 
 
 def test_execution_gate_requires_intact_live_artifacts_and_current_source_adapter_identity(tmp_path):
@@ -290,15 +317,25 @@ def test_blocked_paid_mocked_or_unbound_context_never_clears_dispatch(tmp_path, 
 
 
 @pytest.mark.parametrize("mutation", ["missing", "failed", "unbound", "wrong_frame"])
-def test_native_card_claims_without_independently_bound_successful_bootstrap_reads_stay_gated(tmp_path, mutation):
+def test_native_card_claims_without_independently_bound_successful_bootstrap_reads_stay_gated(
+    tmp_path, mutation
+):
     files = artifacts(tmp_path)
     preflight = json.loads(files[0].read_text())
     events = preflight["resource_guard_evidence"]
     if mutation == "missing":
-        preflight["resource_guard_evidence"] = [e for e in events if e.get("decision") != "widget_bootstrap_response"]
+        preflight["resource_guard_evidence"] = [
+            e for e in events if e.get("decision") != "widget_bootstrap_response"
+        ]
     else:
         event = next(e for e in events if e.get("decision") == "widget_bootstrap_response")
-        event.update({"failed": {"status": 401}, "unbound": {"independent_identity_rechecked": False}, "wrong_frame": {"config_id": "0" * 64}}[mutation])
+        event.update(
+            {
+                "failed": {"status": 401},
+                "unbound": {"independent_identity_rechecked": False},
+                "wrong_frame": {"config_id": "0" * 64},
+            }[mutation]
+        )
     save(files[0], preflight)
     with pytest.raises(ValueError, match="dispatch stays gated"):
         write_validation(*files, output=tmp_path / "validation.json", root=tmp_path)

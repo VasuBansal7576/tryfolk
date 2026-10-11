@@ -43,22 +43,23 @@ test('N1 coverage preserves the frozen case, shows omitted/provider-owned/unexer
   assert.ok(html.includes('Provider-owned'));
   assert.ok(html.includes('Not assigned'));
   assert.ok(html.includes('Not exercised'));
-  assert.ok(html.includes('2 cases without recorded exercised coverage'));
+  assert.ok(html.includes('3 cases without recorded exercised coverage'));
   assert.ok(html.includes('Payment: Verified'));
   assert.ok(html.includes('Access: Not verified'));
   assert.ok(html.includes('original 1 requested customers'));
   assert.deepEqual(run, before);
 });
 
-test('unverified conditions, missing events and another persona’s events cannot establish exercised coverage', () => {
+test('legacy classes, condition flags and linked events cannot supply a missing authoritative exercise flag', () => {
   const run = makeRun();
-  assert.equal(scenarioExercised(result, run, person.id), true);
-  assert.equal(scenarioExercised({ ...result, condition_fixture_verified: false }, run, person.id), false);
-  assert.equal(scenarioExercised({ ...result, evidence_event_ids: [99] }, run, person.id), false);
-  assert.equal(scenarioExercised(result, run, 'test-only-other-person'), false);
-  assert.equal(scenarioExercised({ ...result, classification: 'provider_owned' }, run, person.id), false);
-  const html = renderScenarioCoverage(makeRun({ events: [] }), { kind: 'ready', catalog });
-  assert.ok(!html.includes('Payment: Verified'));
+  assert.equal(scenarioExercised(result), false);
+  assert.equal(scenarioExercised({ ...result, classification: 'expected_provider_decline' }), false);
+  const html = renderScenarioCoverage(run, { kind: 'ready', catalog });
+  assert.ok(html.includes('Unknown · exercise not reported'));
+  assert.ok(html.includes('3 cases without recorded exercised coverage'));
+  const missing = renderScenarioCoverage(makeRun({ events: [] }), { kind: 'ready', catalog });
+  assert.ok(missing.includes('The reported evidence event is not present in this run view'));
+  assert.ok(missing.includes('service-reported checks'));
 });
 
 test('selection and profile relevance are saved rationale, expected declines stay expected, and missing legacy rationale stays unknown', () => {

@@ -178,6 +178,31 @@ def test_dodo_pending_setup_and_fixtures_never_become_measured_success(records):
     order, receipt, entitlement = records
     receipt["state"] = "pending"
     assert correlate(order, receipt, entitlement)["outcome"] == "pending"
+
+
+async def test_verification_retains_actual_http_envelopes_and_complete_order_body(records, monkeypatch):
+    order, receipt, entitlement = deepcopy(records)
+    order.update(created_at="unit-time", state="ready", granted=False, payment_id="pay", customer_id="unit-customer")
+    calls = []
+    bodies = {"/api/target/orders": {"orders": [order]}, "/api/target/receipts": receipt,
+        "/api/target/entitlements": entitlement}
+
+    def respond(request):
+        calls.append(request)
+        assert request.method == "GET"
+        return httpx.Response(200, json=bodies[request.url.path])
+
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **options: client(**options, transport=httpx.MockTransport(respond)))
+    result = await DodoTarget("http://127.0.0.1:3301").verification(
+        {"id": "r", "revision": "rev"}, {key: order[key] for key in OWNERSHIP}
+    )
+    assert [request.url.path for request in calls] == list(bodies)
+    for key, request in zip(("orders_after", "provider_receipt", "app_entitlement"), calls):
+        assert result["oracle_http"][key] == {"http_status": 200, "body": bodies[request.url.path],
+            "method": "GET", "url": str(request.url), "redirects_followed": 0}
+    assert "evidence_url" not in result["oracle_http"]["provider_receipt"]["body"]
+    assert result["order"]["order_id"] == "o"
     receipt["state"] = "setup_required"
     assert correlate(order, receipt, entitlement)["outcome"] == "blocked"
     receipt["source"] = "external_provider_fixture"

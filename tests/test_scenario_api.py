@@ -121,11 +121,14 @@ def test_selection_is_stable_supported_risk_first_and_not_catalog_coverage(tmp_p
     plan = q["scenario_plan"]
     assert [a["scenario_id"] for a in plan["assignments"]] == ["access", "checkout"]
     assert get_quote(client).json()["scenario_plan"] == plan
-    assert plan["selection_rationale"]["omitted_cases"] == [
+    assert [
+        {k: r[k] for k in ("scenario_id", "reason")} for r in plan["selection_rationale"]["omitted_cases"]
+    ] == [
         {"scenario_id": "decline", "reason": "requires_fixture"},
         {"scenario_id": "tax", "reason": "provider_owned"},
         {"scenario_id": "renewal", "reason": "missing_capabilities_or_conditions"},
     ]
+    assert all("required_capabilities" in r for r in plan["selection_rationale"]["omitted_cases"])
     assert plan["selection_rationale"]["library_seed_count"] == 4
     assert plan["does_not_imply_exercised_coverage"] is True
     assert plan["requested_personas"] == q["persona_count"] == 2
@@ -371,10 +374,15 @@ def test_quote_rejects_population_override_and_missing_scenario_catalog_is_actio
 def test_genuine_owned_catalog_requires_registered_fixture_and_preserves_all_hypotheses(tmp_path):
     from pathlib import Path
 
-    settings, _, _ = configured(tmp_path)
+    settings, _, bank = configured(tmp_path)
     path = Path(__file__).resolve().parents[1] / "dodo-target/scenarios/payment-catalog.json"
     original = json.loads(path.read_text())
     runnable = [s for s in original["scenarios"] if s["availability"] == "runnable"]
+    actual_conditions = runnable[0]["required_capabilities"]["conditions"]
+    seed_data = json.loads(bank.read_text())
+    for seed in seed_data["seeds"]:
+        seed["supported_context"] = {k: [v] for k, v in actual_conditions.items()}
+    bank.write_text(json.dumps(seed_data))
     target = replace(
         settings.targets[0],
         scenario_capabilities={
@@ -382,6 +390,7 @@ def test_genuine_owned_catalog_requires_registered_fixture_and_preserves_all_hyp
             for k in ("target", "provider")
         },
         scenario_fixture_ids=("dodo-public-success-card-us-desktop-v1",),
+        scenario_conditions=actual_conditions,
     )
     settings = replace(settings, scenario_catalog_path=path, targets=(target,))
     client = TestClient(create_app(settings))

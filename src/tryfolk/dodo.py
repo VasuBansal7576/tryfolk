@@ -113,7 +113,7 @@ class DodoTarget:
         self.origin = origin.rstrip("/")
         self.headers = {"Authorization": "Bearer " + os.environ.get("TARGET_CONTROL_TOKEN", "")}
 
-    async def request(self, method, path, *, _trace=None, **kwargs):
+    async def request(self, method, path, *, _trace=None, _envelope=None, **kwargs):
         item = None
         if _trace is not None:
             item = {"stage": {"/api/target/readiness": "readiness", "/api/target/orders": "orders",
@@ -126,7 +126,12 @@ class DodoTarget:
                 if item is not None:
                     item.update(response_received=True, http_status=response.status_code)
                 response.raise_for_status()
-                return response.json()
+                body = response.json()
+                if _envelope is not None:
+                    _envelope.update(http_status=response.status_code, body=body,
+                        method=response.request.method, url=str(response.url),
+                        redirects_followed=len(response.history))
+                return body
         except Exception as error:
             if item is not None:
                 item["error_type"] = type(error).__name__ if isinstance(
@@ -175,8 +180,10 @@ class DodoTarget:
         return seed
 
     async def verification(self, run, fixture, capability=None):
+        oracle_http = {key: {} for key in ("orders_after", "provider_receipt", "app_entitlement")}
         orders = (
-            await self.request("GET", "/api/target/orders", params={"account_id": fixture["account_id"]})
+            await self.request("GET", "/api/target/orders", params={"account_id": fixture["account_id"]},
+                _envelope=oracle_http["orders_after"])
         )["orders"]
         if len(orders) != 1:
             return {
@@ -186,18 +193,24 @@ class DodoTarget:
                 "provider": "dodo",
                 "capability_checked": capability is not None,
                 "capability_available": capability,
+                "oracle_http": oracle_http,
             }
         order = orders[0]
         if any(order.get(key) != fixture[key] for key in OWNERSHIP):
             raise ValueError("Dodo order ownership differs from this fresh persona fixture.")
-        receipt = await self.request("GET", "/api/target/receipts", params={"order_id": order["order_id"]})
-        receipt["evidence_url"] = self.origin + "/api/target/evidence?evidence_id=" + receipt["evidence_id"]
+        raw_receipt = await self.request("GET", "/api/target/receipts", params={"order_id": order["order_id"]},
+            _envelope=oracle_http["provider_receipt"])
+        receipt = {**raw_receipt, "evidence_url": self.origin + "/api/target/evidence?evidence_id=" + raw_receipt["evidence_id"]}
         entitlement = await self.request(
             "GET",
             "/api/target/entitlements",
             params={"account_id": fixture["account_id"], "order_id": order["order_id"]},
+            _envelope=oracle_http["app_entitlement"],
         )
-        return correlate(order, receipt, entitlement, capability)
+        return {**correlate(order, receipt, entitlement, capability),
+                "oracle_http": oracle_http,
+                "order": {key: order[key] for key in (*OWNERSHIP, "order_id", "expected_product_id",
+                    "checkout_session_id", "amount_minor", "currency", "active")}}
 
     async def frame_context(self, observed, run, fixture):
         """Authorize current card input/requests by Test identity, never a secret."""

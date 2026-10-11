@@ -246,6 +246,12 @@ async def run(stack):
                     await page.goto(command["url"])
                     ready = await settle(page, policy, {"method": "goto"})
                     data = {"url": ready["url"], "settlement": ready}
+                    # This read observes the fresh owned browser, never persona text.
+                    observed_context = await network_page.evaluate("""({locale:navigator.language,
+                        user_agent:navigator.userAgent, has_touch:navigator.maxTouchPoints>0,
+                        viewport:{width:innerWidth,height:innerHeight}})""")
+                    data["condition_observation"] = {**observed_context,
+                        "source":"stagehand_owned_context", "fresh_context":True}
                 elif op == "observe":
                     fresh_actions, fresh_document = [], None
                     observation_deadline = asyncio.get_running_loop().time() + 170
@@ -386,6 +392,12 @@ async def run(stack):
                                 action["_tryfolk"].get("frame_config_id"), action["_tryfolk"].get("frame_generation")
                             )
                     data["observed_text"] = await page.evaluate("document.body.innerText")
+                    if policy.provider == "dodo":
+                        from tryfolk.scenario_evidence import checkout_observation
+
+                        condition_observation = checkout_observation(guard, completed_fields)
+                        if condition_observation:
+                            data["condition_observation"] = condition_observation
                     if action.get("_tryfolk", {}).get("capability"):
                         deadline = asyncio.get_running_loop().time() + 5
                         while asyncio.get_running_loop().time() < deadline:
@@ -400,12 +412,16 @@ async def run(stack):
                                         "Capability download exceeds the owned sample file limit."
                                     )
                                 raw = files[0].read_bytes()
+                                download_admission = next((e for e in reversed(guard.events)
+                                    if e.get("decision") == "owned_download_event"), None)
                                 data["capability"] = {
                                     "available": b"<svg" in raw[:1024],
                                     "download_path": str(files[0]),
                                     "download_sha256": hashlib.sha256(raw).hexdigest(),
                                     "bytes": len(raw),
                                     "source": "stagehand_browser_download",
+                                    "download_admission": download_admission,
+                                    "download_binding": (download_admission or {}).get("download_binding"),
                                 }
                                 break
                             await asyncio.sleep(0.1)

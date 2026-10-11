@@ -148,6 +148,10 @@ records, with source revisions, attribution and stable IDs. It reads at most 32 
 blocks execution with a setup gate; the runtime never substitutes fabricated seed data.
 The private target registry declares `scenario_capabilities`, `scenario_conditions`
 and `scenario_fixture_ids` independently of persona narratives.
+The local launcher accepts `TRYFOLK_SCENARIO_REGISTRATION` pointing to a bounded owner
+JSON declaration for the existing broken fixture. It joins that declaration to the
+observed exact origin, source digest, licensed upstream, clean source and Test Mode
+before adding selection metadata. It never clears the separate execution gate.
 
 Quotes select supported cases by declared risk and stable case ID, then choose distinct
 context-relevant seeds by explicit arts/skills/interests and stable hashes. Demographics
@@ -160,11 +164,16 @@ TinyTroupe adapts each accepted seed through its existing factory generation pat
 without an extra adaptation cycle. Actual profile, initial TinyPerson snapshot and
 semantic memory are saved once before the first journey. Replay validates their hashes
 and identities before restoring the same original N with fresh accounts and cookies.
-Catalog or bank updates cannot regenerate an accepted population. Assigned scenarios
-remain `not_exercised` until scenario-specific fixture/evidence binding is implemented;
-actual journey payment, entitlement, capability and verification events are reported
-separately. New adaptation code has fixture validation; genuine model/browser execution
-requires separate authorization and evidence.
+Catalog or bank updates cannot regenerate an accepted population. The two existing
+success-card cases count as exercised only with the saved assignment/profile/memory
+hashes, fresh observed browser/account conditions and actual admitted card confirmation.
+Independent same-cycle HTTP response envelopes must join the full order, provider
+receipt and matching account entitlement. Fulfillment also requires the actual protected
+download admission bound to that account/order/revision/payment/product and selected
+artwork, plus the saved SVG bytes and SHA. Settled paid-without-access is an app defect;
+expected declines, pending or missing proof stay unexercised. Fixture and historical
+control evidence never becomes saved-customer coverage. New adaptation and evidence
+admission have local tests; genuine model/browser execution remains separately gated.
 
 ## Checks
 

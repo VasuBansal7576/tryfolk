@@ -43,7 +43,7 @@ class Runtime:
                 raise RuntimeError("Dodo preview source head/digest differs from this exact run.")
             if run.get("target_mode") and manifest["mode"] != run["target_mode"]:
                 raise RuntimeError("Dodo baseline mode changed; repair must keep equivalent conditions.")
-            return
+            return manifest
         async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
             response = await client.get(run["preview_url"] + "/health")
             response.raise_for_status()
@@ -129,11 +129,25 @@ class Runtime:
             await persona.close()
 
     async def provision(self, run, persona):
-        await self.check_revision(run)
+        manifest = await self.check_revision(run)
         if run["provider"] == "dodo":
             from .dodo import DodoTarget
 
-            return await DodoTarget(run["preview_url"]).provision(run, persona)
+            fixture = await DodoTarget(run["preview_url"]).provision(run, persona)
+            if persona.get("assigned_scenario"):
+                fixture["_scenario_source_manifest"] = {
+                    key: manifest[key]
+                    for key in (
+                        "target_revision",
+                        "source_commit",
+                        "source_sha256",
+                        "app_origin",
+                        "provider_environment",
+                        "source_clean",
+                        "mode",
+                    )
+                }
+            return fixture
         async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
             response = await client.post(
                 run["preview_url"] + "/fixtures/accounts",
@@ -205,25 +219,29 @@ class Runtime:
         capability = None
         policy = BrowserPolicy(run["preview_url"], run["provider"])
         mind_initialized = False
+        scenario_binding = None
+        condition_emitted = False
         try:
             # Separate SDK processes can initialize together. No observation or
             # decision proceeds until the complete saved memory and browser are ready.
             startup = [
                 asyncio.create_task(mind.request({"op": "init", "persona": persona})),
-                asyncio.create_task(browser.request(
-                    {
-                        "op": "goto",
-                        "url": fixture["login_url"]
-                        if run["provider"] == "dodo"
-                        else run["preview_url"] + fixture["session_url"],
-                        "origin": run["preview_url"],
-                        "provider": run["provider"],
-                        "card_capability": run["provider"] == "dodo",
-                    }
-                )),
+                asyncio.create_task(
+                    browser.request(
+                        {
+                            "op": "goto",
+                            "url": fixture["login_url"]
+                            if run["provider"] == "dodo"
+                            else run["preview_url"] + fixture["session_url"],
+                            "origin": run["preview_url"],
+                            "provider": run["provider"],
+                            "card_capability": run["provider"] == "dodo",
+                        }
+                    )
+                ),
             ]
             try:
-                initial_memory, _ = await asyncio.gather(*startup)
+                initial_memory, browser_started = await asyncio.gather(*startup)
             finally:
                 for task in startup:
                     if not task.done():
@@ -231,6 +249,25 @@ class Runtime:
                 await asyncio.gather(*startup, return_exceptions=True)
                 mind_initialized = not startup[0].cancelled() and startup[0].exception() is None
             await emit("persona_initialized", initial_memory, persona["id"])
+            if run["provider"] == "dodo" and persona.get("assigned_scenario"):
+                from .scenario_evidence import binding
+                from .dodo import OWNERSHIP
+
+                scenario_binding = binding(run, persona, fixture)
+                await emit(
+                    "scenario_fixture",
+                    {
+                        "binding": scenario_binding,
+                        "source_manifest": fixture.get("_scenario_source_manifest"),
+                        "account": {
+                            "source": "dodo_owned_fixture_provision",
+                            "history": "new",
+                            "ownership": {key: fixture[key] for key in OWNERSHIP},
+                        },
+                        "browser": browser_started.get("condition_observation"),
+                    },
+                    persona["id"],
+                )
             for step in range(24 if run["provider"] == "dodo" else 6):
                 if cancelled():
                     raise Cancelled()
@@ -271,6 +308,16 @@ class Runtime:
                     raise RuntimeError("Stagehand reported browser action failure; no payment assumption.")
                 actions_executed.append(redact_payment(action))
                 await emit("browser_action", {"action": action, "result": result}, persona["id"])
+                if scenario_binding and not condition_emitted and result.get("condition_observation"):
+                    await emit(
+                        "scenario_payment_condition",
+                        {
+                            "binding": scenario_binding,
+                            "observation": result["condition_observation"],
+                        },
+                        persona["id"],
+                    )
+                    condition_emitted = True
                 await mind.request({"op": "feedback", "result": redact_payment(result)})
                 if action.get("_tryfolk", {}).get("capability"):
                     capability = result.get("capability", {}).get("available")

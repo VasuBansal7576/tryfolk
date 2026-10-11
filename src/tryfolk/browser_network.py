@@ -580,7 +580,16 @@ class ResourceGuard:
                 checks["same_owned_document_during_independent_reads"] = before == after
                 if not all(checks.values()):
                     raise OwnedNavigationError(checks)
-                self._owned_navigation = {"destination": destination, "document": before, "expires": capability.clock() + 5}
+                self._owned_navigation = {"destination": destination, "document": before,
+                    "expires": capability.clock() + 5,
+                    "download_binding": {
+                        **ownership,
+                        **{key: identity[key] for key in ("order_id", "checkout_session_id", "payment_id")},
+                        "expected_product_id": order.get("expected_product_id"),
+                        "download_url": destination,
+                        "artwork_id": int(destination.rsplit("=", 1)[1])
+                            if destination.startswith(self.policy.origin + "/api/target/download?") else None,
+                    }}
         except Exception as error:
             self.events.append({"decision": "deny_owned_navigation_prepare", "owned_navigation_checks": checks,
                                 "first_failed_predicate": getattr(error, "first_failed_predicate", None),
@@ -672,7 +681,8 @@ class ResourceGuard:
                                 prepared.get("document", {}) if prepared else {}, before, after),
                             "error_type": error_type,
                             "first_failed_predicate": next((name for name, value in checks.items() if not value), None),
-                            "admission_phase": "actual_primary_download_event_before_save"})
+                            "admission_phase": "actual_primary_download_event_before_save",
+                            "download_binding": prepared.get("download_binding") if admitted else None})
         if not admitted:
             await download.cancel()
             raise OwnedNavigationError(checks)

@@ -41,6 +41,9 @@ ADAPTER_FILES = (
     "src/tryfolk/checkout_navigation.py",
     "integrations/dodo/contact_binding.mjs",
     "integrations/dodo/read_contact.mjs",
+    "src/tryfolk/scenario_evidence.py",
+    "src/tryfolk/scenarios.py",
+    "src/tryfolk/verification.py",
 )
 
 

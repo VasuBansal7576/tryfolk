@@ -88,11 +88,14 @@ const draftSelectionRationaleSchema = z.object({
   requested_personas: count, reserved_both_passes_microusd: money,
   personality_variation_adds_case_coverage: z.literal(false), whole_catalog_coverage_claimed: z.literal(false),
 });
+const requiredCapabilitiesSchema = z.object({
+  target: z.array(z.string()), provider: z.array(z.string()), conditions: z.record(z.string(), z.string()),
+});
 const implementedSelectionRationaleSchema = z.object({
   mode: z.enum(['manual', 'automatic_capability_risk']), policy_version: z.string(), selected_case_ids: z.array(z.string()),
-  omitted_cases: z.array(z.object({ scenario_id: z.string(), reason: z.string() })),
+  omitted_cases: z.array(z.object({ scenario_id: z.string(), reason: z.string(), required_capabilities: requiredCapabilitiesSchema.optional() })),
   why_selected: z.array(z.object({ scenario_id: z.string(), risk_priority: count,
-    capability_basis: z.object({ target: z.array(z.string()), provider: z.array(z.string()), conditions: z.record(z.string(), z.string()) }),
+    capability_basis: requiredCapabilitiesSchema,
     context: z.record(z.string(), z.unknown()), assignment_count: count })),
   library_seed_count: count, personality_variation_is_case_coverage: z.literal(false), whole_catalog_coverage_claimed: z.literal(false),
 });
@@ -112,18 +115,32 @@ export const savedScenarioSchema = scenarioAssignmentSchema.extend({
   })]).optional(),
 });
 const draftScenarioResultSchema = z.object({
+  exercised: z.undefined().optional(),
+  journey_outcome: z.undefined().optional(), journey_classification: z.undefined().optional(), exercise_gate: z.undefined().optional(),
   scenario_id: z.string(), classification: z.enum(['not_exercised', 'exercised_fixture', 'exercised_provider', 'expected_provider_decline', 'app_defect', 'provider_owned', 'blocked_inconclusive']),
   evidence_event_ids: z.array(z.number().int()), finding_ids: z.array(z.string()), measured: z.boolean(), provider: z.string().nullable(),
   payment_verified: z.boolean().nullable(), entitlement_verified: z.boolean().nullable(),
   capability_checked: z.boolean(), capability_available: z.boolean().nullable(), condition_fixture_verified: z.boolean(),
 });
 const implementedScenarioResultSchema = z.object({
+  exercised: z.undefined().optional(),
+  scenario_id: z.undefined().optional(), provider: z.undefined().optional(), finding_ids: z.undefined().optional(),
   classification: z.literal('not_exercised'), condition_fixture_verified: z.literal(false),
   journey_outcome: z.string().nullable(), journey_classification: z.string().nullable(), measured: z.boolean(),
   payment_verified: z.boolean(), entitlement_verified: z.boolean(), capability_checked: z.boolean(), capability_available: z.boolean().nullable(),
   evidence_event_ids: z.array(z.number().int()), exercise_gate: z.string(),
 });
-export const scenarioResultSchema = z.union([implementedScenarioResultSchema, draftScenarioResultSchema]);
+const evidenceBoundScenarioResultSchema = z.object({
+  scenario_id: z.string().nullable(), provider: z.string().nullable(), finding_ids: z.array(z.string()),
+  classification: z.enum(['not_exercised', 'blocked_inconclusive', 'fulfilled', 'app_defect', 'expected_provider_decline', 'pending']),
+  exercised: z.boolean(), condition_fixture_verified: z.boolean(),
+  journey_outcome: z.string().nullable(), journey_classification: z.string().nullable(), measured: z.boolean(),
+  payment_verified: z.boolean(), entitlement_verified: z.boolean(), capability_checked: z.boolean(), capability_available: z.boolean().nullable(),
+  evidence_event_ids: z.array(z.number().int()), exercise_gate: z.string().nullable(),
+});
+// Legacy records remain readable. An invalid explicit exercise flag cannot fall
+// through to a legacy variant and silently lose the evidence-binding fields.
+export const scenarioResultSchema = z.union([evidenceBoundScenarioResultSchema, implementedScenarioResultSchema, draftScenarioResultSchema]);
 export const scenarioCoverageSchema = z.object({
   catalog_case_count: count, requested_personas: count, assigned_case_ids: z.array(z.string()), exercised_case_ids: z.array(z.string()),
   cases: z.array(z.object({ persona_id: z.string(), assigned_scenario: savedScenarioSchema.nullable(), observed_scenario_result: scenarioResultSchema.nullable() })),

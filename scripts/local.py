@@ -14,6 +14,9 @@ RUNTIME = ROOT / "runtime"
 
 
 def start():
+    from tryfolk.scenario_registration import bind_registration, load_registration
+
+    scenario_registration = load_registration(os.environ.get("TRYFOLK_SCENARIO_REGISTRATION"))
     RUNTIME.mkdir(exist_ok=True)
     secret_path = RUNTIME / "local-secrets.json"
     if not secret_path.exists():
@@ -174,6 +177,7 @@ def start():
                             "mode": manifest["mode"],
                             "execution_ready": execution_ready(manifest, RUNTIME / "dodo-execution-validation.json", ROOT),
                             "target_provenance": dodo_provenance(manifest, dodo_root),
+                            **bind_registration(manifest, scenario_registration),
                             "setup_gates": [
                                 {
                                     "code": "dodo_target_" + e["code"],

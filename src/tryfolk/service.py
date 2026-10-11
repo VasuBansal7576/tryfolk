@@ -365,7 +365,20 @@ class Service:
             },
             "personas": persons,
             **(
-                {"scenario_coverage": coverage(run["scenario_plan"], persons, outcomes, events)}
+                {
+                    "scenario_coverage": coverage(
+                        run["scenario_plan"],
+                        persons,
+                        outcomes,
+                        events,
+                        run,
+                        [
+                            json.loads(f[0])
+                            for f in db.execute("SELECT payload FROM findings WHERE run_id=?", (run["id"],))
+                        ],
+                        evidence_root,
+                    )
+                }
                 if run.get("scenario_plan")
                 else {}
             ),
