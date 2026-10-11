@@ -1,5 +1,6 @@
 """Real Stagehand normal tabs in fresh owned profiles, with network-only guards."""
 import asyncio
+import json
 import os
 import re
 from pathlib import Path
@@ -83,6 +84,22 @@ async def open_routed_browser(stack, *, model, logging, downloads):
             raise RuntimeError("The actual Stagehand normal tab was not found in its owned routed context.")
         await asyncio.sleep(0.05)
     guard.primary_page = network_page
+    async def owned_session_reader():
+        # This isolated browser context's cookie jar authenticates the app read.
+        # Never send its session cookie through the model or callback pipe.
+        url = guard.policy.origin + "/api/target/return"
+        response = await context.request.get(url, max_redirects=0, timeout=3000)
+        try:
+            raw = await response.body()
+            bounded = len(raw) <= 64_000
+            valid = response.status == 200 and response.url == url and not response.headers.get("location")
+            valid = valid and response.headers.get("content-type", "").split(";", 1)[0] == "application/json" and bounded
+            body = json.loads(raw) if valid else {}
+            return {"http_status": response.status, "same_origin_no_redirect": valid,
+                    "body": body if isinstance(body, dict) else {}}
+        finally:
+            await response.dispose()
+    guard.owned_session_reader = owned_session_reader
     boundary = ResponseBoundary(context, guard)
     await boundary.cover(network_page)
     guard.response_guard = boundary.cover

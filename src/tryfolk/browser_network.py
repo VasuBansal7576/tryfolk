@@ -220,10 +220,21 @@ class NativePaymentParentError(ValueError):
         super().__init__("Native confirmation parent failed: " + self.first_failed_predicate)
 
 
+class OwnedNavigationError(ValueError):
+    def __init__(self, checks):
+        self.checks = checks
+        self.first_failed_predicate = next(name for name, value in checks.items() if not value)
+        super().__init__("Owned download navigation failed: " + self.first_failed_predicate)
+
+
 class ResourceGuard:
     def __init__(self, *, frame_verify=None):
         self.policy = None
         self.frame_verify = frame_verify
+        self.owned_session_reader = None
+        self._owned_navigation = None
+        self._owned_download_admission = None
+        self._owned_download_page_admitted = False
         self.response_guard = None
         self.preflight_guard = None
         self.events = []
@@ -504,6 +515,146 @@ class ResourceGuard:
         self._confirmed_normalization = copy.deepcopy(navigation._armed_normalization)
         self._confirmed_return_source_bound = navigation.return_source_current(document)
         return True
+
+    def owned_download_destination(self, destination):
+        if not self.policy or not isinstance(destination, str):
+            return False
+        return destination == self.policy.origin + "/special-downloads" or bool(re.fullmatch(
+            re.escape(self.policy.origin) + r"/api/target/download\?artwork=(?:[0-9]|1[01])", destination
+        ))
+
+    async def prepare_owned_navigation(self, destination):
+        """Before an explicit action, bind one owned GET to fresh session/receipt reads.
+
+        Refresh the committed app document outside paused navigation. The later
+        route uses continuous Target/document attestation, never renderer reads.
+        No provider-return or payment capability is removed or extended.
+        """
+        self._owned_navigation = self._owned_download_admission = None
+        capability = self.card_attempt
+        checks = {
+            "accepted_native_CONFIRM": bool(capability) and capability.confirmed,
+            "native_succeeded_response": bool(capability) and capability.response_status == "succeeded",
+            "bounded_confirmed_return": bool(capability) and capability.return_phase_open(),
+            "accepted_owned_provider_redirect": bool(capability) and bool(capability._admitted_owned_redirect),
+            "exact_owned_download_destination": self.owned_download_destination(destination),
+            "authenticated_session_reader_available": self.owned_session_reader is not None,
+            "current_protocol_reader_available": self.protocol_reader is not None,
+        }
+        try:
+            if not all(checks.values()):
+                raise OwnedNavigationError(checks)
+            async with asyncio.timeout(8):
+                before = (await self.protocol_frames())["main"]
+                checks["committed_admitted_owned_app_document"] = bool(before) and (
+                    before.get("url") == capability._admitted_owned_redirect
+                    or self._owned_download_page_admitted and before.get("url") == self.policy.origin + "/special-downloads"
+                )
+                if not checks["committed_admitted_owned_app_document"]:
+                    raise OwnedNavigationError(checks)
+                identity, identity_checks = await self.return_identity()
+                checks.update(identity_checks)
+                checks["independent_payment_succeeded"] = identity.get("payment_status") == "succeeded"
+                if not all(checks.values()):
+                    raise OwnedNavigationError(checks)
+                session = await self.owned_session_reader()
+                checks["authenticated_session_response_object"] = isinstance(session, dict) and isinstance(session.get("body"), dict)
+                if not checks["authenticated_session_response_object"]:
+                    raise OwnedNavigationError(checks)
+                body = session.get("body") or {}
+                orders = body.get("orders") or []
+                order = orders[0] if isinstance(orders, list) and len(orders) == 1 and isinstance(orders[0], dict) else {}
+                ownership = identity["ownership"]
+                checks.update({
+                    "authenticated_owned_session_HTTP200": session.get("http_status") == 200 and session.get("same_origin_no_redirect") is True,
+                    "authenticated_session_same_ownership": body.get("ownership") == ownership,
+                    "authenticated_session_single_same_active_order": bool(order) and order.get("active") is True
+                    and all(order.get(key) == value for key, value in ownership.items())
+                    and order.get("order_id") == identity.get("order_id")
+                    and order.get("checkout_session_id") == identity.get("checkout_session_id")
+                    and order.get("payment_id") == identity.get("payment_id"),
+                    "protected_download_has_authenticated_grant": destination == self.policy.origin + "/special-downloads"
+                    or body.get("has_access") is True and order.get("granted") is True,
+                })
+                after = (await self.protocol_frames())["main"]
+                checks["same_owned_document_during_independent_reads"] = before == after
+                if not all(checks.values()):
+                    raise OwnedNavigationError(checks)
+                self._owned_navigation = {"destination": destination, "document": before, "expires": capability.clock() + 5}
+        except Exception as error:
+            self.events.append({"decision": "deny_owned_navigation_prepare", "owned_navigation_checks": checks,
+                                "first_failed_predicate": getattr(error, "first_failed_predicate", None),
+                                "error_type": type(error).__name__})
+            raise
+        self.events.append({"decision": "owned_navigation_prepared", "owned_navigation_checks": checks,
+                            "first_failed_predicate": None})
+
+    async def bind_owned_navigation(self, request):
+        prepared, self._owned_navigation = self._owned_navigation, None
+        checks = {
+            "explicit_preparation_available": bool(prepared),
+            "single_exact_prepared_destination": bool(prepared) and request.url == prepared["destination"],
+            "prepared_identity_fresh": bool(prepared) and self.card_attempt.clock() < prepared["expires"],
+            "primary_original_GET_document_or_download": request.frame == self.primary_page.main_frame
+            and (request.is_navigation_request() and request.resource_type == "document"
+                 or request.url.startswith(self.policy.origin + "/api/target/download?")
+                 and not request.is_navigation_request() and request.resource_type == "other") and request.method == "GET"
+            and request.post_data is None and request.redirected_from is None,
+        }
+        try:
+            if all(checks.values()):
+                # HTML download links can be non-navigation Other requests.
+                # Attest the still committed source, with no pending document.
+                observed = request if request.is_navigation_request() else SimpleNamespace(url=None, method=None)
+                before = await self.current_return_frames(observed)
+                after = await self.current_return_frames(observed)
+                checks["prepared_owned_document_continuously_current"] = before["main"] == after["main"] == prepared["document"]
+        except Exception as error:
+            checks["prepared_owned_document_continuously_current"] = False
+            checks["protocol_attestation_available"] = False
+            error_type = type(error).__name__
+        else:
+            error_type = None
+        admitted = all(checks.values())
+        if admitted and request.url == self.policy.origin + "/special-downloads":
+            self._owned_download_page_admitted = True
+        elif admitted:
+            self._owned_download_admission = prepared
+        return admitted, {"owned_navigation_checks": checks,
+                          "first_failed_predicate": next((name for name, value in checks.items() if not value), None),
+                          **({"error_type": error_type} if error_type else {})}
+
+    async def admit_owned_download(self, download):
+        """Bind the real primary-page download event before any caller saves it.
+
+        Chromium can deliver HTML downloads outside context request routing.
+        The explicit SDK action still requires fresh authenticated preparation;
+        this consumes it against the actual URL and continuously current page.
+        """
+        prepared = self._owned_navigation or self._owned_download_admission
+        self._owned_navigation = self._owned_download_admission = None
+        checks = {
+            "explicit_download_preparation_available": bool(prepared),
+            "same_primary_download_page": download.page == self.primary_page,
+            "single_exact_owned_protected_download": bool(prepared) and download.url == prepared["destination"]
+            and download.url.startswith(self.policy.origin + "/api/target/download?"),
+            "prepared_download_identity_fresh": bool(prepared) and self.card_attempt.clock() < prepared["expires"],
+        }
+        try:
+            if all(checks.values()):
+                before = await self.current_return_frames(SimpleNamespace(url=None, method=None))
+                after = await self.current_return_frames(SimpleNamespace(url=None, method=None))
+                checks["download_source_document_continuously_current"] = before["main"] == after["main"] == prepared["document"]
+        except Exception:
+            checks["download_source_document_continuously_current"] = False
+        admitted = all(checks.values())
+        self.events.append({"decision": "owned_download_event" if admitted else "deny_owned_download_event",
+                            "owned_navigation_checks": checks,
+                            "first_failed_predicate": next((name for name, value in checks.items() if not value), None),
+                            "admission_phase": "actual_primary_download_event_before_save"})
+        if not admitted:
+            await download.cancel()
+            raise OwnedNavigationError(checks)
 
     async def bind_return_navigation(self, request):
         """Live CDP document admission; no JavaScript in paused navigation."""
@@ -1054,9 +1205,11 @@ class ResourceGuard:
                 self.record(request, "deny", reason="unapproved_extra_document")
                 await route.abort("blockedbyclient")
                 return
-            if self.card_attempt and self.card_attempt.confirmed and request.is_navigation_request() and frame == self.primary_page.main_frame:
-                admitted, return_facts = await self.bind_return_navigation(request)
-                self.record(request, "native_return_navigation" if admitted else "deny",
+            protected = self.policy and exact_origin(request.url) == self.policy.origin and urlsplit(request.url).path == "/api/target/download"
+            if self.card_attempt and self.card_attempt.confirmed and (protected or request.is_navigation_request() and frame == self.primary_page.main_frame):
+                owned = self.owned_download_destination(request.url)
+                admitted, return_facts = await (self.bind_owned_navigation(request) if owned or protected else self.bind_return_navigation(request))
+                self.record(request, "owned_download_navigation" if admitted and owned else "native_return_navigation" if admitted else "deny",
                             **return_facts, **({} if admitted else {"reason": "unapproved_card_return"}))
                 if not admitted:
                     await route.abort("blockedbyclient")

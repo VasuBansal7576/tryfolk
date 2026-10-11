@@ -270,6 +270,8 @@ class DodoTarget:
         manifest = (await self.registration(_trace=trace))["manifest"]
         checks = {
             "current_target_revision": manifest.get("target_revision") == run["revision"],
+            "exact_run_source_commit": not run.get("source_commit") or manifest.get("source_commit") == run["source_commit"],
+            "exact_run_source_digest": not run.get("source_digest") or manifest.get("source_sha256") == run["source_digest"],
             "fixture_current_run": fixture.get("run_id") == run["id"],
             "fixture_current_revision": fixture.get("target_revision") == run["revision"],
             "approved_browser_API": observed.get("api_url") == BROWSER_API,

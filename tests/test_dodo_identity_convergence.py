@@ -258,3 +258,27 @@ async def test_native_response_capture_waits_for_same_identity_and_denies_docume
         assert capability.response_status == 'succeeded' and len(reads) == 3
     assert all(method == 'GET' for method, _ in calls)
     assert any(event.get('decision') == 'independent_native_identity_read' for event in guard.events)
+
+
+@pytest.mark.parametrize("field,new_value", [("source_commit", "c" * 40), ("source_sha256", "d" * 64)])
+async def test_fresh_callback_rejects_changed_admitted_run_source_pins_without_more_provider_reads(
+    monkeypatch, records, field, new_value
+):
+    def change(readiness, order, receipt):
+        readiness["manifest"][field] = new_value
+    target, observed, fixture, calls, reads = identity_fixture(monkeypatch, records, after_first=change)
+    result = await target.frame_context(
+        observed, {"id": "r", "revision": "rev", "source_commit": "a" * 40, "source_digest": "b" * 64}, fixture
+    )
+    assert result["approved"] is False
+    expected = "exact_run_source_commit" if field == "source_commit" else "exact_run_source_digest"
+    assert result["identity_diagnostics"]["reads"][-1]["first_failed_predicate"] == expected
+    assert len(reads) == 1 and len(calls) == 4
+
+
+async def test_matching_admitted_source_pins_use_existing_readiness_cycle_only(monkeypatch, records):
+    target, observed, fixture, calls, reads = identity_fixture(monkeypatch, records, mismatch_reads=0)
+    result = await target.frame_context(
+        observed, {"id": "r", "revision": "rev", "source_commit": "a" * 40, "source_digest": "b" * 64}, fixture
+    )
+    assert result["approved"] is True and len(calls) == 3

@@ -214,6 +214,11 @@ async def run(stack):
 
     async def download(item):
         if item.suggested_filename.endswith(".svg"):
+            if guard.card_attempt and guard.card_attempt.confirmed:
+                try:
+                    await guard.admit_owned_download(item)
+                except ValueError:
+                    return  # Guard retained the closed denial; no file evidence.
             await item.save_as(downloads / (uuid4().hex + ".svg"))
 
     network_page.on("download", download)
@@ -313,6 +318,9 @@ async def run(stack):
                     fresh_actions = []
                     if action.get("_tryfolk", {}).get("kind") == "billing_continue":
                         guard.expect_billing_continue(fresh_document)
+                    if guard.card_attempt and guard.card_attempt.confirmed and action.get("_tryfolk", {}).get("kind") in ("art_pack", "download"):
+                        boundary["call"] = "owned_navigation.prepare"
+                        await guard.prepare_owned_navigation(control["destination"])
                     if action.get("_tryfolk", {}).get("kind") == "pay":
                         await guard.arm_native_pay(completed_fields, completed_cards)
 
