@@ -133,11 +133,6 @@ class BrowserPolicy:
                 or (
                     destination.geturl() == self.origin + "/special-downloads"
                     and control.get("tag") == "A"
-                    and control.get("in_main") is True
-                    and re.fullmatch(
-                        r"(?:View your|Return to) art pack",
-                        str(control.get("label") or "").strip(),
-                    )
                 )
             )
             metadata["capability"] = bool(
