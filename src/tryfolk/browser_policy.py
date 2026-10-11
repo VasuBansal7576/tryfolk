@@ -123,6 +123,23 @@ class BrowserPolicy:
             if action.get("arguments"):
                 raise ValueError("A click cannot accept model arguments.")
             destination = urlsplit(control.get("destination") or url)
+            owned_return = (
+                self.provider == "dodo"
+                and exact_origin(url) == self.origin
+                and urlsplit(url).path == "/checkout/return"
+            )
+            art_pack = destination.path == "/special-downloads" and (
+                not owned_return
+                or (
+                    destination.geturl() == self.origin + "/special-downloads"
+                    and control.get("tag") == "A"
+                    and control.get("in_main") is True
+                    and re.fullmatch(
+                        r"(?:View your|Return to) art pack",
+                        str(control.get("label") or "").strip(),
+                    )
+                )
+            )
             metadata["capability"] = bool(
                 self.provider == "dodo"
                 and exact_origin(destination.geturl()) == self.origin
@@ -134,7 +151,7 @@ class BrowserPolicy:
                 else {"test-login": "login", "buy-art-pack": "purchase", "confirm-art-pack": "confirm"}.get(
                     control.get("id")
                 )
-                or ("art_pack" if destination.path == "/special-downloads" else "click")
+                or ("art_pack" if art_pack else "click")
             )
             if (
                 self.provider == "dodo"

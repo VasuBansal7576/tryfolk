@@ -46,7 +46,7 @@ def private_evidence(label, data):
 CONTROL_STATE = """(selector) => {
  const el = selector.startsWith('xpath=') ? document.evaluate(selector.slice(6), document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue : document.querySelector(selector);
  if (!el) return {present:false,reason:'missing_control'};
- return {present:true,visible:!!el.getClientRects().length && getComputedStyle(el).visibility!=='hidden',disabled:!!el.disabled || el.getAttribute('aria-disabled')==='true',tag:el.tagName,type:el.type,autocomplete:el.autocomplete,label:[...(el.labels || [])].map(x=>x.innerText).join(' ') || el.innerText || el.getAttribute('aria-label'),placeholder:el.placeholder,name:el.name,id:el.id,value:el.value,required:el.required,options:el.options ? [...el.options].map(x=>x.value):[],download:el.download,destination:el.href || el.formAction || el.form?.action || location.href,frame_url:location.href,frame_generation:performance.timeOrigin};
+ return {present:true,visible:!!el.getClientRects().length && getComputedStyle(el).visibility!=='hidden',disabled:!!el.disabled || el.getAttribute('aria-disabled')==='true',tag:el.tagName,type:el.type,autocomplete:el.autocomplete,label:[...(el.labels || [])].map(x=>x.innerText).join(' ') || el.innerText || el.getAttribute('aria-label'),in_main:!!el.closest('main'),placeholder:el.placeholder,name:el.name,id:el.id,value:el.value,required:el.required,options:el.options ? [...el.options].map(x=>x.value):[],download:el.download,destination:el.href || el.formAction || el.form?.action || location.href,frame_url:location.href,frame_generation:performance.timeOrigin};
 }"""
 
 
