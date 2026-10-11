@@ -453,6 +453,7 @@ async def run(stack):
                         "data": getattr(error, "data", None),
                         "traceback": traceback.format_exc(),
                         "observation_evidence": getattr(error, "observation_evidence", None),
+                        "settlement_diagnostics": getattr(error, "settlement_diagnostics", None),
                         "checkout_request_timing": checkout_timing.snapshot(),
                     },
                 )

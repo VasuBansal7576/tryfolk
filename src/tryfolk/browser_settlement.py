@@ -21,6 +21,24 @@ DOCUMENT_STATE = r"""(() => {const controls=[...document.querySelectorAll('butto
 })})()"""
 
 
+class SettlementDeadline(RuntimeError):
+    """Closed facts from existing reads, without guessing whether the click failed."""
+
+    def __init__(self, reason, operation, checks):
+        self.checks = dict(checks)
+        self.first_failed_predicate = "settlement_completed_within_bound"
+        self.settlement_diagnostics = {
+            "stage": "current_document_settlement",
+            "reason": reason,
+            "operation": operation,
+            "first_failed_predicate": self.first_failed_predicate,
+            "checks": self.checks,
+        }
+        super().__init__(
+            "Observed owned navigation or ready controls did not settle; ambiguous actions are not retried."
+        )
+
+
 async def settle(page, policy, action, *, timeout=10, previous_document=None):
     metadata = action.get("_tryfolk", {})
     kind = metadata.get("kind") if action.get("method") == "click" else None
@@ -31,26 +49,33 @@ async def settle(page, policy, action, *, timeout=10, previous_document=None):
         "pay": policy.origin + "/checkout/return",
     }.get(kind)
     deadline = asyncio.get_running_loop().time() + timeout
+    operation = "settlement_start"
+    checks = dict.fromkeys((
+        "destination_arrived", "document_observed", "document_URL_current", "document_ready",
+        "body_present", "visible_controls_present", "document_busy", "visible_error_observed",
+        "same_previous_document", "transition_changed", "snapshot_observed", "snapshot_nonempty",
+        "post_snapshot_document_observed", "post_snapshot_document_stable",
+        "post_snapshot_controls_stable", "settlement_completed_within_bound",
+    ), False)
+    checks["previous_document_available"] = bool(previous_document)
 
     def remaining():
         value = deadline - asyncio.get_running_loop().time()
         if value <= 0:
-            raise RuntimeError(
-                "Observed owned navigation or ready controls did not settle; ambiguous actions are not retried."
-            )
+            raise SettlementDeadline("deadline_exhausted", operation, checks)
         return value
 
-    async def read(operation):
+    async def read(name, reader):
+        nonlocal operation
+        operation = name
         budget = remaining()
         try:
-            return await asyncio.wait_for(operation(), budget)
+            return await asyncio.wait_for(reader(), budget)
         except TimeoutError as error:
-            raise RuntimeError(
-                "Observed owned navigation or ready controls did not settle; ambiguous actions are not retried."
-            ) from error
+            raise SettlementDeadline("observation_timed_out", operation, checks) from error
 
     while True:
-        url = await read(page.url)
+        url = await read("page_url", page.url)
         policy.check_url(url)
         arrived = (
             exact_origin(url) == DODO_CHECKOUT
@@ -59,9 +84,26 @@ async def settle(page, policy, action, *, timeout=10, previous_document=None):
             if expected
             else True
         )
+        checks["destination_arrived"] = arrived
         if arrived:
-            document = await read(lambda: page.evaluate(DOCUMENT_STATE))
+            document = await read("document_state", lambda: page.evaluate(DOCUMENT_STATE))
             policy.check_url(document["url"])
+            checks.update(
+                document_observed=True,
+                document_URL_current=document["url"] == url,
+                document_ready=document.get("ready_state") in ("interactive", "complete"),
+                body_present=bool(document.get("body_present")),
+                visible_controls_present=document.get("visible_controls", 0) > 0,
+                document_busy=bool(document.get("busy")),
+                visible_error_observed=document.get("error_signature") not in (None, "[]"),
+                same_previous_document=bool(previous_document) and all(
+                    document.get(key) == previous_document.get(key) for key in ("url", "generation")
+                ),
+                transition_changed=not previous_document or any(
+                    document.get(key) != previous_document.get(key)
+                    for key in ("url", "generation", "control_signature", "error_signature")
+                ),
+            )
             # Do not let an in-progress document swap satisfy the previous URL.
             if (
                 document["url"] == url
@@ -78,12 +120,23 @@ async def settle(page, policy, action, *, timeout=10, previous_document=None):
                     )
                 )
             ):
-                snapshot = await read(lambda: page.snapshot(include_iframes=True, timeout=remaining() * 1000))
+                snapshot = await read(
+                    "page_snapshot", lambda: page.snapshot(include_iframes=True, timeout=remaining() * 1000)
+                )
                 tree = snapshot.formatted_tree
-                current = await read(page.url)
+                checks.update(snapshot_observed=True, snapshot_nonempty=bool(tree.strip()))
+                current = await read("final_page_url", page.url)
                 policy.check_url(current)
-                after = await read(lambda: page.evaluate(DOCUMENT_STATE))
+                after = await read("final_document_state", lambda: page.evaluate(DOCUMENT_STATE))
                 policy.check_url(after["url"])
+                checks.update(
+                    post_snapshot_document_observed=True,
+                    post_snapshot_document_stable=current == url == after["url"]
+                    and document.get("generation") == after.get("generation"),
+                    post_snapshot_controls_stable=not after.get("busy")
+                    and document.get("control_signature") == after.get("control_signature")
+                    and document.get("error_signature") == after.get("error_signature"),
+                )
                 if (
                     tree.strip()
                     and current == url == after["url"]
@@ -108,4 +161,5 @@ async def settle(page, policy, action, *, timeout=10, previous_document=None):
                         if transition and document.get("error_signature") not in (None, "[]")
                         else "ready",
                     }
+        operation = "settlement_pause"
         await asyncio.sleep(min(0.05, remaining()))

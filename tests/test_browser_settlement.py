@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 import asyncio
+import json
 import pytest
 from tryfolk.browser_policy import BrowserPolicy
 from tryfolk.browser_settlement import settle
@@ -47,6 +48,125 @@ async def test_field_write_finishes_with_current_document_even_when_hosted_netwo
     assert result["url"] == "https://test.checkout.dodopayments.com/session/test-only"
     assert result["readiness_source"] == "stagehand_current_document_and_snapshot"
     assert page.waits == []
+
+
+@pytest.mark.parametrize("condition", ["unchanged", "busy", "no_controls", "loading"])
+async def test_continue_deadline_retains_closed_observed_state_without_claiming_click_failure(condition):
+    policy = BrowserPolicy("http://127.0.0.1:3300", "dodo")
+    url = "https://test.checkout.dodopayments.com/session/private-fixture"
+    previous = {"url": url, "generation": 1, "control_signature": "private billing fixture",
+                "error_signature": "[]"}
+    state = previous | {"ready_state": "complete", "body_present": True,
+                        "visible_controls": 3, "busy": False, "error_signature": "[]"}
+    if condition != "unchanged":
+        state["control_signature"] = "private changed fixture"
+    if condition == "busy":
+        state.update(busy=True, error_signature='["private validation fixture"]')
+    elif condition == "no_controls":
+        state["visible_controls"] = 0
+    elif condition == "loading":
+        state["ready_state"] = "loading"
+    page = Page([url])
+
+    async def evaluate(_):
+        return dict(state)
+
+    page.evaluate = evaluate
+    with pytest.raises(RuntimeError) as caught:
+        await settle(page, policy, {"method": "click", "_tryfolk": {"kind": "billing_continue"}},
+                     timeout=0.01, previous_document=previous)
+    diagnostic = getattr(caught.value, "settlement_diagnostics", None)
+    assert diagnostic is not None, "The actual settlement deadline must retain its finite boundary"
+    assert diagnostic["reason"] == "deadline_exhausted"
+    assert diagnostic["stage"] == "current_document_settlement"
+    assert diagnostic["first_failed_predicate"] == "settlement_completed_within_bound"
+    assert diagnostic["checks"]["document_observed"] is True
+    assert diagnostic["checks"]["same_previous_document"] is True
+    assert diagnostic["checks"]["transition_changed"] is (condition != "unchanged")
+    assert diagnostic["checks"]["document_busy"] is (condition == "busy")
+    assert diagnostic["checks"]["visible_error_observed"] is (condition == "busy")
+    assert diagnostic["checks"]["visible_controls_present"] is (condition != "no_controls")
+    assert diagnostic["checks"]["document_ready"] is (condition != "loading")
+    assert all(type(value) is bool for value in diagnostic["checks"].values())
+    assert "private" not in json.dumps(diagnostic) and url not in str(caught.value)
+
+
+@pytest.mark.parametrize("blocked_read", ["page_url", "page_snapshot", "final_page_url"])
+async def test_settlement_read_timeout_retains_exact_operation_and_prior_observations(blocked_read):
+    policy = BrowserPolicy("http://127.0.0.1:3300", "dodo")
+    page = Page([policy.origin + "/special-downloads"])
+    original_url, original_snapshot = page.url, page.snapshot
+    calls = 0
+
+    async def url():
+        nonlocal calls
+        calls += 1
+        if (blocked_read == "page_url" and calls == 1) or (blocked_read == "final_page_url" and calls == 2):
+            await asyncio.sleep(1)
+        return await original_url()
+
+    async def snapshot(include_iframes, timeout=None):
+        if blocked_read == "page_snapshot":
+            await asyncio.sleep(1)
+        return await original_snapshot(include_iframes, timeout)
+
+    page.url, page.snapshot = url, snapshot
+    with pytest.raises(RuntimeError) as caught:
+        await settle(page, policy, {"method": "click"}, timeout=0.01)
+    diagnostic = getattr(caught.value, "settlement_diagnostics", None)
+    assert diagnostic is not None
+    assert diagnostic["reason"] == "observation_timed_out"
+    assert diagnostic["operation"] == blocked_read
+    assert diagnostic["checks"]["document_observed"] is (blocked_read != "page_url")
+    assert diagnostic["checks"]["snapshot_observed"] is (blocked_read == "final_page_url")
+    assert isinstance(caught.value.__cause__, TimeoutError)
+
+
+async def test_settlement_preserves_original_non_timeout_sdk_exception_and_cancellation():
+    policy = BrowserPolicy("http://127.0.0.1:3300", "dodo")
+    page = Page([policy.origin + "/special-downloads"])
+    original_error = RuntimeError("private external SDK fixture")
+
+    async def failure():
+        raise original_error
+
+    page.url = failure
+    with pytest.raises(RuntimeError) as caught:
+        await settle(page, policy, {"method": "click"}, timeout=0.05)
+    assert caught.value is original_error
+    assert not hasattr(caught.value, "settlement_diagnostics")
+
+    async def cancel():
+        raise asyncio.CancelledError
+
+    page.url = cancel
+    with pytest.raises(asyncio.CancelledError):
+        await settle(page, policy, {"method": "click"}, timeout=0.05)
+
+
+async def test_settlement_success_keeps_stable_validation_state_and_original_read_sequence():
+    policy = BrowserPolicy("http://127.0.0.1:3300", "dodo")
+    page = Page([policy.origin + "/special-downloads"])
+    calls = []
+    original_url, original_evaluate, original_snapshot = page.url, page.evaluate, page.snapshot
+
+    async def url():
+        calls.append("url")
+        return await original_url()
+
+    async def evaluate(expression):
+        calls.append("document")
+        return await original_evaluate(expression) | {"error_signature": '["private validation fixture"]'}
+
+    async def snapshot(include_iframes, timeout=None):
+        calls.append("snapshot")
+        return await original_snapshot(include_iframes, timeout)
+
+    page.url, page.evaluate, page.snapshot = url, evaluate, snapshot
+    result = await settle(page, policy, {"method": "click", "_tryfolk": {"kind": "confirm"}},
+                          timeout=0.1, previous_document={"control_signature": "previous"})
+    assert result["transition_state"] == "error"
+    assert calls == ["url", "document", "snapshot", "url", "document"]
 
 
 async def test_stable_visible_transition_error_is_reported_and_old_idle_form_is_not_ready():
