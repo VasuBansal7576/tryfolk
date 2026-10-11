@@ -77,6 +77,7 @@ export const seedBindingSchema = z.object({
 const scenarioAssignmentSchema = z.object({
   persona_index: count, catalog_version: z.string(), catalog_sha256: z.string(),
   scenario_id: z.string(), scenario_sha256: z.string(), scenario_snapshot: scenarioSchema,
+  scenario_snapshot_json: z.string().optional(), source_refs_snapshot: z.array(z.unknown()).optional(),
   condition_fixture_snapshot: z.record(z.string(), z.string()).optional(), condition_fixture_sha256: z.string().optional(),
   condition_fixture_verified: z.literal(false).optional(), seed: seedBindingSchema.optional(),
 });
@@ -98,6 +99,7 @@ const implementedSelectionRationaleSchema = z.object({
 export const selectionRationaleSchema = z.union([implementedSelectionRationaleSchema, draftSelectionRationaleSchema]);
 export const scenarioPlanSchema = z.object({
   catalog_version: z.string(), catalog_sha256: z.string(), assignments: z.array(scenarioAssignmentSchema),
+  catalog_source_sha256: z.string().optional(),
   requested_personas: count, does_not_imply_exercised_coverage: z.literal(true),
   catalog_case_count: count.optional(), selection_rationale: selectionRationaleSchema.optional(),
 });

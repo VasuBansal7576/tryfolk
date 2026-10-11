@@ -49,9 +49,16 @@ export const gates = (items: Gate[]): string => items.length ? `<div class="gate
 export function redact(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redact);
   if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
-      /password|secret|authorization|cookie|access_token|api_key|credential/i.test(key) ? '[redacted]' : redact(item),
-    ]));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+      if (/password|secret|authorization|cookie|access_token|api_key|credential/i.test(key)) return [key, '[redacted]'];
+      // The canonical snapshot is JSON encoded inside the response JSON. Parse
+      // that known field before redaction, including in downloadable reports.
+      if (key === 'scenario_snapshot_json' && typeof item === 'string') {
+        try { return [key, JSON.stringify(redact(JSON.parse(item)))]; }
+        catch { return [key, '[unavailable canonical scenario record]']; }
+      }
+      return [key, redact(item)];
+    }));
   }
   return value;
 }

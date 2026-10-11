@@ -3,6 +3,7 @@ import test from 'node:test';
 import { runSchema, scenarioCatalogSchema, scenarioResultSchema } from '../src/contracts.ts';
 import { renderPersonaDetail, renderSeedProvenance } from '../src/persona-detail.ts';
 import { renderScenarioCoverage, renderSelectionRationale } from '../src/scenario-coverage.ts';
+import { redact } from '../src/presentation.ts';
 import { person, savedRun } from './persona-inputs.mjs';
 
 globalThis.window = { location: { origin: 'http://127.0.0.1:5173' } };
@@ -24,6 +25,7 @@ const seed = {
 };
 const assignment = { persona_index: 0, catalog_version: 'test-only-catalog-v1', catalog_sha256: 'test-only-catalog-hash',
   scenario_id: scenario.id, scenario_sha256: 'test-only-case-hash', scenario_snapshot: scenario,
+  scenario_snapshot_json: JSON.stringify(scenario), source_refs_snapshot: [{ source: 'TEST ONLY accepted source reference' }],
   condition_fixture_snapshot: { billing_country: 'TEST ONLY explicit fixture country' }, condition_fixture_sha256: 'test-only-condition-hash', condition_fixture_verified: false, seed,
   saved_persona_sha256: 'test-only-saved-person-hash', profile_sha256: 'test-only-profile-hash', initial_memory_sha256: 'test-only-memory-hash',
   profile_relevance_rationale: { basis: 'constrained_TinyTroupe_generation', customer_goal: 'TEST ONLY generated purchase goal', customer_context: { relevance: 'TEST ONLY constrained profile context' }, seed_id: seed.id, measured_relevance: false } };
@@ -34,7 +36,7 @@ const rationale = { mode: 'automatic_capability_risk', policy_version: 'supporte
 const observed = { classification: 'not_exercised', condition_fixture_verified: false, journey_outcome: 'failed', journey_classification: 'paid_without_access',
   measured: false, payment_verified: true, entitlement_verified: false, capability_checked: true, capability_available: false, evidence_event_ids: [1], exercise_gate: 'TEST ONLY scenario fixture binding not implemented' };
 const makeRun = (extra = {}) => savedRun({ personas: [{ ...person, profile: { goal: 'TEST ONLY actual generated profile goal' }, assigned_scenario: assignment }],
-  scenario_plan: { catalog_version: 'test-only-catalog-v1', catalog_sha256: 'test-only-catalog-hash', catalog_case_count: 2, requested_personas: 1,
+  scenario_plan: { catalog_version: 'test-only-catalog-v1', catalog_sha256: 'test-only-catalog-hash', catalog_source_sha256: 'test-only-catalog-source-hash', catalog_case_count: 2, requested_personas: 1,
     assignments: [assignment], does_not_imply_exercised_coverage: true, selection_rationale: rationale },
   scenario_coverage: { catalog_case_count: 2, requested_personas: 1, assigned_case_ids: [scenario.id], exercised_case_ids: [],
     counting_basis: 'actual_saved_persona_journeys', whole_catalog_coverage_claimed: false,
@@ -47,6 +49,9 @@ test('implemented core204 records parse and display frozen seed/source hashes an
   assert.ok(html.includes('test-only-source-revision'));
   assert.ok(html.includes('test-only-source-row-hash'));
   assert.ok(html.includes('test-only-record-hash'));
+  assert.ok(html.includes('test-only-catalog-source-hash'));
+  assert.ok(html.includes('TEST ONLY accepted source reference'));
+  assert.equal(run.personas[0].assigned_scenario.scenario_snapshot_json, JSON.stringify(scenario));
   assert.ok(html.includes('TEST ONLY attribution'));
   assert.ok(html.includes('TEST ONLY constrained profile context'));
   assert.ok(html.includes('TEST ONLY actual generated profile goal'));
@@ -94,4 +99,19 @@ test('frozen before/after seed provenance is unaffected by current catalog or ba
   assert.ok(renderSeedProvenance(undefined).includes('Unknown'));
   assert.ok(renderSeedProvenance({ ...seed, id: 'test-only-mismatched-binding' }).includes('Unknown'));
   assert.ok(renderSelectionRationale(before.scenario_plan).includes('TEST ONLY artwork purchase'));
+});
+
+test('contract212 canonical scenario JSON stays escaped and credential fields are redacted before displaying parsed values', () => {
+  const run = makeRun();
+  run.personas[0].assigned_scenario.scenario_snapshot_json = JSON.stringify({ goal: '<img src=x onerror="testOnlyXss=1">', api_key: 'TEST ONLY FIELD THAT MUST BE REDACTED' });
+  const saved = structuredClone(run);
+  const html = renderPersonaDetail(run, run.personas[0]);
+  assert.ok(html.includes('Saved canonical scenario record'));
+  assert.ok(!html.includes('<img src=x'));
+  assert.ok(!html.includes('TEST ONLY FIELD THAT MUST BE REDACTED'));
+  assert.ok(html.includes('[redacted]'));
+  assert.ok(!JSON.stringify(redact(run)).includes('TEST ONLY FIELD THAT MUST BE REDACTED'));
+  assert.deepEqual(run, saved);
+  run.personas[0].assigned_scenario.scenario_snapshot_json = 'TEST ONLY INVALID JSON';
+  assert.ok(renderPersonaDetail(run, run.personas[0]).includes('saved canonical scenario record is unavailable'));
 });

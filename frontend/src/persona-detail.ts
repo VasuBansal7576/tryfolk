@@ -39,6 +39,14 @@ export function renderSeedProvenance(seed: SavedScenario['seed']): string {
     <details class="record" data-record="accepted-seed"><summary>Accepted synthetic seed context and admission declarations</summary>${readable(seed.record_snapshot)}<p class="small muted">Declared admission checks do not establish human realism, payment behavior or exercised case coverage.</p></details>`;
 }
 
+function canonicalScenario(value: string | undefined): string {
+  if (value === undefined) return '';
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return `<details class="record" data-record="canonical-scenario"><summary>Saved canonical scenario record</summary>${readable(parsed)}</details>`;
+  } catch { return '<p class="small muted">The saved canonical scenario record is unavailable. Its readable snapshot remains above.</p>'; }
+}
+
 export function personaOutcome(events: RunEvent[]): string {
   for (const event of [...events].reverse()) {
     if (typeof event.data.outcome === 'string') return humanize(event.data.outcome);
@@ -84,12 +92,14 @@ export function renderPersonaDetail(current: Run, person: Persona): string {
     availability: scenario?.availability, required_capabilities: scenario?.required_capabilities,
     provider_support: scenario?.provider_support, verification_boundary: scenario?.verification_boundary,
     evidence_requirements: scenario?.evidence_requirements, source_refs: scenario?.source_refs,
+    accepted_source_refs: assignment.source_refs_snapshot,
+    catalog_source_sha256: current.scenario_plan?.catalog_source_sha256,
     catalog_sha256: assignment.catalog_sha256, scenario_sha256: assignment.scenario_sha256,
     profile_sha256: assignment.profile_sha256, initial_memory_sha256: assignment.initial_memory_sha256,
     condition_fixture_sha256: assignment.condition_fixture_sha256,
     condition_fixture_snapshot: assignment.condition_fixture_snapshot,
     saved_persona_sha256: assignment.saved_persona_sha256,
-  })}</details>` : '';
+  })}${canonicalScenario(assignment.scenario_snapshot_json)}</details>` : '';
   const observedVerification = result ? section('Reported journey and scenario verification', `
     <p class="small muted">${result.measured ? 'Measured provider evidence' : 'Fixture or unmeasured evidence'} · ${escape(humanize(result.classification))}</p>
     ${readable({ payment_verified: result.payment_verified, entitlement_verified: result.entitlement_verified,
