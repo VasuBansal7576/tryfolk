@@ -34,6 +34,8 @@ ADAPTER_FILES = (
     "src/tryfolk/native_card_observation.py",
     "src/tryfolk/native_read_observation.py",
     "src/tryfolk/payment_privacy.py",
+    "src/tryfolk/checkout_discovery.py",
+    "src/tryfolk/manual_address.py",
 )
 
 

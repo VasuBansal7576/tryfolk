@@ -39,6 +39,7 @@ REJECTIONS = (
     "policy_bind_rejected", "outside_field_contract", "completed_field",
     "prior_completion_currently_unverified",
     "already_clicked", "billing_completion_missing", "pay_prerequisites_missing",
+    "manual_fields_already_visible",
     "secure_child_pay_control", "other_control",
     *POLICY_REJECTIONS.values(),
 )
@@ -58,6 +59,7 @@ class CandidateDiscovery:
     observed_fields: set
     observed_completion: set
     current_completion_conflicts: set
+    observed_manual_variants: set
     eligible_counts: dict
     rejection_counts: dict
 
@@ -74,6 +76,8 @@ class CandidateDiscovery:
             "observed_fields": completion_flags(self.observed_fields),
             "observed_completion": completion_flags(self.observed_completion),
             "current_completion_conflicts": completion_flags(self.current_completion_conflicts),
+            "manual_controls_observed": {variant: variant in self.observed_manual_variants for variant in
+                                         ("enter_manually", "enter_address_manually")},
             "completion_after_pass": completion_flags(self.filled),
             "committed_completion": completion_flags(self.filled if stable else self.initial_filled),
         }
@@ -89,6 +93,7 @@ async def discover_checkout_candidates(
         candidates=[], filled=set(filled), completed_cards=dict(completed_cards),
         phase=phase, initial_filled=set(filled), observed_fields=set(),
         observed_completion=set(), current_completion_conflicts=set(),
+        observed_manual_variants=set(),
         eligible_counts={kind: 0 for kind in ELIGIBLE_KINDS},
         rejection_counts={reason: 0 for reason in REJECTIONS},
     )
@@ -166,14 +171,20 @@ async def discover_checkout_candidates(
                 reject("billing_completion_missing")
                 continue
             priority, eligible = 8, kind
-        elif kind == "click" and re.fullmatch(
-            r"enter address manually", str(control.get("label") or "").strip(), re.I,
+        elif kind == "click" and control.get("tag") == "BUTTON" and re.fullmatch(
+            r"enter (?:address )?manually", str(control.get("label") or "").strip(), re.I,
         ):
+            variant = (
+                "enter_manually" if str(control["label"]).strip().lower() == "enter manually"
+                else "enter_address_manually"
+            )
+            result.observed_manual_variants.add(variant)
             if "manual" in clicked:
                 reject("already_clicked")
                 continue
             priority, eligible = 3, "manual"
             action["_tryfolk"]["diagnostic_manual"] = True
+            action["_tryfolk"]["manual_variant"] = variant
         elif kind == "pay" and not pay_actions:
             if "/iframe[" in selector:
                 reject("secure_child_pay_control")
@@ -189,6 +200,13 @@ async def discover_checkout_candidates(
             continue
         result.candidates.append((priority, action))
         result.eligible_counts[eligible] += 1
+    # Current visible fields prove an open form independently of click history.
+    # Apply after the full pass so AX/control order cannot affect this decision.
+    if {"city", "state", "postal"} <= result.observed_fields:
+        manual = [a for _, a in result.candidates if a["_tryfolk"].get("diagnostic_manual")]
+        result.candidates = [(p, a) for p, a in result.candidates if a not in manual]
+        result.eligible_counts["manual"] -= len(manual)
+        result.rejection_counts["manual_fields_already_visible"] += len(manual)
     return result
 
 

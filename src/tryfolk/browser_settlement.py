@@ -7,6 +7,8 @@ from .browser_policy import DODO_CHECKOUT, exact_origin
 DOCUMENT_STATE = r"""(() => {const controls=[...document.querySelectorAll('button,input:not([type=hidden]),select,textarea,a[href]')]
  .filter(el=>el.getClientRects().length && getComputedStyle(el).visibility!=='hidden');return ({
  url:location.href,generation:performance.timeOrigin,ready_state:document.readyState,body_present:!!document.body,
+ hosted_test_mode_visible:[...document.querySelectorAll('span,div')].some(el=>
+  el.getClientRects().length && getComputedStyle(el).visibility!=='hidden' && el.innerText.trim()==='Test Mode'),
  visible_controls:controls.length,
  busy:controls.some(el=>el.getAttribute('aria-busy')==='true' ||
   (el.tagName==='BUTTON' && (el.disabled || el.getAttribute('aria-disabled')==='true') && /^(processing|loading|please wait)\b/i.test(el.innerText.trim()))),

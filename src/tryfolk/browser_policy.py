@@ -146,6 +146,17 @@ class BrowserPolicy:
                 self.provider == "dodo"
                 and exact_origin(url) == DODO_CHECKOUT
                 and control.get("tag") == "BUTTON"
+                and re.fullmatch(r"enter (?:address )?manually", str(control.get("label") or "").strip(), re.I)
+            ):
+                metadata["diagnostic_manual"] = True
+                metadata["manual_variant"] = (
+                    "enter_manually" if str(control["label"]).strip().lower() == "enter manually"
+                    else "enter_address_manually"
+                )
+            if (
+                self.provider == "dodo"
+                and exact_origin(url) == DODO_CHECKOUT
+                and control.get("tag") == "BUTTON"
                 and control.get("id") == "step1"
                 and re.fullmatch(r"continue\s+to\s+payment", str(control.get("label") or "").strip(), re.I)
             ):

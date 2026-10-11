@@ -30,6 +30,8 @@ from tryfolk.checkout_timing import CheckoutTiming
 from tryfolk.browser_events import EventCapture
 from tryfolk.payment_privacy import redact_payment
 from tryfolk.native_read_observation import NativeControlReads
+from tryfolk.checkout_discovery import discover_checkout_candidates
+from tryfolk.manual_address import resolve_manual_address, wait_for_billing_initialization
 
 
 def private_evidence(label, data):
@@ -58,6 +60,19 @@ async def control_state(page, selector, network_page=None, guard=None, *, diagno
             diagnostic(evidence)
         error.control_observation = evidence
         raise
+
+
+async def read_manual_current(page, network_page, guard, *, completed_fields=frozenset()):
+    """No inference/action; freshly resolve native controls and current generation."""
+    before = await page.evaluate(DOCUMENT_STATE)
+    snapshot = (await page.snapshot(include_iframes=True, timeout=10000)).model_dump(mode="json")
+    discovery = await discover_checkout_candidates(
+        snapshot, lambda selector: control_state(page, selector, network_page, guard),
+        guard.policy, before["url"], filled=completed_fields, completed_cards={}, clicked=set(),
+        executed_fields=completed_fields, phase="primary_billing",
+    )
+    after = await page.evaluate(DOCUMENT_STATE)
+    return discovery, after | {"document_stable": same_document(before, after)}
 
 
 async def _control_state_read(page, selector, network_page, guard, trace):
@@ -207,6 +222,7 @@ async def run(stack):
     fresh_actions = []
     fresh_document = None
     completed_fields, completed_cards = set(), {}
+    billing_initialized_binding = None
     try:
         while command := await commands.get():
             boundary = {"op": command.get("op"), "call": "dispatch"}
@@ -227,6 +243,19 @@ async def run(stack):
                     data = {"url": ready["url"], "settlement": ready}
                 elif op == "observe":
                     fresh_actions, fresh_document = [], None
+                    observation_deadline = asyncio.get_running_loop().time() + 170
+                    current_document = await page.evaluate(DOCUMENT_STATE)
+                    if (
+                        policy.provider == "dodo"
+                        and exact_origin(current_document["url"]) == DODO_CHECKOUT
+                        and billing_initialized_binding != (
+                            current_document["url"], current_document.get("generation")
+                        )
+                    ):
+                        initialized = await wait_for_billing_initialization(
+                            lambda: page.evaluate(DOCUMENT_STATE), policy, deadline=observation_deadline,
+                        )
+                        billing_initialized_binding = initialized["url"], initialized.get("generation")
 
                     async def infer():
                         boundary["call"] = "stagehand.observe"
@@ -249,7 +278,10 @@ async def run(stack):
                         boundary.update(call="control_state", selector=selector)
                         return await control_state(page, selector, network_page, guard)
 
-                    data = await observe_fresh(page, policy, infer, metadata)
+                    data = await observe_fresh(
+                        page, policy, infer, metadata,
+                        timeout=max(0, observation_deadline - asyncio.get_running_loop().time()),
+                    )
                     fresh_actions, fresh_document = data["actions"], data["document"]
                     data["freshness"]["evidence_path"] = private_evidence("freshness", data["freshness"])
                 elif op == "act":
@@ -295,6 +327,25 @@ async def run(stack):
                     data = (await stagehand.act(sdk_action, page=page, timeout=10000)).model_dump(mode="json")
                     if not data.get("data", {}).get("success"):
                         raise RuntimeError("Stagehand did not execute the observed action successfully.")
+                    if action.get("_tryfolk", {}).get("diagnostic_manual"):
+                        # Current public source bytes are not registered in the runtime.
+                        # Verify the first click's effect; no automatic second click.
+                        boundary["call"] = "manual_address_effect_verification"
+                        events = []
+
+                        async def forbidden_repeat(_):
+                            raise RuntimeError("Unregistered native manual source cannot repeat an action.")
+
+                        _, verified_document = await resolve_manual_address(
+                            lambda: read_manual_current(
+                                page, network_page, guard, completed_fields=completed_fields,
+                            ), forbidden_repeat, policy, source_sha256=None,
+                            deadline=asyncio.get_running_loop().time() + 10,
+                            executed=(action, fresh_document), on_event=events.append,
+                        )
+                        data["manual_effect"] = {"verified": True, "events": events,
+                                                "generation_current": verified_document.get("generation")
+                                                == fresh_document.get("generation")}
                     # Hosted autocomplete/telemetry need not become idle after a fill.
                     # Wait for known app/checkout navigation, with an exact-origin check.
                     boundary["call"] = "current_document_settlement"
