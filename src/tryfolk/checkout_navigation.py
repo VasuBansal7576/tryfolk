@@ -186,3 +186,43 @@ class CheckoutNavigation:
             "creation_customization_hides_order_details": flags_available and flags["hide_order_details"],
             "creation_customization_hides_on_demand_tag": flags_available and flags["hide_on_demand_tag"],
         }
+
+    def parent_query_facts(self, document):
+        """Known parameter booleans and unrelated counts, never names/values.
+
+        Query observations are diagnostics, not evidence of effective hosted
+        customization and not a substitute for complete private URL equality.
+        """
+        known = {"from": "from", "order_details": "showOrderDetails", "on_demand_tag": "showOnDemandTag"}
+        urls = {"entry": self.entry_url, "derived": (self.transition or {}).get("parent_url"),
+                "current": document.get("url")}
+        available = {role: valid_test_link(url) for role, url in urls.items()}
+        pairs = {role: parse_qsl(urlsplit(url).query, keep_blank_values=True) if available[role] else []
+                 for role, url in urls.items()}
+        unrelated = {role: [pair for pair in items if pair[0] not in known.values()]
+                     for role, items in pairs.items()}
+
+        def values(role, name):
+            return [value for key, value in pairs[role] if key == name]
+
+        checks = {role + "_query_available": valid for role, valid in available.items()}
+        for label, name in known.items():
+            for role in urls:
+                items = values(role, name)
+                checks[role + "_" + label + "_present"] = bool(items)
+                if label == "from":
+                    checks[role + "_from_session_exact"] = items == ["session"]
+                else:
+                    checks[role + "_" + label + "_explicit_false"] = items == ["false"]
+            expected, current = values("derived", name), values("current", name)
+            checks["derived_current_" + label + "_values_equal"] = bool(expected) and bool(current) and expected == current
+        for role in ("derived", "current"):
+            bound = available["entry"] and available[role]
+            checks[role + "_original_unrelated_pairs_retained"] = bound and sorted(unrelated["entry"]) == sorted(unrelated[role])
+            checks[role + "_original_unrelated_pair_order_retained"] = bound and unrelated["entry"] == unrelated[role]
+        return {
+            "checks": checks,
+            "counts": {key: count for role, items in unrelated.items()
+                       for key, count in ((role + "_unrelated_pairs", len(items)),
+                                          (role + "_unrelated_names", len({key for key, _ in items})))},
+        }
