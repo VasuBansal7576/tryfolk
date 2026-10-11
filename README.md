@@ -99,6 +99,15 @@ checks. Creation customization flags remain distinct from observed effective hos
 `showOnDemandTag`, plus unrelated pair/name counts and original pair order. Unrelated
 names and all parameter values stay private.
 
+A separately pinned, currently captured layout bundle can replace the payment query
+with a single browser-local `session` key. That route is admitted only when a fresh
+read of its bounded session-storage object equals the exact query object produced
+by the reviewed billing transition, with the same payment path and original document
+generation. The key is not payment authority. The full resolved URL, key, serialized
+map and generation are frozen at arm and rechecked at confirmation. Unknown source,
+missing storage, extra query keys and changed maps stay gated. Events retain only
+boolean `normalization_checks`; raw keys and maps never enter evidence or model input.
+
 The sole repair source seam is `lib/fulfillment-policy.ts`; immutable public regressions must turn red to green under the original broken configuration. The worker verifies the protected export contract, actual Codex/Entire source association, fixed checks and an exact commit/digest production preview. Known replay uses the actual failed saved profile, fresh identity and freshly observed equivalent controls, then runs all original N profiles. Separate unpaid access and duplicate confirmation controls create no extra provider checkout. Source ownership, registration, replay binding and cancellation have unit checks. A genuine Stagehand local iframe probe confirms its supported cross-frame snapshot/input APIs without model or provider calls. The Dodo browser/persona repair cycle remains unverified until executed and independently correlated. Retain each fixture result's separate provenance.
 
 Allowance consumption is an economic scheduling estimate. Authenticated Codex allowance,

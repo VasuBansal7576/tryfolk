@@ -183,3 +183,65 @@ async def test_fresh_confirmation_rechecks_frozen_parent_even_for_owned_return(m
     assert "parent_equality_facts" in guard.events[-1]
     assert "parent_query_facts" in guard.events[-1]
     assert PARENT not in json.dumps(guard.events[-1])
+
+
+async def normalized_admission_fixture(monkeypatch):
+    from tryfolk.checkout_navigation import BILLING_SOURCE_SHA256, NORMALIZER_SOURCE_SHA256, READ_NORMALIZATION_STATE
+    guard, page, child, state, identity, cards = await admission_fixture(monkeypatch)
+    nav = guard.checkout_navigation
+    nav.customization = {"hide_order_details": False, "hide_on_demand_tag": False}
+    entry = {"url": PARENT, "generation": 1000, "body_present": True, "ready_state": "complete"}
+    nav.observe_source(BILLING_SOURCE_SHA256, entry)
+    nav.observe_source(NORMALIZER_SOURCE_SHA256, entry)
+    assert nav.expect_continue(entry)
+    assert nav.bind_submission(DODO_CHECKOUT + '/api/checkout/sessions/cks_fixture/confirm', '{"mode":"test","data":{}}', entry)
+    identity["payment_link"] = DODO_CHECKOUT + "/Private1"
+    assert nav.observe_response(json.dumps({"payment_link": identity["payment_link"]}).encode(), entry)
+    state["storage_key"], state["storage_value"] = "sess_Abc123xyZ9", '{"from":"session"}'
+    page.main_frame.url = identity["payment_link"] + "?session=" + state["storage_key"]
+    original = page.evaluate
+
+    async def evaluate(script):
+        if script == READ_NORMALIZATION_STATE:
+            return {"url": page.main_frame.url, "generation": state.get("parent_generation", 1000),
+                    "storage_key": state["storage_key"], "storage_value": state["storage_value"]}
+        return await original(script)
+
+    page.evaluate = evaluate
+    return guard, page, child, state, identity, cards
+
+
+async def test_native_arm_requires_fresh_normalizer_storage_and_freezes_private_map(monkeypatch):
+    guard, page, child, state, identity, cards = await normalized_admission_fixture(monkeypatch)
+    await guard.arm_native_pay(FIELDS, cards)
+    assert guard.card_attempt.parent_url == page.main_frame.url
+    assert guard.checkout_navigation._armed_normalization is not None
+    assert all(guard.events[-1]["normalization_checks"].values())
+    assert all(guard.events[-1]["arm_admission_checks"].values())
+    assert state["storage_key"] not in json.dumps(guard.events[-1])
+    assert state["storage_value"] not in json.dumps(guard.events[-1])
+
+
+@pytest.mark.parametrize("mutation", ["key", "map", "map_encoding", "generation", "normalizer_source"])
+async def test_fresh_confirmation_rejects_changed_normalization_with_all_original_identity_checks(monkeypatch, mutation):
+    guard, page, child, state, identity, cards = await normalized_admission_fixture(monkeypatch)
+    await guard.arm_native_pay(FIELDS, cards)
+    state["native"].update(return_source="CONFIRM", return_url=guard.policy.origin + "/checkout/return")
+    if mutation == "key":
+        state["storage_key"] = "sess_Other12345"
+        page.main_frame.url = identity["payment_link"] + "?session=" + state["storage_key"]
+    elif mutation == "map":
+        state["storage_value"] = '{"from":"other"}'
+    elif mutation == "map_encoding":
+        state["storage_value"] = '{ "from": "session" }'
+    elif mutation == "generation":
+        state["parent_generation"] = 2000
+    else:
+        guard.checkout_navigation.normalizer_generation = 2000
+    request = SimpleNamespace(url=BROWSER_API + "/payments/pay_fixture/confirm", method="POST", resource_type="fetch",
+                              post_data="{}", redirected_from=None, is_navigation_request=lambda: False)
+    with pytest.raises(ValueError, match="Native confirmation parent failed"):
+        await guard.bind_api(request, {}, child)
+    assert guard.card_attempt.confirmed is False
+    assert guard.events[-1]["binding_checks"]["owned_normalization_still_armed"] is False
+    assert state["storage_key"] not in json.dumps(guard.events[-1])

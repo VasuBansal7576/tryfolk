@@ -11,6 +11,18 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, quote
 from .browser_policy import DODO_CHECKOUT
 
 BILLING_SOURCE_SHA256 = "594824753cd5c68673c5719ec09a77477991381b992f82f1b2542fc44fda0895"
+NORMALIZER_SOURCE_SHA256 = "174be265126b29a5d7344bb545876bf50ba35f8bf816bc9858db998ef1ced24f"
+
+# Server-only current-document read. Never include its result in SDK/model or
+# evidence payloads; retain only normalization_checks, not this private map.
+READ_NORMALIZATION_STATE = r"""() => {
+  const url=location.href, generation=performance.timeOrigin, parsed=new URL(url);
+  const key=parsed.searchParams.get('session');
+  let value=null;
+  try { if(key && /^sess_[A-Za-z0-9]{10}$/.test(key)) value=sessionStorage.getItem(key); } catch {}
+  return {url,generation,storage_key:key && key.length<=64?key:null,
+          storage_value:typeof value==='string' && value.length<=20000?value:null};
+}"""
 
 
 def valid_test_link(url):
@@ -32,6 +44,7 @@ class CheckoutNavigation:
         self.checkout_id, self.entry_url = checkout_id, entry_url
         self.customization = customization
         self.source_generation = self.continue_generation = None
+        self.normalizer_generation = self._armed_normalization = None
         self.submission = self.transition = None
 
     def _entry_current(self, document):
@@ -44,14 +57,17 @@ class CheckoutNavigation:
 
     def source_checks(self, digest, document):
         return {
-            "reviewed_source_hash_bound": digest == BILLING_SOURCE_SHA256,
+            "reviewed_source_hash_bound": digest in (BILLING_SOURCE_SHA256, NORMALIZER_SOURCE_SHA256),
             "source_original_entry_current": document.get("url") == self.entry_url and valid_test_link(self.entry_url),
             "source_generation_available": isinstance(document.get("generation"), (int, float)),
         }
 
     def observe_source(self, digest, document):
         if all(self.source_checks(digest, document).values()):
-            self.source_generation = document["generation"]
+            if digest == NORMALIZER_SOURCE_SHA256:
+                self.normalizer_generation = document["generation"]
+            else:
+                self.source_generation = document["generation"]
             return True
         return False
 
@@ -118,13 +134,89 @@ class CheckoutNavigation:
         transition = self.transition or {}
         transformed = (
             valid and payment_link == transition.get("payment_link")
-            and document.get("url") == transition.get("parent_url")
+            and (document.get("url") == transition.get("parent_url")
+                 or all(self.normalization_checks(document).values()))
         )
         return {
             "independent_payment_link_available": valid,
             "owned_checkout_parent_exact": exact or transformed,
             "owned_payment_navigation_generation_current": exact or transformed
             and document.get("generation") == transition.get("generation"),
+        }
+
+    def normalization_checks(self, document):
+        """Exact reviewed SPA replacement plus freshly observed owned map."""
+        transition = self.transition or {}
+        observed = document.get("_normalization")
+        observed = observed if isinstance(observed, dict) else {}
+        current, derived = document.get("url"), transition.get("parent_url")
+        key = None
+        if valid_test_link(current):
+            match = re.fullmatch(r"session=(sess_[A-Za-z0-9]{10})", urlsplit(current).query)
+            if match:
+                key = match[1]
+        expected_pairs = parse_qsl(urlsplit(derived).query, keep_blank_values=True) if valid_test_link(derived) else []
+        raw = observed.get("storage_value") if isinstance(observed, dict) else None
+        mapping = None
+
+        def unique_object(pairs):
+            result = {}
+            for name, value in pairs:
+                if name in result:
+                    raise ValueError("Duplicate storage member")
+                result[name] = value
+            return result
+
+        try:
+            if isinstance(raw, str) and 0 < len(raw) <= 20_000:
+                mapping = json.loads(raw, object_pairs_hook=unique_object)
+        except (ValueError, TypeError):
+            pass
+        shaped = isinstance(mapping, dict) and all(type(value) is str for value in mapping.values())
+        return {
+            "owned_billing_transition_available": self.transition is not None,
+            "current_reviewed_normalizer_generation": self.normalizer_generation is not None
+            and self.normalizer_generation == self.source_generation == self.continue_generation
+            == (self.submission or {}).get("generation") == transition.get("generation") == document.get("generation"),
+            "exact_same_Test_payment_path": valid_test_link(current) and valid_test_link(derived)
+            and urlsplit(current).path == urlsplit(derived).path,
+            "sole_source_derived_session_query": key is not None,
+            "fresh_storage_document_and_generation": isinstance(observed, dict)
+            and set(observed) == {"url", "generation", "storage_key", "storage_value"}
+            and observed.get("url") == current and observed.get("generation") == document.get("generation")
+            and type(observed.get("generation")) in (int, float),
+            "fresh_storage_key_matches_current_query": key is not None and observed.get("storage_key") == key,
+            "current_primary_document_ready": document.get("body_present") is True
+            and document.get("ready_state") in ("interactive", "complete"),
+            "storage_JSON_bounded": isinstance(raw, str) and 0 < len(raw) <= 20_000,
+            "storage_map_has_only_string_values": shaped,
+            # JS's plain object overwrites duplicate query names. Its special
+            # __proto__ setter is deliberately unsupported rather than ignored.
+            "source_query_object_supported": bool(expected_pairs) and not any(name == "__proto__" for name, _ in expected_pairs),
+            "source_query_requires_fresh_session": not next((value for name, value in expected_pairs if name == "session"), ""),
+            "storage_map_equals_exact_source_query_object": shaped and bool(expected_pairs)
+            and mapping == dict(expected_pairs),
+        }
+
+    def freeze_parent(self, payment_link, document):
+        if self._armed_normalization is not None or not all(self.parent_checks(payment_link, document).values()):
+            return False
+        if document.get("url") in (payment_link, (self.transition or {}).get("parent_url")):
+            return True
+        if not all(self.normalization_checks(document).values()):
+            return False
+        self._armed_normalization = {
+            "url": document["url"], "generation": document["generation"],
+            **document["_normalization"],
+        }
+        return True
+
+    def armed_normalization_current(self, document):
+        if self._armed_normalization is None:
+            return True
+        return all(self.normalization_checks(document).values()) and self._armed_normalization == {
+            "url": document.get("url"), "generation": document.get("generation"),
+            **(document.get("_normalization") or {}),
         }
 
     def parent_equality_facts(self, payment_link, document):
