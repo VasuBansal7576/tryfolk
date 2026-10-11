@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .config import Settings
 from .service import Service, DomainError
+from .connection_api import connection_router
 
 
 class QuoteRequest(BaseModel):
@@ -80,6 +81,15 @@ def create_app(settings=None):
                 csrf_check(request, row)
             return service.settings.owner_token
         return None
+
+    def connection_owner(request):
+        row = session(request)
+        if not row or not service.settings.owner_token:
+            raise DomainError(401, "owner_session_required", "Sign in with the configured owner session.")
+        if request.method not in ("GET", "HEAD"):
+            csrf_check(request, row)
+
+    app.include_router(connection_router(service.settings, service.store, connection_owner))
 
     @app.post("/owner/session")
     def owner_login(body: OwnerLogin, request: Request, response: Response):
