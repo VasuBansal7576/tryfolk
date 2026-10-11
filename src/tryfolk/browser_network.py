@@ -624,6 +624,21 @@ class ResourceGuard:
                           "first_failed_predicate": next((name for name, value in checks.items() if not value), None),
                           **({"error_type": error_type} if error_type else {})}
 
+    @staticmethod
+    def owned_document_comparisons(prepared, before, after):
+        """Closed identity comparisons only, without private protocol values."""
+        def compare(left, right):
+            available = bool(left) and bool(right)
+            return {"both_available": available, **{
+                key: {"both_present": available and key in left and key in right,
+                      "equal": available and (key in left) == (key in right)
+                      and left.get(key) == right.get(key)}
+                for key in ("id", "loader_id", "url", "identity_epoch")
+            }}
+        return {"before_prepared": compare(before, prepared),
+                "after_prepared": compare(after, prepared),
+                "before_after": compare(before, after)}
+
     async def admit_owned_download(self, download):
         """Bind the real primary-page download event before any caller saves it.
 
@@ -640,16 +655,22 @@ class ResourceGuard:
             and download.url.startswith(self.policy.origin + "/api/target/download?"),
             "prepared_download_identity_fresh": bool(prepared) and self.card_attempt.clock() < prepared["expires"],
         }
+        before = after = {}
+        error_type = None
         try:
             if all(checks.values()):
-                before = await self.current_return_frames(SimpleNamespace(url=None, method=None))
-                after = await self.current_return_frames(SimpleNamespace(url=None, method=None))
-                checks["download_source_document_continuously_current"] = before["main"] == after["main"] == prepared["document"]
-        except Exception:
+                before = (await self.current_return_frames(SimpleNamespace(url=None, method=None)))["main"]
+                after = (await self.current_return_frames(SimpleNamespace(url=None, method=None)))["main"]
+                checks["download_source_document_continuously_current"] = before == after == prepared["document"]
+        except Exception as error:
             checks["download_source_document_continuously_current"] = False
+            error_type = type(error).__name__
         admitted = all(checks.values())
         self.events.append({"decision": "owned_download_event" if admitted else "deny_owned_download_event",
                             "owned_navigation_checks": checks,
+                            "owned_document_comparisons": self.owned_document_comparisons(
+                                prepared.get("document", {}) if prepared else {}, before, after),
+                            "error_type": error_type,
                             "first_failed_predicate": next((name for name, value in checks.items() if not value), None),
                             "admission_phase": "actual_primary_download_event_before_save"})
         if not admitted:

@@ -24,6 +24,7 @@ class FrameIdentityCoverage:
         self.session.on("Page.frameDetached", self.detached)
         self.session.on("Page.documentOpened", lambda _: self.invalidate())
         self.session.on("Network.requestWillBeSent", self.requested)
+        self.session.on("Network.loadingFailed", self.loading_failed)
         self.session.on("Inspector.detached", lambda _: self.invalidate())
         self.session.on("Inspector.targetCrashed", lambda _: self.invalidate())
         self.session.on("close", lambda *_: self.invalidate())
@@ -69,6 +70,18 @@ class FrameIdentityCoverage:
     def requested(self, event):
         if event.get("type") == "Document" and event.get("frameId") == self.root_id:
             self.pending = {key: copy.deepcopy(event.get(key)) for key in ("frameId", "loaderId", "requestId", "request")}
+            self.revision += 1
+
+    def loading_failed(self, event):
+        # Attachment responses end a provisional Document request with
+        # ERR_ABORTED, while the original page/loader remains committed. End
+        # only that exact canceled request; document identity and its anchor
+        # still require continuous events and fresh live Target fences.
+        if (self.pending and isinstance(self.pending.get("requestId"), str) and self.pending["requestId"]
+                and event.get("requestId") == self.pending["requestId"]
+                and event.get("type") == "Document" and event.get("canceled") is True
+                and event.get("errorText") == "net::ERR_ABORTED"):
+            self.pending = None
             self.revision += 1
 
     @staticmethod

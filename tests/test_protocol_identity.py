@@ -29,7 +29,7 @@ class Session:
         self.handlers[event] = callback
 
     def emit(self, event, payload):
-        self.handlers[event](payload)
+        self.handlers.get(event, lambda _: None)(payload)
 
     async def send(self, method, params=None):
         self.calls.append(method)
@@ -151,6 +151,131 @@ async def test_native_session_rejects_intervening_document_request_without_commi
     )
     with pytest.raises(ValueError):
         await coverage.attest()
+
+
+async def test_canceled_document_download_finishes_request_without_replacing_committed_identity():
+    session, coverage = await fixture()
+    session.emit(
+        "Network.loadingFailed",
+        {"requestId": "request", "type": "Document", "canceled": True, "errorText": "net::ERR_ABORTED"},
+    )
+    observed = await coverage.attest()
+    assert observed["frameTree"]["frame"] == {**session.frame, "identityEpoch": 0}
+    assert session.calls[-2:] == ["Target.getTargetInfo", "Target.getTargetInfo"]
+
+
+async def test_failed_request_without_identity_cannot_clear_unknown_pending_navigation():
+    session, coverage = await fixture()
+    session.emit(
+        "Network.requestWillBeSent",
+        {"type": "Document", "frameId": "main", "loaderId": "unknown", "request": {}},
+    )
+    session.emit(
+        "Network.loadingFailed",
+        {"type": "Document", "canceled": True, "errorText": "net::ERR_ABORTED"},
+    )
+    with pytest.raises(ValueError, match="intervening navigation"):
+        await coverage.attest()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"requestId": "other"},
+        {"requestId": None},
+        {"type": "Other"},
+        {"canceled": False},
+        {"canceled": 1},
+        {"errorText": "net::ERR_FAILED"},
+    ],
+)
+async def test_unmatched_or_non_canceled_failure_cannot_end_pending_document(changes):
+    session, coverage = await fixture()
+    session.emit(
+        "Network.loadingFailed",
+        {
+            "requestId": "request",
+            "type": "Document",
+            "canceled": True,
+            "errorText": "net::ERR_ABORTED",
+            **changes,
+        },
+    )
+    with pytest.raises(ValueError, match="intervening navigation"):
+        await coverage.attest()
+    # The original pending request remains exactly attested for its route.
+    await coverage.attest("https://owned.invalid/next", "GET")
+
+
+@pytest.mark.parametrize("replacement_first", [False, True])
+async def test_canceled_old_request_never_clears_a_later_document_navigation(replacement_first):
+    session, coverage = await fixture()
+    replacement = {
+        "type": "Document",
+        "frameId": "main",
+        "loaderId": "later",
+        "requestId": "later",
+        "request": {"url": "https://owned.invalid/later", "method": "GET"},
+    }
+    canceled = {"requestId": "request", "type": "Document", "canceled": True, "errorText": "net::ERR_ABORTED"}
+    if replacement_first:
+        session.emit("Network.requestWillBeSent", replacement)
+        session.emit("Network.loadingFailed", canceled)
+    else:
+        session.emit("Network.loadingFailed", canceled)
+        session.emit("Network.requestWillBeSent", replacement)
+    with pytest.raises(ValueError, match="intervening navigation"):
+        await coverage.attest()
+    await coverage.attest("https://owned.invalid/later", "GET")
+
+
+@pytest.mark.parametrize("change", ["loader", "url", "epoch", "detached", "target", "closed"])
+async def test_canceled_request_never_restores_changed_or_uncovered_committed_document(change):
+    session, coverage = await fixture()
+    session.emit(
+        "Network.loadingFailed",
+        {"requestId": "request", "type": "Document", "canceled": True, "errorText": "net::ERR_ABORTED"},
+    )
+    if change in ("loader", "epoch"):
+        frame = {**session.frame, **({"loaderId": "replacement"} if change == "loader" else {})}
+        session.emit("Page.frameNavigated", {"frame": frame})
+    elif change == "url":
+        session.emit(
+            "Page.navigatedWithinDocument", {"frameId": "main", "url": session.frame["url"] + "#changed"}
+        )
+    elif change == "detached":
+        session.emit("Page.frameDetached", {"frameId": "main", "reason": "remove"})
+    elif change == "target":
+        session.target["targetId"] = "other"
+    else:
+        session.emit("close", {})
+    with pytest.raises(ValueError):
+        await coverage.attest()
+
+
+async def test_canceled_request_during_live_target_fence_invalidates_that_attestation():
+    session, coverage = await fixture()
+    send = session.send
+
+    async def external_reply(method, params=None):
+        reply = await send(method, params)
+        if method == "Target.getTargetInfo":
+            session.emit(
+                "Network.loadingFailed",
+                {
+                    "requestId": "request",
+                    "type": "Document",
+                    "canceled": True,
+                    "errorText": "net::ERR_ABORTED",
+                },
+            )
+        return reply
+
+    session.send = external_reply
+    with pytest.raises(ValueError, match="uncertain ordering"):
+        await coverage.attest("https://owned.invalid/next", "GET")
+    # A subsequent independent read can attest the unchanged original page.
+    assert (await coverage.attest())["frameTree"]["frame"] == {**session.frame, "identityEpoch": 0}
 
 
 async def test_same_fullURL_history_preserves_fragmented_frame_anchor_without_renderer_refresh():

@@ -1,6 +1,7 @@
 """Invented browser/provider/session inputs; never live payment or access proof."""
 
 import copy
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -351,3 +352,81 @@ async def test_actual_download_event_consumes_exact_fresh_preparation_before_fil
         with pytest.raises(ValueError):
             await guard.admit_owned_download(download)
         assert download.cancelled
+
+
+@pytest.mark.parametrize("field", ["id", "loaderId", "url", "identityEpoch"])
+async def test_download_document_failure_retains_closed_per_field_comparisons(monkeypatch, field):
+    guard, page, _state, _identity, _session, _calls = await owned_fixture(monkeypatch)
+    reader = guard.protocol_reader
+    changed = {}
+
+    async def external_protocol_reply():
+        tree = await reader()
+        tree["frame"].update({"identityEpoch": 0, **changed})
+        return tree
+
+    guard.protocol_reader = external_protocol_reply
+    destination = guard.policy.origin + "/api/target/download?artwork=0"
+    await guard.prepare_owned_navigation(destination)
+    changed[field] = 1 if field == "identityEpoch" else "private-other-document"
+    download = SimpleNamespace(page=page, url=destination, cancelled=False)
+
+    async def cancel():
+        download.cancelled = True
+
+    download.cancel = cancel
+    with pytest.raises(ValueError):
+        await guard.admit_owned_download(download)
+    event = guard.events[-1]
+    assert download.cancelled
+    assert event["first_failed_predicate"] == "download_source_document_continuously_current"
+    comparisons = event["owned_document_comparisons"]
+    key = {"loaderId": "loader_id", "identityEpoch": "identity_epoch"}.get(field, field)
+    for pair in ("before_prepared", "after_prepared"):
+        assert comparisons[pair]["both_available"]
+        assert comparisons[pair][key] == {"both_present": True, "equal": False}
+    assert all(
+        value["equal"] for key, value in comparisons["before_after"].items() if key != "both_available"
+    )
+    assert event["error_type"] is None
+    encoded = json.dumps(event)
+    assert not any(
+        value in encoded for value in (destination, "main_fixture", "main_4000", "private-other-document")
+    )
+
+
+@pytest.mark.parametrize("failed_read", [1, 2])
+async def test_download_attestation_exception_keeps_type_and_available_closed_comparisons(
+    monkeypatch, failed_read
+):
+    guard, page, _state, _identity, _session, _calls = await owned_fixture(monkeypatch)
+    destination = guard.policy.origin + "/api/target/download?artwork=0"
+    await guard.prepare_owned_navigation(destination)
+    reader = guard.return_protocol_reader
+    reads = 0
+
+    async def external_protocol_reply(request):
+        nonlocal reads
+        reads += 1
+        if reads == failed_read:
+            raise ValueError("private-url-and-token-must-not-be-recorded")
+        return await reader(request)
+
+    guard.return_protocol_reader = external_protocol_reply
+    download = SimpleNamespace(page=page, url=destination, cancelled=False)
+
+    async def cancel():
+        download.cancelled = True
+
+    download.cancel = cancel
+    with pytest.raises(ValueError):
+        await guard.admit_owned_download(download)
+    event = guard.events[-1]
+    assert download.cancelled
+    assert event["first_failed_predicate"] == "download_source_document_continuously_current"
+    assert event["error_type"] == "ValueError"
+    comparisons = event["owned_document_comparisons"]
+    assert comparisons["before_prepared"]["both_available"] is (failed_read == 2)
+    assert comparisons["after_prepared"]["both_available"] is False
+    assert comparisons["before_after"]["both_available"] is False
+    assert "private-url-and-token" not in json.dumps(event)
