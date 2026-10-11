@@ -204,20 +204,33 @@ class Runtime:
         actions_executed = []
         capability = None
         policy = BrowserPolicy(run["preview_url"], run["provider"])
+        mind_initialized = False
         try:
-            initial_memory = await mind.request({"op": "init", "persona": persona})
+            # Separate SDK processes can initialize together. No observation or
+            # decision proceeds until the complete saved memory and browser are ready.
+            startup = [
+                asyncio.create_task(mind.request({"op": "init", "persona": persona})),
+                asyncio.create_task(browser.request(
+                    {
+                        "op": "goto",
+                        "url": fixture["login_url"]
+                        if run["provider"] == "dodo"
+                        else run["preview_url"] + fixture["session_url"],
+                        "origin": run["preview_url"],
+                        "provider": run["provider"],
+                        "card_capability": run["provider"] == "dodo",
+                    }
+                )),
+            ]
+            try:
+                initial_memory, _ = await asyncio.gather(*startup)
+            finally:
+                for task in startup:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*startup, return_exceptions=True)
+                mind_initialized = not startup[0].cancelled() and startup[0].exception() is None
             await emit("persona_initialized", initial_memory, persona["id"])
-            await browser.request(
-                {
-                    "op": "goto",
-                    "url": fixture["login_url"]
-                    if run["provider"] == "dodo"
-                    else run["preview_url"] + fixture["session_url"],
-                    "origin": run["preview_url"],
-                    "provider": run["provider"],
-                    "card_capability": run["provider"] == "dodo",
-                }
-            )
             for step in range(24 if run["provider"] == "dodo" else 6):
                 if cancelled():
                     raise Cancelled()
@@ -298,11 +311,15 @@ class Runtime:
                 "step_limit": True,
             }
         finally:
-            if not cancelled() and mind.process and mind.process.returncode is None:
-                snapshot = await mind.request({"op": "snapshot"})
-                await emit("persona_memory", snapshot, persona["id"])
-            await browser.close()
-            await mind.close()
+            try:
+                if mind_initialized and not cancelled() and mind.process and mind.process.returncode is None:
+                    snapshot = await mind.request({"op": "snapshot"})
+                    await emit("persona_memory", snapshot, persona["id"])
+            finally:
+                try:
+                    await browser.close()
+                finally:
+                    await mind.close()
 
     async def repair(self, run, emit):
         from .repair import repair_target
