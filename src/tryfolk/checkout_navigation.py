@@ -126,3 +126,63 @@ class CheckoutNavigation:
             "owned_payment_navigation_generation_current": exact or transformed
             and document.get("generation") == transition.get("generation"),
         }
+
+    def parent_equality_facts(self, payment_link, document):
+        """Closed diagnostics only. Component matches never confer authority.
+
+        Creation flags describe the owned response's inputs, not independently
+        observed effective hosted customization. Missing values cannot compare
+        equal merely because both sides are absent.
+        """
+        transition = self.transition or {}
+        current, billing, derived = document.get("url"), transition.get("payment_link"), transition.get("parent_url")
+
+        def equal_urls(left, right):
+            return valid_test_link(left) and valid_test_link(right) and left == right
+
+        def equal_component(left, right, component):
+            if not (valid_test_link(left) and valid_test_link(right)):
+                return False
+            a, b = urlsplit(left), urlsplit(right)
+            if component == "origin":
+                return (a.scheme, a.netloc) == (b.scheme, b.netloc)
+            return getattr(a, component) == getattr(b, component)
+
+        def equal_generations(left, right):
+            return type(left) in (int, float) and type(right) in (int, float) and left == right
+
+        def equal_query_pairs(ordered):
+            if not (valid_test_link(derived) and valid_test_link(current)):
+                return False
+            a, b = (parse_qsl(urlsplit(url).query, keep_blank_values=True) for url in (derived, current))
+            return (a == b) if ordered else (sorted(a) == sorted(b))
+
+        flags = self.customization
+        flags_available = (
+            isinstance(flags, dict) and set(flags) == {"hide_order_details", "hide_on_demand_tag"}
+            and all(type(value) is bool for value in flags.values())
+        )
+        generation = transition.get("generation")
+        return {
+            "independent_payment_link_null": payment_link is None,
+            "independent_payment_link_valid": valid_test_link(payment_link),
+            "current_document_url_valid": valid_test_link(current),
+            "independent_link_equals_current_document": equal_urls(payment_link, current),
+            "owned_billing_transition_available": self.transition is not None,
+            "billing_response_link_equals_independent_link": equal_urls(billing, payment_link),
+            **{"billing_response_" + part + "_equals_independent": equal_component(billing, payment_link, part)
+               for part in ("origin", "path", "query")},
+            "derived_parent_equals_current_document": equal_urls(derived, current),
+            **{"derived_parent_" + part + "_equals_current": equal_component(derived, current, part)
+               for part in ("origin", "scheme", "netloc", "path", "query")},
+            "derived_parent_query_pairs_equal_current": equal_query_pairs(False),
+            "derived_parent_query_order_equal_current": equal_query_pairs(True),
+            "billing_generation_equals_current": equal_generations(generation, document.get("generation")),
+            "source_generation_equals_current": equal_generations(self.source_generation, document.get("generation")),
+            "source_generation_equals_billing": equal_generations(self.source_generation, generation),
+            "continue_generation_equals_billing": equal_generations(self.continue_generation, generation),
+            "submission_generation_equals_billing": equal_generations((self.submission or {}).get("generation"), generation),
+            "creation_customization_flags_available": flags_available,
+            "creation_customization_hides_order_details": flags_available and flags["hide_order_details"],
+            "creation_customization_hides_on_demand_tag": flags_available and flags["hide_on_demand_tag"],
+        }

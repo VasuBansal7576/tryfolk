@@ -132,10 +132,15 @@ async def test_native_pay_admission_reports_exact_closed_failure(monkeypatch, mu
         assert caught.value.checks[predicate] is False
         assert guard.card_attempt is None
         assert guard.events[-1]["arm_admission_checks"] == caught.value.checks
+        if mutation != "capability":
+            assert "parent_equality_facts" in guard.events[-1]
     else:
         await guard.arm_native_pay(FIELDS, cards)
         assert guard.card_attempt is not None
         assert all(guard.events[-1]["arm_admission_checks"].values())
+        # False diagnostic facts must not enter the admission predicate set.
+        assert guard.events[-1]["parent_equality_facts"]["owned_billing_transition_available"] is False
+        assert guard.events[-1]["parent_equality_facts"]["independent_link_equals_current_document"] is True
     assert PARENT not in json.dumps(guard.events[-1])
 
 
@@ -173,4 +178,5 @@ async def test_fresh_confirmation_rechecks_frozen_parent_even_for_owned_return(m
         await guard.bind_api(request, {}, child)
     assert guard.card_attempt.confirmed is False
     assert guard.events[-1]["decision"] == "deny_native_current_parent"
+    assert "parent_equality_facts" in guard.events[-1]
     assert PARENT not in json.dumps(guard.events[-1])

@@ -76,3 +76,87 @@ def test_captured_customization_and_query_set_use_complete_source_order():
     expected = LINK + "?from=session&trace=%7E*&showOrderDetails=false&showOnDemandTag=false"
     assert all(navigation.parent_checks(LINK, document(expected)).values())
     assert not all(navigation.parent_checks(LINK, document(expected + "&from=session")).values())
+
+
+def captured_navigation():
+    navigation = CheckoutNavigation("cks_fixture", ENTRY, {"hide_order_details": False, "hide_on_demand_tag": False})
+    assert navigation.observe_source(BILLING_SOURCE_SHA256, document())
+    assert navigation.expect_continue(document())
+    assert navigation.bind_submission(ORIGIN + "/api/checkout/sessions/cks_fixture/confirm", '{"mode":"test","data":{}}', document())
+    assert navigation.observe_response(json.dumps({"payment_link": LINK}).encode(), document())
+    return navigation
+
+
+@pytest.mark.parametrize("mutation,expected", [
+    (None, {}),
+    ("query", {"derived_parent_equals_current_document": False, "derived_parent_query_equals_current": False,
+               "derived_parent_query_pairs_equal_current": False, "derived_parent_query_order_equal_current": False}),
+    ("encoding", {"derived_parent_equals_current_document": False, "derived_parent_query_equals_current": False}),
+    ("order", {"derived_parent_equals_current_document": False, "derived_parent_query_equals_current": False,
+               "derived_parent_query_order_equal_current": False}),
+    ("path", {"derived_parent_equals_current_document": False, "derived_parent_path_equals_current": False}),
+    ("generation", {"billing_generation_equals_current": False, "source_generation_equals_current": False}),
+    ("independent_link", {"billing_response_link_equals_independent_link": False, "billing_response_path_equals_independent": False}),
+    ("null_link", {"independent_payment_link_null": True, "independent_payment_link_valid": False, "billing_response_link_equals_independent_link": False}),
+])
+def test_parent_equality_facts_distinguish_structural_mismatches_without_admitting_them(mutation, expected):
+    navigation = captured_navigation()
+    current, independent = document(PARENT), LINK
+    if mutation == "query":
+        current["url"] += "&extra=yes"
+    elif mutation == "encoding":
+        current["url"] = PARENT.replace("owned+value", "owned%20value")
+    elif mutation == "order":
+        current["url"] = LINK + "?from=session&theme=light&trace=owned+value"
+    elif mutation == "path":
+        current["url"] = PARENT.replace("Private1", "Other111")
+    elif mutation == "generation":
+        current["generation"] = 2000
+    elif mutation == "independent_link":
+        independent = ORIGIN + "/Other111"
+    elif mutation == "null_link":
+        independent = None
+    facts = navigation.parent_equality_facts(independent, current)
+    baseline = {
+        "independent_payment_link_null": False,
+        "independent_payment_link_valid": True,
+        "current_document_url_valid": True,
+        "independent_link_equals_current_document": False,
+        "owned_billing_transition_available": True,
+        "billing_response_link_equals_independent_link": True,
+        "billing_response_origin_equals_independent": True,
+        "billing_response_path_equals_independent": True,
+        "billing_response_query_equals_independent": True,
+        "derived_parent_equals_current_document": True,
+        "derived_parent_origin_equals_current": True,
+        "derived_parent_scheme_equals_current": True,
+        "derived_parent_netloc_equals_current": True,
+        "derived_parent_path_equals_current": True,
+        "derived_parent_query_equals_current": True,
+        "derived_parent_query_pairs_equal_current": True,
+        "derived_parent_query_order_equal_current": True,
+        "billing_generation_equals_current": True,
+        "source_generation_equals_current": True,
+        "source_generation_equals_billing": True,
+        "continue_generation_equals_billing": True,
+        "submission_generation_equals_billing": True,
+        "creation_customization_flags_available": True,
+        "creation_customization_hides_order_details": False,
+        "creation_customization_hides_on_demand_tag": False,
+    }
+    if mutation == "null_link":
+        expected |= {"billing_response_origin_equals_independent": False, "billing_response_path_equals_independent": False,
+                     "billing_response_query_equals_independent": False}
+    assert facts == baseline | expected
+    assert all(type(value) is bool for value in facts.values())
+    assert not any(value in json.dumps(facts) for value in (ENTRY, LINK, "owned value", "Private1", "trace", "account"))
+    # Component equality and timing are diagnostics, never route authority.
+    assert all(navigation.parent_checks(independent, current).values()) is (mutation is None)
+
+
+def test_absent_transition_has_no_vacuous_generation_or_component_equality():
+    navigation = CheckoutNavigation("cks_fixture", ENTRY, None)
+    facts = navigation.parent_equality_facts(None, {})
+    assert facts["independent_payment_link_null"] is True
+    assert all(value is False for key, value in facts.items() if key != "independent_payment_link_null")
+    assert not any(navigation.parent_checks(None, {}).values())

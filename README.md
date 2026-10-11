@@ -91,6 +91,11 @@ customization. Missing links, unknown source, unrelated checkouts and stale gene
 gated. Confirmation rechecks the frozen parent, payment, checkout and ownership before any
 native request is forwarded. Local routing fixtures do not prove provider settlement or access.
 
+Guard events retain separate boolean `parent_equality_facts` for complete links, origin,
+path, raw query, query pairs/order and document generations. These facts explain a denied
+parent without exposing provider routes or query values. They never enter the admission
+checks. Creation customization flags remain distinct from observed effective hosted settings.
+
 The sole repair source seam is `lib/fulfillment-policy.ts`; immutable public regressions must turn red to green under the original broken configuration. The worker verifies the protected export contract, actual Codex/Entire source association, fixed checks and an exact commit/digest production preview. Known replay uses the actual failed saved profile, fresh identity and freshly observed equivalent controls, then runs all original N profiles. Separate unpaid access and duplicate confirmation controls create no extra provider checkout. Source ownership, registration, replay binding and cancellation have unit checks. A genuine Stagehand local iframe probe confirms its supported cross-frame snapshot/input APIs without model or provider calls. The Dodo browser/persona repair cycle remains unverified until executed and independently correlated. Retain each fixture result's separate provenance.
 
 Allowance consumption is an economic scheduling estimate. Authenticated Codex allowance,

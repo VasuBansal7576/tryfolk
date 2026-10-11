@@ -290,11 +290,12 @@ class ResourceGuard:
             "independent_owned_ownership_bound": bool(record) and record.get("ownership") == identity.get("ownership"),
         }
 
-    def require_arm_admission(self, checks):
+    def require_arm_admission(self, checks, *, parent_equality_facts=None):
         if not all(checks.values()):
             error = NativePayAdmissionError(checks)
             self.events.append({"decision": "deny_native_pay_arm", "arm_admission_checks": dict(checks),
-                                "first_failed_predicate": error.first_failed_predicate})
+                                "first_failed_predicate": error.first_failed_predicate,
+                                **({"parent_equality_facts": parent_equality_facts} if parent_equality_facts is not None else {})})
             raise error
 
     def expect_billing_continue(self, document):
@@ -337,6 +338,7 @@ class ResourceGuard:
                 fresh = await frame.evaluate(READ_CONTEXT)
                 context = self.frame_context(frame.url, parent_url) or {}
                 parent_after = await self.primary_page.evaluate(DOCUMENT_STATE)
+                parent_equality_facts = self.checkout_navigation.parent_equality_facts(identity.get("payment_link"), parent_after) if self.checkout_navigation else {}
                 parent_checks = self.checkout_navigation.parent_checks(identity.get("payment_link"), parent_after) if self.checkout_navigation else {}
                 parent_checks = {**self.owned_checkout_checks(identity), **parent_checks,
                                  "fresh_native_CONFIRM_parent_source": native.get("return_source") == "CONFIRM",
@@ -352,8 +354,10 @@ class ResourceGuard:
                         parent_checks["owned_navigation_available"] = False
                     error = NativePaymentParentError(parent_checks)
                     self.events.append({"decision": "deny_native_current_parent", "binding_checks": parent_checks,
-                                        "first_failed_predicate": error.first_failed_predicate})
+                                        "first_failed_predicate": error.first_failed_predicate,
+                                        "parent_equality_facts": parent_equality_facts})
                     raise error
+                self.events.append({"decision": "native_current_parent_verified", "parent_equality_facts": parent_equality_facts})
                 native_status = {
                     "frame_url": frame.url, "generation": fresh["generation"],
                     "parent_url": frame.parent_frame.url if frame.parent_frame else None,
@@ -400,6 +404,7 @@ class ResourceGuard:
         identity = await self.frame_verify(frame_config(observed_url))
         current_state = await frame.evaluate(READ_CONTEXT)
         parent_after = await self.primary_page.evaluate(DOCUMENT_STATE)
+        parent_equality_facts = self.checkout_navigation.parent_equality_facts(identity.get("payment_link"), parent_after) if self.checkout_navigation else {}
         setup = self.native_setup_facts(context["config_id"], state["generation"])
         checks.update({
             "same_current_frame": frame.url == observed_url,
@@ -423,7 +428,7 @@ class ResourceGuard:
                    for field in ("card_month", "card_year")),
             **{key: setup[key] for key in ("bootstrap_account_methods_200", "bootstrap_customer_methods_200", "normal_type_observed")},
         })
-        self.require_arm_admission(checks)
+        self.require_arm_admission(checks, parent_equality_facts=parent_equality_facts)
         billing = {"line1": "123 Test Street", "city": "New York", "state": "New York", "zip": "10001", "country": "US"}
         if contact.get("provider_name_observed"):
             billing.update(first_name="Tryfolk", last_name="Synthetic Customer")
@@ -437,7 +442,8 @@ class ResourceGuard:
         self.card_attempt.arm_native_pay(observed_url, state["generation"], normal_bootstrap=self.native_setup_facts(context["config_id"], state["generation"])["normal_type_observed"])
         self.events.append({"decision": "native_pay_armed", "config_id": context["config_id"],
                             "independent_identity_rechecked": True, "frame_generation_bound": True,
-                            "owned_checkout_parent_verified": True, "arm_admission_checks": dict(checks)})
+                            "owned_checkout_parent_verified": True, "arm_admission_checks": dict(checks),
+                            "parent_equality_facts": parent_equality_facts})
 
     async def payment_response(self, response, facts):
         try:
