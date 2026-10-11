@@ -286,3 +286,137 @@ def test_return_denial_retains_independent_card_billing_acceptance_booleans_with
     assert approved["config_bound"] and approved["first_failed_predicate"] is None
     assert all(approved["binding_checks"].values())
     assert not capability.confirmed  # Diagnostic validation does not consume.
+
+
+STATUS_RETURN = "https://test.checkout.dodopayments.com/status/fixture_alias/fixture_token"
+STATUS_PARENT = "https://test.checkout.dodopayments.com/session/fixture_current_parent"
+
+
+def status_observation():
+    return {
+        "frame_url": RAW, "generation": 1234, "parent_url": STATUS_PARENT,
+        "direct_child": True, "stable_during_identity_read": True,
+        "checkout_session_id": "cks_fixture",
+        "owned_checkout_url": STATUS_PARENT, "owned_checkout_response_verified": True,
+        "native": {
+            "config_bound": True, "generation": 1234, "parent_source_bound": True,
+            "init_origin_bound": True, "return_source": "CONFIRM", "return_type": "string",
+            "return_url": STATUS_RETURN, "confirm_observed": True,
+            "confirm_origin_bound": True, "confirm_parent_source_bound": True,
+            "confirm_generation": 1234,
+        },
+        "identity": {
+            "approved": True, "provider_environment": "test_mode",
+            "payment_correlated": True, "customer_correlated": True,
+            "payment_id": "pay_fixture", "checkout_session_id": "cks_fixture",
+        },
+    }
+
+
+def status_attempt():
+    capability = NativeCardAttempt(
+        RAW, 1234, "http://127.0.0.1:3300", INFO, {},
+        parent_url=STATUS_PARENT, checkout_session_id="cks_fixture", clock=lambda: 10,
+    )
+    capability.arm_native_pay(RAW, 1234, normal_bootstrap=True)
+    return capability
+
+
+def status_confirmation():
+    request, headers = confirmation()
+    body = json.loads(request.post_data)
+    body["return_url"] = STATUS_RETURN
+    request.post_data = json.dumps(body)
+    return request, headers
+
+
+def test_exact_native_confirm_status_return_uses_current_test_identity_without_payment_id_in_path():
+    capability = status_attempt()
+    request, headers = status_confirmation()
+    facts = capability.check(request, headers, RAW, 1234, STATUS_RETURN, native_status=status_observation())
+    assert facts["config_bound"]
+    assert facts["binding_checks"]["return_destination_approved"]
+    assert capability.consume("confirm")
+    assert capability.navigation_allowed(STATUS_RETURN)
+    assert not capability.navigation_allowed(STATUS_RETURN + "_other")
+    assert not capability.navigation_allowed(STATUS_RETURN + "?extra=fixture")
+
+
+@pytest.mark.parametrize("mutation", [
+    "missing_observation", "owned_checkout_missing", "owned_checkout_wrong", "generation", "native_generation", "confirm_generation",
+    "frame", "parent", "direct_child", "unstable_read", "source", "init_origin",
+    "confirm_origin", "confirm_parent", "checkout", "identity_checkout", "payment",
+    "customer", "identity_denied", "live_identity", "body_return", "query", "empty_query",
+    "fragment", "empty_fragment", "userinfo", "live_return", "encoded_traversal",
+    "encoded_slash", "dot_traversal", "arbitrary_path", "extra_segment", "key", "secret",
+    "real_card", "billing", "extra_body_field",
+])
+def test_native_status_binding_rejects_changed_context_or_unapproved_payment_shape(mutation):
+    capability = status_attempt()
+    request, headers = status_confirmation()
+    body = json.loads(request.post_data)
+    current = status_observation()
+    native_return = STATUS_RETURN
+    if mutation == "missing_observation":
+        current = None
+    elif mutation == "owned_checkout_missing":
+        current["owned_checkout_response_verified"] = False
+    elif mutation == "owned_checkout_wrong":
+        current["owned_checkout_url"] += "_another_checkout"
+    elif mutation in ("generation", "direct_child", "stable_during_identity_read"):
+        current[mutation] = 1235 if mutation == "generation" else False
+    elif mutation == "unstable_read":
+        current["stable_during_identity_read"] = False
+    elif mutation == "frame":
+        current["frame_url"] += "changed"
+    elif mutation == "parent":
+        current["parent_url"] += "changed"
+    elif mutation in ("native_generation", "confirm_generation"):
+        current["native"]["generation" if mutation == "native_generation" else "confirm_generation"] += 1
+    elif mutation == "source":
+        current["native"]["return_source"] = "INIT"
+    elif mutation in ("init_origin", "confirm_origin", "confirm_parent"):
+        current["native"][{"init_origin":"init_origin_bound", "confirm_origin":"confirm_origin_bound", "confirm_parent":"confirm_parent_source_bound"}[mutation]] = False
+    elif mutation == "checkout":
+        current["checkout_session_id"] = "cks_other"
+    elif mutation == "identity_checkout":
+        current["identity"]["checkout_session_id"] = "cks_other"
+    elif mutation == "payment":
+        current["identity"]["payment_id"] = "pay_other"
+    elif mutation == "customer":
+        current["identity"]["customer_correlated"] = False
+    elif mutation == "identity_denied":
+        current["identity"]["approved"] = False
+    elif mutation == "live_identity":
+        current["identity"]["provider_environment"] = "live_mode"
+    elif mutation == "body_return":
+        body["return_url"] += "changed"
+    elif mutation in ("query", "empty_query", "fragment", "empty_fragment", "userinfo", "live_return", "encoded_traversal", "encoded_slash", "dot_traversal", "arbitrary_path", "extra_segment"):
+        native_return = {
+            "query":STATUS_RETURN+"?extra=fixture", "empty_query":STATUS_RETURN+"?",
+            "fragment":STATUS_RETURN+"#extra", "empty_fragment":STATUS_RETURN+"#",
+            "userinfo":STATUS_RETURN.replace("https://","https://fixture@"),
+            "live_return":STATUS_RETURN.replace("test.checkout.","checkout."),
+            "encoded_traversal":STATUS_RETURN.replace("fixture_alias","%2e%2e"),
+            "encoded_slash":STATUS_RETURN.replace("fixture_alias","fixture%2Falias"),
+            "dot_traversal":STATUS_RETURN.replace("fixture_alias",".."),
+            "arbitrary_path":STATUS_RETURN.replace("/status/","/arbitrary/"),
+            "extra_segment":STATUS_RETURN+"/extra",
+        }[mutation]
+        current["native"]["return_url"] = body["return_url"] = native_return
+    elif mutation == "key":
+        headers["api-key"] = "pk_prd_fixture"
+    elif mutation == "secret":
+        body["client_secret"] = "pay_other_secret_fixture"
+    elif mutation == "real_card":
+        body["payment_method_data"]["card"]["card_number"] = "unapproved_card_fixture"
+    elif mutation == "billing":
+        body["payment_method_data"]["billing"] = {"email":"other_fixture@tryfolk.invalid"}
+    elif mutation == "extra_body_field":
+        body["metadata"] = {"payment_id":"pay_other"}
+    request.post_data = json.dumps(body)
+    result = capability.check(request, headers, RAW, 1234, native_return, native_status=current)
+    assert not result["config_bound"]
+    assert capability.return_url is None
+    assert "fixture_alias" not in json.dumps(result)
+    assert "fixture_token" not in json.dumps(result)

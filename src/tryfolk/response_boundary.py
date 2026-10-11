@@ -25,6 +25,8 @@ class ResponseBoundary:
                 session = await self.context.new_cdp_session(self.guard.primary_page)
             info = (await session.send("Target.getTargetInfo"))["targetInfo"]
             target_id, target_type = info["targetId"], info["type"]
+            if document == self.guard.primary_page and target_type == "page":
+                self.guard.primary_response_target = target_id
             if target_type not in ("page", "iframe"):
                 await session.detach()
                 return False

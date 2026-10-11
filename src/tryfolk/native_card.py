@@ -53,7 +53,7 @@ class NormalCardBody:
         self.return_url = None
         return facts
 
-    def return_allowed(self, raw):
+    def return_allowed(self, raw, *, native_status=None):
         try:
             parsed = urlsplit(raw)
             origin = f"{parsed.scheme}://{parsed.netloc}"
@@ -76,7 +76,7 @@ class NormalCardBody:
         except (ValueError, TypeError):
             return False
 
-    def _normal_body(self, body, native_return, facts):
+    def _normal_body(self, body, native_return, facts, *, native_status=None):
         # Official1.1.0 le() expands either spelling of this sole placeholder
         # when the widget's own Pay button calls Bt(). No bridge CONFIRM is
         # required in that branch; the passive INIT observation stays a template.
@@ -96,7 +96,7 @@ class NormalCardBody:
             ("browser_info_bound", json.dumps(body["browser_info"], sort_keys=True) == json.dumps(self.browser_info, sort_keys=True)),
             ("native_return_present", isinstance(native_return, str) and bool(native_return)),
             ("native_return_bound", body["return_url"] == native_return),
-            ("return_destination_approved", self.return_allowed(native_return)),
+            ("return_destination_approved", self.return_allowed(native_return, native_status=native_status)),
         )])
         data = body["payment_method_data"]
         data_closed = binding(facts, "payment_method_data_fields_closed", isinstance(data, dict) and {"card"} <= data.keys() and data.keys() <= {"card", "billing"})
@@ -148,13 +148,56 @@ class NormalCardBody:
 
 
 class NativeCardAttempt(NormalCardBody):
-    def __init__(self, raw, generation, owned_origin, browser_info, billing, *, clock=time.monotonic):
+    def __init__(self, raw, generation, owned_origin, browser_info, billing, *,
+                 parent_url=None, checkout_session_id=None, clock=time.monotonic):
         super().__init__(raw, generation, owned_origin, browser_info, billing)
+        self.parent_url, self.checkout_session_id = parent_url, checkout_session_id
+        self._admitted_status_return = None
         self.clock = clock
         self.armed_at = self.confirmed_at = None
         self.confirmed = self.closed = False
         self.polls = 0
         self.fallback_remaining, self.confirm_response_failed = 0, False
+
+    def status_return_checks(self, raw, observation):
+        """Private exact native CONFIRM binding; opaque route segments carry no identity."""
+        observation = observation if isinstance(observation, dict) else {}
+        native = observation.get("native")
+        native = native if isinstance(native, dict) else {}
+        identity = observation.get("identity")
+        identity = identity if isinstance(identity, dict) else {}
+        try:
+            parsed = urlsplit(raw) if isinstance(raw, str) else urlsplit("")
+            parent = urlsplit(self.parent_url or "")
+        except ValueError:
+            parsed = parent = urlsplit("")
+        return {
+            "Test_status_origin": f"{parsed.scheme}://{parsed.netloc}" == DODO_CHECKOUT,
+            "finite_status_shape": bool(re.fullmatch(r"/status/[A-Za-z0-9_-]{1,256}/[A-Za-z0-9_-]{1,256}", parsed.path)),
+            "status_no_query_fragment_userinfo": isinstance(raw, str) and "?" not in raw and "#" not in raw
+            and not (parsed.query or parsed.fragment or parsed.username or parsed.password),
+            "expected_Test_parent": bool(self.parent_url) and f"{parent.scheme}://{parent.netloc}" == DODO_CHECKOUT,
+            "same_current_parent": observation.get("parent_url") == self.parent_url,
+            "owned_checkout_response_parent_bound": observation.get("owned_checkout_response_verified") is True
+            and observation.get("owned_checkout_url") == self.parent_url,
+            "same_current_frame": observation.get("frame_url") == self.raw,
+            "same_current_generation": observation.get("generation") == self.generation,
+            "direct_current_child": observation.get("direct_child") is True,
+            "stable_during_identity_read": observation.get("stable_during_identity_read") is True,
+            "native_configuration_bound": native.get("config_bound") is True,
+            "native_INIT_origin_parent_bound": native.get("init_origin_bound") is True and native.get("parent_source_bound") is True,
+            "native_generation_current": native.get("generation") == self.generation,
+            "fresh_native_CONFIRM_source": native.get("return_source") == "CONFIRM" and native.get("confirm_observed") is True,
+            "native_CONFIRM_origin_parent_bound": native.get("confirm_origin_bound") is True and native.get("confirm_parent_source_bound") is True,
+            "native_CONFIRM_generation_current": native.get("confirm_generation") == self.generation,
+            "exact_native_status_return": native.get("return_type") == "string" and native.get("return_url") == raw,
+            "independent_Test_identity": identity.get("approved") is True and identity.get("provider_environment") == "test_mode",
+            "independent_payment_customer": identity.get("payment_correlated") is True and identity.get("customer_correlated") is True and identity.get("payment_id") == self.context["payment_id"],
+            "independent_current_checkout": bool(self.checkout_session_id) and observation.get("checkout_session_id") == self.checkout_session_id and identity.get("checkout_session_id") == self.checkout_session_id,
+        }
+
+    def return_allowed(self, raw, *, native_status=None):
+        return super().return_allowed(raw) or all(self.status_return_checks(raw, native_status).values())
 
     def arm_native_pay(self, raw, generation, *, normal_bootstrap):
         if self.closed or self.armed_at is not None or not normal_bootstrap or raw != self.raw or generation != self.generation:
@@ -171,9 +214,11 @@ class NativeCardAttempt(NormalCardBody):
             )
         if not self.return_url:
             return False
+        if self._admitted_status_return:
+            return raw == self._admitted_status_return == self.return_url
         return self.return_allowed(raw) and urlsplit(raw).path == urlsplit(self.return_url).path
 
-    def check(self, request, headers, raw, generation, native_return):
+    def check(self, request, headers, raw, generation, native_return, *, native_status=None):
         parsed = urlsplit(request.url)
         operation = "confirm" if parsed.path == f"/payments/{self.context['payment_id']}/confirm" else "poll"
         facts = {
@@ -242,8 +287,13 @@ class NativeCardAttempt(NormalCardBody):
                 return facts
             if operation == "poll" and not binding(facts, "poll_body_absent", request.post_data is None):
                 return facts
-            if operation == "confirm" and not self._normal_body(body, native_return, facts):
-                return facts
+            if operation == "confirm":
+                if native_status is not None:
+                    facts["native_status_return_checks"] = self.status_return_checks(native_return, native_status)
+                if not self._normal_body(body, native_return, facts, native_status=native_status):
+                    return facts
+                if not super().return_allowed(self.return_url):
+                    self._admitted_status_return = self.return_url
             if operation == "confirm":
                 facts["native_return_template_expanded"] = isinstance(native_return, str) and (
                     "{PAYMENT_ID}" in native_return or "%7BPAYMENT_ID%7D" in native_return

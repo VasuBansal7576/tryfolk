@@ -6,6 +6,7 @@ for the persona. Service workers must be blocked on the routed context.
 """
 
 import asyncio
+import base64
 import hashlib
 import ipaddress
 import socket
@@ -181,6 +182,7 @@ class ResourceGuard:
         self.preflight_guard = None
         self.events = []
         self.primary_page = None
+        self.primary_response_target = None
         self.page_ids = {}
         self._frame_contexts = {}
         self._bootstrap_requests = {}
@@ -189,6 +191,76 @@ class ResourceGuard:
         self._startup_configs = set()
         self.card_enabled, self.card_attempt = False, None
         self._normal_configs, self._successful_reads = set(), {}
+        self._owned_checkouts = {}
+        self._owned_creation_request = None
+        self._owned_creation_requested = False
+
+    def bind_owned_checkout_request(self, request):
+        """Retain the single actual browser fetch, without forwarding it."""
+        if not (
+            self.policy and self.policy.provider == "dodo" and self.primary_page
+            and request.frame == self.primary_page.main_frame
+            and request.method == "POST" and request.resource_type == "fetch"
+            and not request.is_navigation_request() and request.redirected_from is None
+            and request.url == self.policy.origin + "/api/target/checkouts"
+            and not self._owned_creation_requested
+        ):
+            return False
+        self._owned_creation_request = request
+        self._owned_creation_requested = True
+        return True
+
+    async def observe_owned_checkout_response(self, response):
+        """Retain the owned creation URL privately; reading causes no checkout."""
+        request = response.request
+        if not (
+            self.policy and self.policy.provider == "dodo" and self.primary_page
+            and request.frame == self.primary_page.main_frame
+            and request.method == "POST" and request.redirected_from is None
+            and request.resource_type == "fetch" and response.status == 201
+            and request.url == response.url == self.policy.origin + "/api/target/checkouts"
+        ):
+            return False
+        try:
+            async with asyncio.timeout(5):
+                raw = await response.body()
+            if len(raw) > 20_000:
+                return False
+            import json
+            body = json.loads(raw)
+            if not isinstance(body, dict):
+                return False
+            ownership = body.get("ownership")
+            url = body.get("checkout_url")
+            parsed = urlsplit(url) if isinstance(url, str) and len(url) <= 4096 else urlsplit("")
+            names = ("run_id", "persona_id", "account_id", "fixture_id", "target_revision")
+            if not (
+                body.get("source") == "dodo_test_api"
+                and isinstance(ownership, dict) and set(ownership) == set(names)
+                and all(isinstance(ownership[key], str) and ownership[key] for key in names)
+                and all(isinstance(body.get(key), str) and body[key] for key in ("order_id", "checkout_session_id"))
+                and f"{parsed.scheme}://{parsed.netloc}" == DODO_CHECKOUT and parsed.path
+                and not (parsed.username or parsed.password) and not self._owned_checkouts
+            ):
+                return False
+            self._owned_checkouts[body["checkout_session_id"]] = {
+                "url": url, "order_id": body["order_id"], "ownership": dict(ownership),
+            }
+            self.record(request, "owned_checkout_response_captured", private_url_retained=True)
+            return True
+        except (ValueError, TypeError, TimeoutError):
+            return False
+
+    def owned_checkout(self, identity):
+        record = self._owned_checkouts.get(identity.get("checkout_session_id"), {})
+        if not (
+            identity.get("approved") is True and identity.get("provider_environment") == "test_mode"
+            and identity.get("payment_correlated") is True and identity.get("customer_correlated") is True
+            and record.get("order_id") == identity.get("order_id")
+            and record.get("ownership") == identity.get("ownership")
+        ):
+            return {}
+        return record
 
     async def bind_api(self, request, headers, frame):
         if self.card_attempt and urlsplit(request.url).path in (
@@ -197,11 +269,35 @@ class ResourceGuard:
         ):
             state = await frame.evaluate(READ_CONTEXT)
             native = state.get("native") or {}
+            observed = frame_config(frame.url)
+            native_status = None
+            if request.method == "POST" and native.get("return_source") == "CONFIRM":
+                current_url, parent = frame.url, frame.parent_frame
+                parent_url = parent.url if parent else None
+                identity = {}
+                if self.frame_verify:
+                    async with asyncio.timeout(13):
+                        identity = await self.frame_verify({**observed, "operation": "confirm"})
+                fresh = await frame.evaluate(READ_CONTEXT)
+                context = self.frame_context(frame.url, parent_url) or {}
+                owned = self.owned_checkout(identity)
+                native_status = {
+                    "frame_url": frame.url, "generation": fresh["generation"],
+                    "parent_url": frame.parent_frame.url if frame.parent_frame else None,
+                    "direct_child": bool(self.primary_page) and frame.parent_frame == self.primary_page.main_frame,
+                    "stable_during_identity_read": frame.url == current_url and frame.parent_frame == parent
+                    and bool(parent) and parent.url == parent_url and fresh.get("generation") == state["generation"]
+                    and fresh.get("native") == native,
+                    "checkout_session_id": context.get("checkout_session_id"),
+                    "owned_checkout_url": owned.get("url"),
+                    "owned_checkout_response_verified": bool(owned),
+                    "native": fresh.get("native"), "identity": identity,
+                }
             facts = self.card_attempt.check(
                 request, headers, frame.url, state["generation"],
                 native.get("return_url") if native.get("config_bound") and native.get("generation") == state["generation"] else None,
+                native_status=native_status,
             )
-            observed = frame_config(frame.url)
         else:
             facts, observed = bind_bootstrap(request, headers, frame.url)
         observed["operation"] = facts.get("operation", "bootstrap")
@@ -224,6 +320,7 @@ class ResourceGuard:
         native = state.get("native") or {}
         contact = await self.primary_page.evaluate(READ_CONTACT)
         identity = await self.frame_verify(frame_config(observed_url))
+        owned = self.owned_checkout(identity)
         current_state = await frame.evaluate(READ_CONTEXT)
         if (
             frame.url != observed_url or frame.parent_frame != self.primary_page.main_frame
@@ -233,6 +330,7 @@ class ResourceGuard:
             or identity.get("approved") is not True or identity.get("payment_id") != context["payment_id"]
             or identity.get("provider_environment") != "test_mode" or identity.get("payment_correlated") is not True
             or identity.get("checkout_session_id") != context.get("checkout_session_id")
+            or not owned or frame.parent_frame.url != owned.get("url")
             or any(completed_cards.get(field) != (context["config_id"], state["generation"])
                    for field in required if field.startswith("card_"))
             or not (completed_cards.get("card_expiry") == (context["config_id"], state["generation"])
@@ -247,11 +345,13 @@ class ResourceGuard:
         if contact.get("email"):
             billing["email"] = contact["email"]
         self.card_attempt = NativeCardAttempt(
-            observed_url, state["generation"], self.policy.origin, browser_information(state), billing
+            observed_url, state["generation"], self.policy.origin, browser_information(state), billing,
+            parent_url=owned["url"], checkout_session_id=context.get("checkout_session_id"),
         )
         self.card_attempt.arm_native_pay(observed_url, state["generation"], normal_bootstrap=self.native_setup_facts(context["config_id"], state["generation"])["normal_type_observed"])
         self.events.append({"decision": "native_pay_armed", "config_id": context["config_id"],
-                            "independent_identity_rechecked": True, "frame_generation_bound": True})
+                            "independent_identity_rechecked": True, "frame_generation_bound": True,
+                            "owned_checkout_parent_verified": True})
 
     async def payment_response(self, response, facts):
         try:
@@ -651,6 +751,11 @@ class ResourceGuard:
                 await route.abort("blockedbyclient")
                 return
             if decision == "continue":
+                if self.policy.provider == "dodo" and request.url == self.policy.origin + "/api/target/checkouts":
+                    if not self.bind_owned_checkout_request(request):
+                        self.record(request, "deny", reason="owned_checkout_creation_not_single_primary_fetch")
+                        await route.abort("blockedbyclient")
+                        return
                 await route.continue_()
                 return
             if decision in ("public_script", "public_frame_script", "public_frame"):
@@ -674,6 +779,58 @@ class ResourceGuard:
         except Exception as error:
             self.record(request, "deny", error_type=type(error).__name__)
         await route.abort("blockedbyclient")
+
+    async def capture_owned_checkout_boundary(self, session, event, target):
+        """Read the existing response before the browser can navigate away."""
+        request = event.get("request", {})
+        if not self.policy or request.get("url") != self.policy.origin + "/api/target/checkouts":
+            return False
+        checks = {
+            "dodo_policy": self.policy.provider == "dodo", "primary_page_present": bool(self.primary_page),
+            "primary_page_target": target.get("target_type") == "page"
+            and target.get("target_id") == self.primary_response_target,
+            # Chrome reports this actual window.fetch as XHR at Fetch's
+            # response stage. Authority comes from the observed browser fetch,
+            # not from treating a protocol resource label as a new grant.
+            "fetch_resource": event.get("resourceType") in ("Fetch", "XHR"),
+            "actual_single_browser_fetch": self._owned_creation_request is not None
+            and self._owned_creation_request.frame == self.primary_page.main_frame
+            and self._owned_creation_request.url == request.get("url")
+            and self._owned_creation_request.method == "POST"
+            and self._owned_creation_request.resource_type == "fetch"
+            and self._owned_creation_request.redirected_from is None,
+            "creation_response_201": event.get("responseStatusCode") == 201,
+            "creation_POST": request.get("method") == "POST",
+            "no_redirect": not event.get("redirectedRequestId"),
+        }
+        self.events.append({"decision": "owned_checkout_capture_candidate", "binding_checks": checks})
+        if not all(checks.values()):
+            return False
+        try:
+            async with asyncio.timeout(5):
+                tree = await session.send("Page.getFrameTree")
+                checks["primary_main_frame"] = event.get("frameId") == tree["frameTree"]["frame"]["id"]
+                if not checks["primary_main_frame"]:
+                    return False
+                response = await session.send("Fetch.getResponseBody", {"requestId": event["requestId"]})
+            encoded = response.get("body")
+            if not isinstance(encoded, str) or len(encoded) > 30_000:
+                return False
+            raw = base64.b64decode(encoded, validate=True) if response.get("base64Encoded") else encoded.encode()
+
+            async def body():
+                return raw
+
+            captured = await self.observe_owned_checkout_response(SimpleNamespace(
+                request=self._owned_creation_request,
+                status=201, url=request["url"], body=body,
+            ))
+            if captured:
+                self._owned_creation_request = None
+            return captured
+        except Exception as error:
+            self.events.append({"decision": "owned_checkout_response_unavailable", "error_type": type(error).__name__})
+            return False
 
     async def redirect_response(self, session, event, **target):
         """Response-stage CDP interception, separate from both request handlers.
@@ -706,4 +863,5 @@ class ResourceGuard:
                 "Fetch.failRequest", {"requestId": request_id, "errorReason": "BlockedByClient"}
             )
         else:
+            await self.capture_owned_checkout_boundary(session, event, target)
             await session.send("Fetch.continueResponse", {"requestId": request_id})

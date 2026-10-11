@@ -5,7 +5,128 @@ from tryfolk.browser_network import NetworkPolicy, PUBLIC_SCRIPTS
 from tryfolk.browser_policy import DODO_CHECKOUT
 import httpx
 import tryfolk.browser_network as network
+import json
+from types import SimpleNamespace
 from urllib.parse import urlencode, urldefrag
+
+
+def owned_response_fixture(body):
+    page = SimpleNamespace()
+    page.main_frame = SimpleNamespace(page=page, url="http://127.0.0.1:3300")
+    request = SimpleNamespace(
+        frame=page.main_frame, method="POST", redirected_from=None,
+        resource_type="fetch", url=page.main_frame.url + "/api/target/checkouts",
+        is_navigation_request=lambda: False,
+    )
+
+    async def read_body():
+        return json.dumps(body).encode()
+
+    response = SimpleNamespace(request=request, status=201, url=request.url, body=read_body)
+    guard = network.ResourceGuard()
+    guard.policy = NetworkPolicy(page.main_frame.url, "dodo")
+    guard.primary_page = page
+    return guard, response
+
+
+def owned_checkout_fixture():
+    return {
+        "source": "dodo_test_api", "order_id": "order_fixture",
+        "checkout_session_id": "cks_fixture",
+        "checkout_url": DODO_CHECKOUT + "/session/private_fixture",
+        "ownership": dict(run_id="run_fixture", persona_id="persona_fixture",
+                          account_id="account_fixture", fixture_id="fixture_fixture",
+                          target_revision="revision_fixture"),
+    }
+
+
+@pytest.mark.parametrize("body", [[], None, "unexpected", {"source": "dodo_test_api"}])
+async def test_malformed_owned_checkout_response_cannot_supply_parent_authority(body):
+    guard, response = owned_response_fixture(body)
+    assert not await guard.observe_owned_checkout_response(response)
+    assert not guard.owned_checkout({"checkout_session_id": "cks_fixture"})
+
+
+async def test_owned_checkout_response_requires_matching_independent_order_customer_and_ownership():
+    body = owned_checkout_fixture()
+    guard, response = owned_response_fixture(body)
+    assert await guard.observe_owned_checkout_response(response)
+    identity = {
+        "approved": True, "provider_environment": "test_mode",
+        "payment_correlated": True, "customer_correlated": True,
+        "checkout_session_id": body["checkout_session_id"],
+        "order_id": body["order_id"], "ownership": body["ownership"],
+    }
+    assert guard.owned_checkout(identity)["url"] == body["checkout_url"]
+    for change in (
+        {"approved": False}, {"provider_environment": "live_mode"},
+        {"payment_correlated": False}, {"customer_correlated": False},
+        {"checkout_session_id": "cks_other"}, {"order_id": "order_other"},
+        {"ownership": body["ownership"] | {"account_id": "account_other"}},
+        {"ownership": body["ownership"] | {"target_revision": "revision_other"}},
+    ):
+        assert not guard.owned_checkout(identity | change)
+    assert not await guard.observe_owned_checkout_response(response)
+    assert body["checkout_url"] not in json.dumps(guard.events)
+
+
+@pytest.mark.parametrize("change", ["foreign_frame", "foreign_url", "redirect", "wrong_status", "wrong_method"])
+async def test_foreign_checkout_response_cannot_supply_parent_authority(change):
+    guard, response = owned_response_fixture(owned_checkout_fixture())
+    if change == "foreign_frame":
+        response.request.frame = object()
+    elif change == "foreign_url":
+        response.url = DODO_CHECKOUT + "/api/target/checkouts"
+    elif change == "redirect":
+        response.request.redirected_from = object()
+    elif change == "wrong_status":
+        response.status = 200
+    elif change == "wrong_method":
+        response.request.method = "GET"
+    assert not await guard.observe_owned_checkout_response(response)
+
+
+@pytest.mark.parametrize("change", [None, "cdp_xhr", "child_frame", "foreign_target", "redirected", "missing_browser_request", "browser_xhr", "cdp_document"])
+async def test_owned_checkout_body_is_captured_before_response_continues(change):
+    guard, response = owned_response_fixture(owned_checkout_fixture())
+    guard.primary_response_target = "target_fixture"
+    event = {
+        "requestId": "request_fixture", "frameId": "frame_fixture", "resourceType": "Fetch",
+        "request": {"url": response.url, "method": "POST"}, "responseStatusCode": 201,
+    }
+    target = dict(target_id="target_fixture", target_type="page")
+    if change == "browser_xhr":
+        response.request.resource_type = "xhr"
+    if change != "missing_browser_request":
+        guard.bind_owned_checkout_request(response.request)
+    if change == "cdp_xhr":
+        event["resourceType"] = "XHR"
+    elif change == "cdp_document":
+        event["resourceType"] = "Document"
+    if change == "child_frame":
+        event["frameId"] = "child_fixture"
+    elif change == "foreign_target":
+        target["target_id"] = "target_other"
+    elif change == "redirected":
+        event["redirectedRequestId"] = "prior_fixture"
+
+    class Session:
+        calls = []
+
+        async def send(self, name, options=None):
+            self.calls.append(name)
+            if name == "Page.getFrameTree":
+                return {"frameTree": {"frame": {"id": "frame_fixture"}}}
+            if name == "Fetch.getResponseBody":
+                return {"body": json.dumps(owned_checkout_fixture()), "base64Encoded": False}
+            if name == "Fetch.continueResponse" and change in (None, "cdp_xhr"):
+                assert any(e["decision"] == "owned_checkout_response_captured" for e in guard.events)
+            return {}
+
+    session = Session()
+    await guard.redirect_response(session, event, **target)
+    assert session.calls[-1] == "Fetch.continueResponse"
+    assert ("Fetch.getResponseBody" in session.calls) is (change in (None, "cdp_xhr"))
 
 
 def test_three_reviewed_modules_load_only_as_scripts_inside_the_direct_secure_frame():

@@ -248,6 +248,8 @@ class DodoTarget:
             "customer_correlated": True,
             "payment_id": payment["payment_id"],
             "checkout_session_id": order["checkout_session_id"],
+            "order_id": order["order_id"],
+            "ownership": {key: order[key] for key in OWNERSHIP},
             "receipt_evidence_id": receipt.get("evidence_id"),
             "secret_authenticated": False,
             "payment_status": payment["status"],
