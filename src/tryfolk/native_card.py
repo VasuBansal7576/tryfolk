@@ -273,7 +273,11 @@ class NativeCardAttempt(NormalCardBody):
             self._private_contact_bound = self._contact_email_current = True
 
     def owned_location_checks(self, location, identity):
-        """Official one-time query hints, privately bound; never entitlement."""
+        """Bind destination/payment/status; the owned return app ignores email.
+
+        Its account/order come from the authenticated app session and provider
+        reads, not contact query metadata. Redirects never grant entitlement.
+        """
         try:
             parsed = urlsplit(location) if isinstance(location, str) else urlsplit("")
             pairs = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
@@ -282,7 +286,6 @@ class NativeCardAttempt(NormalCardBody):
         except (ValueError, TypeError):
             parsed, pairs, values, names = urlsplit(""), [], {}, []
         queried = bool(parsed.query) or isinstance(location, str) and "?" in location
-        email = self._frozen_contact_email
         return {
             "owned_return_absolute_exact_path": isinstance(location, str) and location.split("?", 1)[0] == self.owned_return_url,
             "owned_return_no_fragment_credentials": isinstance(location, str) and "#" not in location and not (parsed.username or parsed.password or parsed.fragment)
@@ -292,8 +295,6 @@ class NativeCardAttempt(NormalCardBody):
             "return_payment_independently_bound": not queried or values.get("payment_id") == identity.get("payment_id") == self.context["payment_id"],
             "return_status_independently_bound": not queried or values.get("status") == identity.get("payment_status") == self.response_status
             and self.response_status in ("succeeded", "failed", "cancelled", "processing"),
-            "optional_email_current_observed_account_correlated": "email" not in values or self._contact_email_current
-            and identity.get("customer_correlated") is True and values["email"] == email,
         }
 
     def return_navigation_facts(self, raw):

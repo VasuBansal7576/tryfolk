@@ -384,13 +384,47 @@ async def test_exact_provider_response_redirect_only_to_owned_bound_one_time_ret
     )
 
 
+@pytest.mark.parametrize('contact', ['absent', 'stale', 'different', 'encoded'])
+async def test_optional_return_contact_metadata_does_not_replace_independent_purchase_authority(monkeypatch, contact):
+    query = '?payment_id=pay_fixture&status=succeeded&email=synthetic_fixture%40tryfolk.invalid'
+    if contact == 'different':
+        query = query.replace('synthetic_fixture', 'synthetic_other')
+    elif contact == 'encoded':
+        query = query.replace('synthetic_fixture%40', 'synthetic_fixture%2Bmetadata%40')
+    destination = 'http://127.0.0.1:3300/checkout/return' + query
+    guard, page, state, identity, event, session = await response_fixture(monkeypatch, destination)
+    if contact == 'absent':
+        guard.card_attempt._frozen_contact_email = None
+        guard.card_attempt._contact_email_current = False
+    elif contact == 'stale':
+        guard.card_attempt._contact_email_current = False
+    await guard.redirect_response(session, event, target_type='page', target_id='target')
+    assert 'Fetch.continueResponse' in session.calls and 'Fetch.failRequest' not in session.calls
+    assert guard.card_attempt.navigation_allowed(destination)
+    assert all(guard.events[-1]['provider_redirect_checks'].values())
+    assert not any('email' in key for key in guard.events[-1]['provider_redirect_checks'])
+
+
+@pytest.mark.parametrize('mutation', ['customer', 'Test_environment', 'order', 'approved'])
+async def test_optional_contact_metadata_never_bypasses_independent_redirect_identity(monkeypatch, mutation):
+    destination = 'http://127.0.0.1:3300/checkout/return?payment_id=pay_fixture&status=succeeded&email=synthetic_other%40tryfolk.invalid'
+    guard, page, state, identity, event, session = await response_fixture(monkeypatch, destination)
+    key, value = {'customer': ('customer_correlated', False), 'Test_environment': ('provider_environment', 'live_mode'),
+                  'order': ('order_id', 'other_order'), 'approved': ('approved', False)}[mutation]
+    identity[key] = value
+    await guard.redirect_response(session, event, target_type='page', target_id='target')
+    assert 'Fetch.failRequest' in session.calls and 'Fetch.continueResponse' not in session.calls
+    assert guard.card_attempt._admitted_owned_redirect is None
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
         "wrong_payment",
         "wrong_status",
-        "wrong_email",
         "duplicate",
+        "duplicate_email",
+        "encoded_email_name",
         "unknown",
         "session_id",
         "subscription",
@@ -421,8 +455,9 @@ async def test_provider_redirect_rejects_unowned_or_ambiguous_locations(monkeypa
     changes = {
         "wrong_payment": query.replace("pay_fixture", "pay_other"),
         "wrong_status": query.replace("succeeded", "failed"),
-        "wrong_email": query + "&email=other%40example.com",
         "duplicate": query + "&status=succeeded",
+        "duplicate_email": query + "&email=synthetic_fixture%40tryfolk.invalid&email=synthetic_other%40tryfolk.invalid",
+        "encoded_email_name": query + "&%65mail=synthetic_fixture%40tryfolk.invalid",
         "unknown": query + "&x=1",
         "session_id": query + "&session_id=cks_fixture",
         "subscription": query + "&subscription_id=sub_fixture",
@@ -638,11 +673,12 @@ async def test_private_provider_contact_freezes_exact_current_frame_and_owned_id
         attempt.recheck_contact_email(
             {"email": None, "email_input_present": True, "url": attempt.parent_url, "generation": 1000}
         )
-        assert not attempt.owned_location_checks(
+        assert not attempt._contact_email_current
+        assert all(attempt.owned_location_checks(
             attempt.owned_return_url
             + "?payment_id=pay_fixture&status=succeeded&email=synthetic_fixture%40tryfolk.invalid",
             identity,
-        )["optional_email_current_observed_account_correlated"]
+        ).values())
         assert all(
             attempt.owned_location_checks(
                 attempt.owned_return_url + "?payment_id=pay_fixture&status=succeeded", identity
