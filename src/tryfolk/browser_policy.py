@@ -9,6 +9,7 @@ import math
 from urllib.parse import urlsplit
 
 DODO_CHECKOUT = "https://test.checkout.dodopayments.com"
+DODO_RETURN = "https://test.dodopayments.com"
 DODO_SECURE_FRAME = "https://sdk-v2.custom.hs.dodopayments.com/1.1.0/checkout.html"
 TEST_FIELDS = {
     "card_number": "4242424242424242",

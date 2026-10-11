@@ -29,6 +29,7 @@ ADAPTER_FILES = (
     "src/tryfolk/widget_bootstrap.py",
     "src/tryfolk/browser_events.py",
     "src/tryfolk/response_boundary.py",
+    "src/tryfolk/protocol_identity.py",
     "src/tryfolk/native_preflight.py",
     "src/tryfolk/native_card.py",
     "src/tryfolk/native_card_observation.py",
@@ -37,6 +38,8 @@ ADAPTER_FILES = (
     "src/tryfolk/checkout_discovery.py",
     "src/tryfolk/manual_address.py",
     "src/tryfolk/checkout_navigation.py",
+    "integrations/dodo/contact_binding.mjs",
+    "integrations/dodo/read_contact.mjs",
 )
 
 

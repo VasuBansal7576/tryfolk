@@ -5,7 +5,7 @@ import re
 import time
 from datetime import datetime, timezone
 from urllib.parse import parse_qsl, urlsplit, urljoin, quote
-from .browser_policy import DODO_CHECKOUT, TEST_FIELDS
+from .browser_policy import DODO_CHECKOUT, DODO_RETURN, TEST_FIELDS
 from .secure_frame import BROWSER_API, frame_config
 from .widget_bootstrap import APP_HEADERS, BROWSER_HEADERS, SDK_ORIGIN
 
@@ -153,6 +153,13 @@ class NativeCardAttempt(NormalCardBody):
         super().__init__(raw, generation, owned_origin, browser_info, billing)
         self.parent_url, self.checkout_session_id = parent_url, checkout_session_id
         self._admitted_status_return = None
+        self._admitted_post_confirm_status = None
+        self._admitted_provider_return = self._admitted_owned_redirect = None
+        self._frozen_contact_email = None
+        self._contact_email_current = False
+        self._private_contact_bound = False
+        self.response_status = None
+        self.owned_return_url = owned_origin + "/checkout/return"
         self.clock = clock
         self.armed_at = self.confirmed_at = None
         self.confirmed = self.closed = False
@@ -209,14 +216,113 @@ class NativeCardAttempt(NormalCardBody):
             return True
         parsed = urlsplit(raw)
         if f"{parsed.scheme}://{parsed.netloc}" == self.owned_origin:
+            if parsed.path == "/checkout/return" and self._admitted_provider_return:
+                return self.return_phase_open() and raw == self._admitted_owned_redirect
             return parsed.path in ("/checkout/return", "/special-downloads", "/api/target/download") and (
                 parsed.path != "/checkout/return" or self.return_allowed(raw)
             )
         if not self.return_url:
             return False
         if self._admitted_status_return:
-            return raw == self._admitted_status_return == self.return_url
+            return raw == self._admitted_post_confirm_status or raw == self._admitted_status_return == self.return_url
         return self.return_allowed(raw) and urlsplit(raw).path == urlsplit(self.return_url).path
+
+    def return_phase_open(self):
+        return self.confirmed and self.confirmed_at is not None and 0 <= self.clock() - self.confirmed_at < 300
+
+    def provider_return_url(self):
+        parent = urlsplit(self.parent_url or "")
+        alias = re.fullmatch(r"/([A-Za-z0-9_-]{8})", parent.path)
+        return DODO_RETURN + "/return/" + alias[1] if alias else None
+
+    def freeze_contact_email(self, contact, parent_generation):
+        email = contact.get("email")
+        self._contact_parent_generation = parent_generation
+        if (isinstance(email, str) and re.fullmatch(r"synthetic_[A-Za-z0-9_-]+@tryfolk\.invalid", email)
+                and contact.get("return_email_source_exact") is True and contact.get("url") == self.parent_url
+                and contact.get("generation") == parent_generation and email == self.billing.get("email")):
+            self._frozen_contact_email, self._contact_email_current = email, True
+
+    def recheck_contact_email(self, contact):
+        if self._private_contact_bound:
+            self._contact_email_current = self._contact_email_current and contact.get("url") == self.parent_url and (
+                contact.get("generation") == self._contact_parent_generation
+                and (not contact.get("email_input_present") and contact.get("email") is None
+                     or contact.get("email") == self._frozen_contact_email and contact.get("return_email_source_exact") is True))
+            return
+        self._contact_email_current = self._contact_email_current and bool(self._frozen_contact_email) and (
+            contact.get("email") == self._frozen_contact_email and contact.get("return_email_source_exact") is True
+            and contact.get("url") == self.parent_url and contact.get("generation") == self._contact_parent_generation)
+
+    def freeze_private_contact(self, record, identity, parent_generation):
+        facts = record.get("facts", {})
+        email = record.get("email")
+        if (isinstance(email, str) and re.fullmatch(r"synthetic_[A-Za-z0-9_-]+@tryfolk\.invalid", email)
+                and facts.get("contact_binding_passed") is True and facts.get("test_payments_read") is True
+                and facts.get("redirects_followed") == 0 and facts.get("current_identity_rechecked_after_private_email_read") is True
+                and record.get("config_id") == self.context["config_id"] and record.get("generation") == self.generation
+                and record.get("payment_id") == identity.get("payment_id") == self.context["payment_id"]
+                and record.get("checkout_session_id") == identity.get("checkout_session_id") == self.checkout_session_id
+                and identity.get("approved") is True and identity.get("customer_correlated") is True
+                and isinstance(record.get("ownership"), dict)
+                and set(record["ownership"]) == {"run_id", "persona_id", "account_id", "fixture_id", "target_revision"}
+                and all(isinstance(value, str) and value for value in record["ownership"].values())
+                and record["ownership"] == identity.get("ownership")):
+            self._frozen_contact_email = email
+            self._contact_parent_generation = parent_generation
+            self._private_contact_bound = self._contact_email_current = True
+
+    def owned_location_checks(self, location, identity):
+        """Official one-time query hints, privately bound; never entitlement."""
+        try:
+            parsed = urlsplit(location) if isinstance(location, str) else urlsplit("")
+            pairs = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+            values = dict(pairs)
+            names = [part.split("=", 1)[0] for part in parsed.query.split("&")] if parsed.query else []
+        except (ValueError, TypeError):
+            parsed, pairs, values, names = urlsplit(""), [], {}, []
+        queried = bool(parsed.query) or isinstance(location, str) and "?" in location
+        email = self._frozen_contact_email
+        return {
+            "owned_return_absolute_exact_path": isinstance(location, str) and location.split("?", 1)[0] == self.owned_return_url,
+            "owned_return_no_fragment_credentials": isinstance(location, str) and "#" not in location and not (parsed.username or parsed.password or parsed.fragment)
+            and len(location) <= 4096 and not re.search(r"[\s\\\x00-\x1f\x7f]", location),
+            "one_time_query_fields_closed": not queried or set(values) in ({"payment_id", "status"}, {"payment_id", "status", "email"})
+            and set(names) == set(values) and len(names) == len(pairs) == len(values),
+            "return_payment_independently_bound": not queried or values.get("payment_id") == identity.get("payment_id") == self.context["payment_id"],
+            "return_status_independently_bound": not queried or values.get("status") == identity.get("payment_status") == self.response_status
+            and self.response_status in ("succeeded", "failed", "cancelled", "processing"),
+            "optional_email_current_observed_account_correlated": "email" not in values or self._contact_email_current
+            and identity.get("customer_correlated") is True and values["email"] == email,
+        }
+
+    def return_navigation_facts(self, raw):
+        """Closed private comparisons, independent of navigation admission."""
+        try:
+            current, native, parent = (urlsplit(value or "") for value in (raw, self.return_url, self.parent_url))
+        except (ValueError, TypeError):
+            current = native = parent = urlsplit("")
+        alias = re.fullmatch(r"/([A-Za-z0-9_-]{8})", parent.path)
+        stem = DODO_CHECKOUT + "/status/" + alias[1] if alias else None
+        status = self.response_status
+        derived = stem + "/" + status if stem and status in ("succeeded", "failed", "cancelled", "processing") else None
+        return {
+            "attempt_confirmed": self.confirmed,
+            "attempt_response_terminal": self.closed,
+            "confirmed_native_body_return_available": isinstance(self.return_url, str) and bool(self.return_url),
+            "candidate_equals_frozen_owned_return": raw == self.owned_return_url,
+            "candidate_equals_confirmed_native_body_return": bool(self.return_url) and raw == self.return_url,
+            "candidate_equals_authorized_response_return": bool(self._admitted_post_confirm_status) and raw == self._admitted_post_confirm_status,
+            "native_body_return_is_source_wallet_route": bool(stem) and self.return_url == stem + "/wallet-return"
+            and self.return_url == self._admitted_status_return,
+            "accepted_response_has_finite_status": status in ("succeeded", "failed", "cancelled", "processing"),
+            "candidate_Test_origin": f"{current.scheme}://{current.netloc}" == DODO_CHECKOUT,
+            "candidate_same_confirmed_status_stem": bool(stem) and current.path.rsplit("/", 1)[0] == native.path.rsplit("/", 1)[0],
+            "candidate_finite_source_status_path": bool(re.fullmatch(r"/status/[A-Za-z0-9_-]{8}/(?:succeeded|failed|cancelled|processing)", current.path)),
+            "candidate_query_fragment_credentials_absent": isinstance(raw, str) and "?" not in raw and "#" not in raw
+            and not (current.query or current.fragment or current.username or current.password),
+            "candidate_source_derived_status_exact": derived is not None and raw == derived,
+        }
 
     def check(self, request, headers, raw, generation, native_return, *, native_status=None):
         parsed = urlsplit(request.url)
@@ -319,6 +425,7 @@ class NativeCardAttempt(NormalCardBody):
     def observe_response(self, status, http_status, *, operation="poll", error_code=None):
         # Browser JSON never grants access. Only processing permits another
         # bounded poll; independent Test REST/account checks decide outcome.
+        self.response_status = status if http_status == 200 and status in ("succeeded", "failed", "cancelled", "processing") else None
         if operation == "confirm" and (http_status != 200 or status is None) and error_code != "IR_16":
             self.confirm_response_failed, self.fallback_remaining = True, 1
         elif http_status == 200 and status == "processing":

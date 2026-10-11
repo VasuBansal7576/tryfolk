@@ -4,6 +4,9 @@ The browser checkout path remains credential-gated until genuine sandbox validat
 """
 
 import os
+import asyncio
+import json
+from pathlib import Path
 import re
 from urllib.parse import urlsplit
 import httpx
@@ -183,6 +186,9 @@ class DodoTarget:
 
     async def frame_context(self, observed, run, fixture):
         """Authorize current card input/requests by Test identity, never a secret."""
+        if observed.get("operation") == "contact":
+            contact = await self.private_contact(observed, run, fixture)
+            return {"approved": bool(contact), "private_contact": contact}
         denied = {
             "approved": False,
             "reason": "independent_frame_context_mismatch",
@@ -256,3 +262,75 @@ class DodoTarget:
             # Private callback only; ordinary verification/evidence excludes it.
             "payment_link": receipt.get("private_payment_link"),
         }
+
+    async def read_private_contact(self, expected):
+        """One scoped Test Payments Read in a private pipe; no retries/logs."""
+        if not os.environ.get("DODO_TEST_READ_KEY"):
+            return {}
+        root = Path(__file__).resolve().parents[2]
+        process = await asyncio.create_subprocess_exec(
+            "node", str(root / "integrations/dodo/read_contact.mjs"), stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            async with asyncio.timeout(11):
+                output, _ = await process.communicate(json.dumps(expected).encode())
+            return json.loads(output) if process.returncode == 0 and len(output) <= 3000 else {}
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+
+    async def private_contact(self, observed, run, fixture):
+        """Shared persona/replay callback; no target changes or DOM inference."""
+        expected = {}
+        try:
+            path = Path(os.environ.get("TRYFOLK_DODO_CONTACT_CONTRACT", ""))
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 20_000:
+                return {}
+            contract = json.loads(path.read_text())
+            manifest = (await self.registration())["manifest"]
+            required = {"synthetic_email_creation_contract", "exact_fixed_name_creation_contract", "created_customer_used_in_checkout",
+                        "name_email_editing_disabled", "receipt_customer_id_order_check", "receipt_customer_email_account_check",
+                        "private_authenticated_payment_link_projection", "owned_navigation_customization_closed",
+                        "official_SDK_hardcoded_Test_mode", "owned_return_origin_binding", "card_only_checkout"}
+            if not (contract.get("kind") == "source_fixed_customer_creation_contract_not_provider_name_readback"
+                    and contract.get("passed") is True and contract.get("source_commit") == manifest.get("source_commit")
+                    and contract.get("source_digest") == manifest.get("source_sha256")
+                    and all(contract.get("checks", {}).get(name) is True for name in required)):
+                return {}
+            context = {**observed, "operation": "bootstrap"}
+            identity = await self.frame_context(context, run, fixture)
+            orders = (await self.request("GET", "/api/target/orders", params={"account_id": fixture["account_id"]}))["orders"]
+            if len(orders) != 1:
+                return {}
+            order = orders[0]
+            if not (identity.get("approved") is True and identity.get("provider_environment") == "test_mode"
+                    and identity.get("customer_correlated") is True and identity.get("ownership") == {key: fixture.get(key) for key in OWNERSHIP}
+                    and identity.get("payment_id") == observed.get("payment_id")
+                    and identity.get("checkout_session_id") == observed.get("checkout_session_id") == order.get("checkout_session_id")
+                    and identity.get("order_id") == order.get("order_id") and order.get("active") is True
+                    and all(order.get(key) == fixture.get(key) for key in OWNERSHIP)):
+                return {}
+            expected = {"payment_id": observed["payment_id"], "checkout_session_id": observed["checkout_session_id"],
+                        "customer_id": order["customer_id"], "email": None, "source_account_ownership_verified": True,
+                        "amount_minor": order["amount_minor"], "currency": order["currency"], "product_id": order["expected_product_id"],
+                        "metadata": {**{key: order[key] for key in (*OWNERSHIP, "order_id")}, "product_id": order["expected_product_id"]}}
+            private = await self.read_private_contact(expected)
+            if not isinstance(private, dict):
+                return {}
+            facts, email = private.get("facts", {}), private.get("expected_email")
+            if (not isinstance(facts, dict) or not facts or any(type(v) not in (bool, int) for v in facts.values()) or facts.get("contact_binding_passed") is not True
+                    or facts.get("test_payments_read") is not True or facts.get("redirects_followed") != 0 or not isinstance(email, str)
+                    or not re.fullmatch(r"synthetic_[A-Za-z0-9_-]+@tryfolk\.invalid", email)):
+                return {}
+            fresh = await self.frame_context(context, run, fixture)
+            if any(fresh.get(key) != identity.get(key) for key in ("approved", "provider_environment", "customer_correlated", "payment_correlated", "payment_id", "checkout_session_id", "order_id", "ownership", "payment_status", "payment_link")):
+                return {}
+            return {"email": email, "config_id": observed.get("config_id"), "generation": observed.get("frame_generation"),
+                    "payment_id": identity["payment_id"], "checkout_session_id": identity["checkout_session_id"],
+                    "ownership": identity["ownership"], "facts": {**facts, "current_identity_rechecked_after_private_email_read": True}}
+        except (ValueError, TypeError, KeyError, OSError, TimeoutError):
+            return {}
+        finally:
+            expected.clear()

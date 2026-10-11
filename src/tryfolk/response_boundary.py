@@ -3,15 +3,48 @@
 import asyncio
 from .secure_frame import BROWSER_API
 from .native_preflight import NativePreflightGate
+from .protocol_identity import FrameIdentityCoverage
 
 
 class ResponseBoundary:
     def __init__(self, context, guard):
         self.context, self.guard = context, guard
         self.targets = {}
+        self.coverages = {}
+        self.frame_targets = {}
+        guard.select_native_protocol = self.select_native_protocol
+        guard.return_protocol_reader = self.return_protocol_reader
+        if not hasattr(guard, "native_protocol_readers"):
+            guard.native_protocol_readers = {}
         self.lock = asyncio.Lock()
         self.preflights = NativePreflightGate(guard, BROWSER_API)
         guard.preflight_guard = self.preflights.wait
+
+    async def select_native_protocol(self, document):
+        if not await self.cover(document):
+            raise ValueError("Native document has no continuous protocol coverage.")
+        observed, target_id, target_type = self.frame_targets[id(document)]
+        if observed is not document:
+            raise ValueError("Native document protocol registration changed.")
+        return target_id if target_type == "iframe" else None
+
+    async def return_protocol_reader(self, request):
+        primary = self.coverages.get(self.guard.primary_response_target)
+        if not primary:
+            raise ValueError("Primary protocol coverage is unavailable.")
+        before = await primary.attest(request.url, request.method)
+        native = None
+        main_url = FrameIdentityCoverage.full_url(before["frameTree"]["frame"])
+        capability = self.guard.card_attempt
+        if capability and main_url == capability.parent_url and self.guard._native_protocol_target:
+            coverage = self.coverages.get(self.guard._native_protocol_target)
+            if not coverage:
+                raise ValueError("Selected native protocol coverage is unavailable.")
+            native = await coverage.attest()
+        after = await primary.attest(request.url, request.method)
+        if before != after:
+            raise ValueError("Primary protocol identity changed across native attestation.")
+        return {"main": before, "native": native}
 
     async def cover(self, document):
         async with self.lock:
@@ -30,9 +63,27 @@ class ResponseBoundary:
             if target_type not in ("page", "iframe"):
                 await session.detach()
                 return False
+            self.frame_targets[id(document)] = (document, target_id, target_type)
             if target_id in self.targets:
                 await session.detach()
                 return True
+            coverage = FrameIdentityCoverage(session, target_id, target_type)
+            await coverage.attach()
+            self.coverages[target_id] = coverage
+            if document == self.guard.primary_page and target_type == "page":
+                async def protocol_reader():
+                    return await coverage.refresh()
+
+                self.guard.protocol_reader = protocol_reader
+            elif target_type == "iframe":
+                async def native_protocol_reader():
+                    # The main Page tree omits out-of-process children. Read
+                    # this attached target's current frame/loader and target
+                    # identity; ResourceGuard binds its parent to live main.
+                    return {"frameTree": await coverage.refresh(),
+                            "targetInfo": (await session.send("Target.getTargetInfo"))["targetInfo"]}
+
+                self.guard.native_protocol_readers[target_id] = native_protocol_reader
 
             async def response(event):
                 await self.guard.redirect_response(

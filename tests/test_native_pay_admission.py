@@ -65,6 +65,23 @@ async def admission_fixture(monkeypatch):
     guard.primary_page, guard.policy, guard.response_guard = page, NetworkPolicy("http://127.0.0.1:3300", "dodo"), covered
     guard.card_enabled = True
 
+    async def protocol_frames():
+        root = {"frame":{"id":"main_fixture","loaderId":"main_"+str(state.get("parent_generation",1000)),"url":page.main_frame.url}}
+        if child.parent_frame == page.main_frame:
+            root["childFrames"]=[{"frame":{"id":"child_fixture","loaderId":"child_"+str(state["generation"]),"url":child.url}}]
+        return root
+    guard.protocol_reader=protocol_frames
+
+    async def return_protocol(request):
+        tree = await guard.protocol_reader()
+        native = None
+        if guard._native_protocol_target and tree["frame"].get("url") == guard.card_attempt.parent_url:
+            native = await guard.native_protocol_readers[guard._native_protocol_target]()
+        return {"main": {"frameTree": tree}, "native": native}
+
+    guard.return_protocol_reader = return_protocol
+
+
     async def headers():
         return {}
 

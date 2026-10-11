@@ -6,7 +6,21 @@ import httpx
 
 
 @pytest.mark.parametrize(
-    "mutation", [None, "other_payment", "other_persona", "missing_payment", "fixture", "settled", "inactive", "poll_processing", "poll_succeeded", "poll_unknown", "other_customer", "missing_customer"]
+    "mutation",
+    [
+        None,
+        "other_payment",
+        "other_persona",
+        "missing_payment",
+        "fixture",
+        "settled",
+        "inactive",
+        "poll_processing",
+        "poll_succeeded",
+        "poll_unknown",
+        "other_customer",
+        "missing_customer",
+    ],
 )
 async def test_pre_pay_frame_identity_requires_fresh_independent_test_receipt(records, monkeypatch, mutation):
     order, receipt, _ = deepcopy(records)
@@ -33,7 +47,11 @@ async def test_pre_pay_frame_identity_requires_fresh_independent_test_receipt(re
     if mutation == "inactive":
         order["active"] = False
     if mutation in ("poll_processing", "poll_succeeded", "poll_unknown"):
-        status = {"poll_processing": "processing", "poll_succeeded": "succeeded", "poll_unknown": "unexpected"}[mutation]
+        status = {
+            "poll_processing": "processing",
+            "poll_succeeded": "succeeded",
+            "poll_unknown": "unexpected",
+        }[mutation]
         receipt["payment"]["status"] = receipt["checkout"]["payment_status"] = status
         receipt["state"] = "succeeded" if status == "succeeded" else "pending"
     calls = []
@@ -166,3 +184,100 @@ def test_dodo_pending_setup_and_fixtures_never_become_measured_success(records):
     receipt["state"] = "succeeded"
     assert not correlate(order, receipt, entitlement)["measured"]
     assert correlate(order, receipt, entitlement)["outcome"] == "blocked"
+
+
+async def test_private_contact_callback_uses_owned_source_contract_and_fresh_identity(monkeypatch, tmp_path):
+    import json
+    from tryfolk.dodo import DodoTarget
+
+    source = {"source_commit": "a" * 40, "source_sha256": "b" * 64}
+    ownership = {key: key + "_fixture" for key in OWNERSHIP}
+    fixture = {**ownership, "login_url": "http://127.0.0.1:3300/private", "login_token": "fixture_private"}
+    run = {"id": ownership["run_id"], "revision": ownership["target_revision"]}
+    order = {
+        **ownership,
+        "order_id": "order_fixture",
+        "checkout_session_id": "cks_fixture",
+        "customer_id": "cus_fixture",
+        "active": True,
+        "amount_minor": 100,
+        "currency": "USD",
+        "expected_product_id": "pdt_fixture",
+    }
+    identity = {
+        "approved": True,
+        "provider_environment": "test_mode",
+        "customer_correlated": True,
+        "payment_id": "pay_fixture",
+        "checkout_session_id": "cks_fixture",
+        "order_id": "order_fixture",
+        "ownership": ownership,
+    }
+    target = DodoTarget("http://127.0.0.1:3300")
+
+    async def registration():
+        return {"manifest": source}
+
+    async def request(method, path, **kwargs):
+        assert method == "GET" and path == "/api/target/orders"
+        return {"orders": [order]}
+
+    target.registration, target.request = registration, request
+
+    async def frame(observed, *args):
+        return identity.copy()
+
+    target.frame_context = frame
+    calls = []
+
+    async def private_read(expected):
+        calls.append(expected.copy())
+        return {
+            "facts": {"contact_binding_passed": True, "test_payments_read": True, "redirects_followed": 0},
+            "expected_email": "synthetic_fixture@tryfolk.invalid",
+        }
+
+    target.read_private_contact = private_read
+    path = tmp_path / "contract.json"
+    path.write_text(
+        json.dumps(
+            {
+                "kind": "source_fixed_customer_creation_contract_not_provider_name_readback",
+                "source_commit": "a" * 40,
+                "source_digest": "b" * 64,
+                "checks": {
+                    name: True
+                    for name in [
+                        "synthetic_email_creation_contract",
+                        "exact_fixed_name_creation_contract",
+                        "created_customer_used_in_checkout",
+                        "name_email_editing_disabled",
+                        "receipt_customer_id_order_check",
+                        "receipt_customer_email_account_check",
+                        "private_authenticated_payment_link_projection",
+                        "owned_navigation_customization_closed",
+                        "official_SDK_hardcoded_Test_mode",
+                        "owned_return_origin_binding",
+                        "card_only_checkout",
+                    ]
+                },
+                "passed": True,
+            }
+        )
+    )
+    monkeypatch.setenv("TRYFOLK_DODO_CONTACT_CONTRACT", str(path))
+    observed = {
+        "payment_id": "pay_fixture",
+        "checkout_session_id": "cks_fixture",
+        "config_id": "c" * 64,
+        "frame_generation": 1234,
+    }
+    result = await DodoTarget.private_contact(target, observed, run, fixture)
+    assert result["email"] == "synthetic_fixture@tryfolk.invalid"
+    assert result["facts"]["current_identity_rechecked_after_private_email_read"]
+    assert result["ownership"] == ownership and calls[0]["email"] is None
+    identity["ownership"] = {**ownership, "account_id": "other"}
+    assert not await DodoTarget.private_contact(target, observed, run, fixture)
+    assert len(calls) == 1
+    path.write_text("{}")
+    assert not await DodoTarget.private_contact(target, observed, run, fixture)

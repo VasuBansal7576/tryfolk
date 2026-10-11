@@ -57,3 +57,33 @@ async def test_unknown_child_session_error_never_falls_back_or_claims_coverage()
     boundary = ResponseBoundary(Context(), SimpleNamespace(primary_page=object(), events=[]))
     with pytest.raises(RuntimeError, match="unavailable"):
         await boundary.cover(object())
+
+
+async def test_response_boundary_binds_live_primary_frame_tree_without_runtime_evaluation():
+    primary = object()
+    calls = []
+    tree = {"frame": {"id": "main", "loaderId": "document", "url": "fixture"}}
+
+    class Session:
+        async def send(self, method, args=None):
+            calls.append(method)
+            if method == "Target.getTargetInfo":
+                return {"targetInfo": {"targetId": "primary", "type": "page"}}
+            if method == "Page.getFrameTree":
+                return {"frameTree": tree}
+            assert not method.startswith("Runtime.")
+            return {}
+
+        def on(self, name, fn):
+            pass
+
+    class Context:
+        async def new_cdp_session(self, document):
+            return Session()
+
+    guard = SimpleNamespace(primary_page=primary, events=[])
+    assert await ResponseBoundary(Context(), guard).cover(primary)
+    assert (await guard.protocol_reader())["frame"]["loaderId"] == tree["frame"]["loaderId"]
+    tree["frame"]["loaderId"] = "new_document"
+    assert (await guard.protocol_reader())["frame"]["loaderId"] == "new_document"
+    assert not any(method.startswith("Runtime.") for method in calls)

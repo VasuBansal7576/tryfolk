@@ -172,8 +172,12 @@ READ_CONTACT = """(() => {
   }
  }
  const unique=[...new Set(emails)];
+ const returnEmail=emailInputs.length===1 && (emailInputs[0].disabled||emailInputs[0].readOnly)
+  && /^synthetic_[A-Za-z0-9_-]+@tryfolk\\.invalid$/.test(emailInputs[0].value)
+  && unique.length===1 && unique[0]===emailInputs[0].value;
  const exact=names.some(element=>(element.disabled||element.readOnly)&&element.value==='Tryfolk Synthetic Customer');
  return {email:unique.length===1?unique[0]:null,
+  return_email_source_exact:returnEmail,url:location.href,generation:performance.timeOrigin,
   provider_name_observed:text.includes('Tryfolk Synthetic Customer')||exact,
   name_input_present:names.length>0,
   name_input_readonly:names.some(element=>element.disabled||element.readOnly),

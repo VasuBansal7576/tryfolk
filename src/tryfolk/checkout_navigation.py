@@ -6,12 +6,16 @@ The retained source alone is not evidence of a current browser transition.
 """
 import json
 import re
+import math
 from urllib.parse import parse_qsl, urlencode, urlsplit, quote
 
 from .browser_policy import DODO_CHECKOUT
 
 BILLING_SOURCE_SHA256 = "594824753cd5c68673c5719ec09a77477991381b992f82f1b2542fc44fda0895"
 NORMALIZER_SOURCE_SHA256 = "174be265126b29a5d7344bb545876bf50ba35f8bf816bc9858db998ef1ced24f"
+RETURN_SOURCE_SHA256 = "78448c8d8f29f9f76004d79dc7c00ef22839fe72fc198b0316ef849945c02bfa"
+STATUS_SOURCE_SHA256 = "6314a328275f2e6633034d55a11c76bc6459974b9caeb6b2a194dd42d8148fd0"
+WALLET_SOURCE_SHA256 = "9031ab0923232e24875b5e9866a10e37a88c39089bba18524876429f6c6b2ec9"
 
 # Server-only current-document read. Never include its result in SDK/model or
 # evidence payloads; retain only normalization_checks, not this private map.
@@ -45,6 +49,8 @@ class CheckoutNavigation:
         self.customization = customization
         self.source_generation = self.continue_generation = None
         self.normalizer_generation = self._armed_normalization = None
+        self.return_source_generation = None
+        self.status_destination = self.status_source_generation = self.status_protocol = None
         self.submission = self.transition = None
 
     def _entry_current(self, document):
@@ -56,20 +62,46 @@ class CheckoutNavigation:
         )
 
     def source_checks(self, digest, document):
+        if digest in (STATUS_SOURCE_SHA256, WALLET_SOURCE_SHA256):
+            return {
+                "reviewed_source_hash_bound": digest == (WALLET_SOURCE_SHA256 if (self.status_destination or "").endswith("/wallet-return") else STATUS_SOURCE_SHA256),
+                "source_authorized_status_current": bool(self.status_destination) and document.get("url") == self.status_destination,
+                "source_new_status_generation": isinstance(document.get("generation"), (int, float))
+                and not isinstance(document.get("generation"), bool) and math.isfinite(document["generation"])
+                and document["generation"] > 0 and document.get("generation") != self.return_source_generation,
+                "status_source_generation_unchanged": self.status_source_generation in (None, document.get("generation")),
+            }
         return {
-            "reviewed_source_hash_bound": digest in (BILLING_SOURCE_SHA256, NORMALIZER_SOURCE_SHA256),
+            "reviewed_source_hash_bound": digest in (BILLING_SOURCE_SHA256, NORMALIZER_SOURCE_SHA256, RETURN_SOURCE_SHA256),
             "source_original_entry_current": document.get("url") == self.entry_url and valid_test_link(self.entry_url),
             "source_generation_available": isinstance(document.get("generation"), (int, float)),
         }
 
     def observe_source(self, digest, document):
         if all(self.source_checks(digest, document).values()):
-            if digest == NORMALIZER_SOURCE_SHA256:
+            if digest in (STATUS_SOURCE_SHA256, WALLET_SOURCE_SHA256):
+                self.status_source_generation = document["generation"]
+            elif digest == NORMALIZER_SOURCE_SHA256:
                 self.normalizer_generation = document["generation"]
+            elif digest == RETURN_SOURCE_SHA256:
+                self.return_source_generation = document["generation"]
             else:
                 self.source_generation = document["generation"]
             return True
         return False
+
+    def status_source_current(self, protocol):
+        # The script capture binds this exact current live CDP document, not a
+        # JavaScript read of a document whose next navigation is paused.
+        return (bool(self.status_destination) and self.status_source_generation is not None
+                and bool(self.status_protocol) and protocol == self.status_protocol
+                and protocol.get("url") == self.status_destination)
+
+    def return_source_current(self, document):
+        return (self.return_source_generation is not None
+                and self.return_source_generation == self.source_generation == self.continue_generation
+                == (self.submission or {}).get("generation") == (self.transition or {}).get("generation")
+                == document.get("generation"))
 
     def expect_continue(self, document):
         if self._entry_current(document) and self.continue_generation is None:
