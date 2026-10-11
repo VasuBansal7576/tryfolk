@@ -27,7 +27,7 @@ export function createTransport(base: string, csrf: () => string | null, fetcher
     try {
       response = await fetcher(`${base}${path}`, {
         method,
-        headers, credentials: 'include', body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+        headers, credentials: 'include', cache: 'no-store', body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
         signal: AbortSignal.timeout(20_000),
       });
     } catch {

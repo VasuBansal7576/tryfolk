@@ -8,9 +8,9 @@ const readiness = {
   integrations: { dodo: { status: 'configured', detail: 'Credentials configured; execution is not verified.' } },
 };
 
-test('registered URL and imported plan never imply verified source or successful execution', () => {
+test('service-reported URL and imported plan never imply owner registration or successful execution', () => {
   const facts = readinessFacts(readiness, '');
-  assert.equal(facts.appStatus, 'Registered URL');
+  assert.equal(facts.appStatus, 'Service-reported app URL');
   assert.equal(facts.sourceStatus, 'Not reported');
   assert.equal(facts.services[0].status, 'configured');
   assert.deepEqual(facts.gates, readiness.gates);

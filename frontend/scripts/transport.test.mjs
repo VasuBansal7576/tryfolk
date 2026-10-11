@@ -15,6 +15,7 @@ test('owner GET uses the protected cookie; deliberate mutation uses only the cur
   });
   await request('/connections', responseSchema);
   assert.equal(calls[0].options.credentials, 'include');
+  assert.equal(calls[0].options.cache, 'no-store');
   assert.equal(calls[0].options.method, 'GET');
   assert.equal(calls[0].options.body, undefined);
   assert.equal(calls[0].options.headers.has('X-CSRF-Token'), false);

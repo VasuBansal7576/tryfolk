@@ -8,7 +8,9 @@ import { affordabilityMessage, forecastSource, quoteBudget } from './budget';
 import { RequestJournal, recoverRequest, replayBlocker, repairTargetRevision } from './operations';
 import type { PendingRequest } from './operations';
 import type { SavedRun } from './session';
-import { readinessFacts } from './setup';
+import { readinessFacts, renderConnections } from './setup';
+import { applyRegistration, connectionSnapshot, registrationAvailable, registrationMessage, sourceVerified } from './connections';
+import type { ConnectionState } from './connections';
 
 type View = { kind: 'start' } | { kind: 'setup' } | { kind: 'quote'; quote: Quote } | { kind: 'run'; id: string };
 type Modal = { kind: 'people'; query: string; page: number } | { kind: 'person'; id: string } | { kind: 'finding'; id: string } | { kind: 'trace' } | { kind: 'history' } | { kind: 'cancel' } | { kind: 'repair'; findingId: string } | { kind: 'replay' } | { kind: 'pending' } | { kind: 'screenshot'; eventId: number } | { kind: 'about' };
@@ -23,6 +25,9 @@ let setupReturn: Exclude<View, { kind: 'setup' }> | null = null;
 let modal: Modal | null = null;
 let readiness: Readiness | null = null;
 let readinessError = '';
+let connections: ConnectionState = { kind: 'guest', message: 'Authorize the owner to inspect approved app and source connections.' };
+let connectionUrl = '';
+let connectionEpoch = 0;
 let run: Run | null = null;
 let findings: Finding[] = [];
 let findingsError = '';
@@ -97,6 +102,7 @@ function currentReplayBlocker(current: Run): string | null {
 }
 function render(): void {
   const focused = document.activeElement;
+  const ownerInput = elements.main.querySelector('#owner-secret');
   const focusId = focused instanceof HTMLElement && elements.main.contains(focused) ? focused.id : '';
   const focusAction = focused instanceof HTMLElement && elements.main.contains(focused) ? focused.dataset.action : undefined;
   elements.context.innerHTML = view.kind === 'run' && run ? `<div class="context"><span>${escape(host(run.app_url))}</span><span>${number(run.persona_count)} people</span></div>` : '';
@@ -107,11 +113,14 @@ function render(): void {
     case 'run': renderRun(); break;
   }
   elements.main.insertAdjacentHTML('afterbegin', pendingBanner());
+  // Retain an unfinished password only in its input node across unrelated setup refreshes.
+  const replacement = elements.main.querySelector('#owner-secret');
+  if (ownerInput instanceof HTMLInputElement && replacement instanceof HTMLInputElement && !owner) replacement.replaceWith(ownerInput);
   const restored = focusId ? document.getElementById(focusId) : focusAction ? Array.from(elements.main.querySelectorAll('[data-action]')).find(element => element instanceof HTMLElement && element.dataset.action === focusAction) : null;
   if (restored instanceof HTMLElement) restored.focus({ preventScroll: true });
 }
 function renderStart(): void {
-  elements.main.innerHTML = `<section class="world landing"><img class="world-art" src="/assets/arrival.png" alt=""><div class="landing-content"><h1>Before the<br>world gets here.</h1><form class="start-form" id="start-form"><label class="url-field"><span class="sr-only">App URL</span><input id="url" name="url" type="url" inputmode="url" value="${escape(appUrl)}" placeholder="https://your-app.example" autocomplete="url" required></label><label class="count-field"><span class="sr-only">Number of personas</span><input id="count" name="count" type="number" min="1" max="1000" step="1" value="${escape(personaCount)}" required><span>people</span></label><button class="primary" type="submit" ${busy ? 'disabled' : ''}>${busy ? 'Getting budget…' : 'Review budget'}</button></form>${banner(error)}<p class="start-note">Initial test + the same saved customers after a fix. Review both passes upfront.</p><div class="landing-links">${readinessFacts(readiness, readinessError).canSelectApp ? '<button class="text-button" data-action="demo">Use registered app URL</button>' : ''}<button class="text-button" data-action="about">How it works</button><span>Local test · No charges</span></div>${readiness ? `<p class="allowance">Current execution ceiling: ${number(readiness.max_personas)} people. Requests are never reduced silently.</p>` : readinessError ? `<p class="allowance status-bad">Connection status is unavailable. <button class="text-button" data-action="setup">Review app connection</button></p>` : '<p class="allowance">Checking the local test connection…</p>'}</div></section>`;
+  elements.main.innerHTML = `<section class="world landing"><img class="world-art" src="/assets/arrival.png" alt=""><div class="landing-content"><h1>Before the<br>world gets here.</h1><form class="start-form" id="start-form"><label class="url-field"><span class="sr-only">App URL</span><input id="url" name="url" type="url" inputmode="url" value="${escape(appUrl)}" placeholder="https://your-app.example" autocomplete="url" required></label><label class="count-field"><span class="sr-only">Number of personas</span><input id="count" name="count" type="number" min="1" max="1000" step="1" value="${escape(personaCount)}" required><span>people</span></label><button class="primary" type="submit" ${busy ? 'disabled' : ''}>${busy ? 'Getting budget…' : 'Review budget'}</button></form>${banner(error)}<p class="start-note">Initial test + the same saved customers after a fix. Review both passes upfront.</p><div class="landing-links">${readinessFacts(readiness, readinessError).canSelectApp ? '<button class="text-button" data-action="demo">Use test app URL</button>' : ''}<button class="text-button" data-action="about">How it works</button><span>Local test · No charges</span></div>${readiness ? `<p class="allowance">Current execution ceiling: ${number(readiness.max_personas)} people. Requests are never reduced silently.</p>` : readinessError ? `<p class="allowance status-bad">Connection status is unavailable. <button class="text-button" data-action="setup">Review app connection</button></p>` : '<p class="allowance">Checking the local test connection…</p>'}</div></section>`;
 }
 function renderQuote(quote: Quote): void {
   const expired = Date.parse(quote.expires_at) <= Date.now();
@@ -122,7 +131,7 @@ function renderSetup(): void {
   const facts = readinessFacts(readiness, readinessError);
   const backLabel = setupReturn?.kind === 'run' ? 'Return to saved run' : setupReturn?.kind === 'quote' ? 'Return to budget review' : 'Back to your URL and count';
   const freshness = facts.freshness === 'stale' ? '<p class="setup-stale" role="status">Last reported setup · the refresh failed. These details may have changed.</p>' : facts.freshness === 'loading' ? '<p class="muted" role="status">Checking the local service…</p>' : '';
-  elements.main.innerHTML = `<section class="page setup-page"><button class="back" data-action="setup-back">${backLabel}</button><h1>Connect once.<br>Run with a link.</h1><p class="lead">Connect a supported owned test app. A URL does not grant access to a private repository or payment records.</p>${banner(error)}${banner(readinessError, '<button class="secondary" data-action="refresh-readiness">Retry setup check</button>')}${freshness}<section class="setup-target"><h2>Your app connection</h2><dl class="connection-facts"><div><dt>App</dt><dd><strong>${facts.appStatus}</strong>${facts.appUrl ? `<span>${escape(facts.appUrl)}</span>` : '<span>The service has not reported a registered app URL.</span>'}</dd></div><div><dt>Repository and source</dt><dd><strong>${facts.sourceStatus}</strong><span>${facts.sourceDetail}</span></dd></div><div><dt>Run readiness</dt><dd><strong>Checked at budget review</strong><span>Registration and owner authorization are separate from browser, payment and repair readiness. The selected app’s quote reports its remaining prerequisites before launch.</span></dd></div></dl><p class="small muted">App registration is not available through this service interface yet. Source ownership, permitted repository access and a compatible test adapter must be verified by the service.</p></section>${renderOwner()}${readiness ? `<section class="setup-prerequisites"><h2>Remaining setup</h2>${facts.gates.length ? gates(facts.gates) : '<p>No general setup blockers were reported. This is not a successful journey or approval to execute a target.</p>'}<p class="small muted">Current execution ceiling: ${number(readiness.max_personas)} people. Your requested count is retained; both passes are quoted before launch.</p><details class="integration-details"><summary>Service-reported prerequisites</summary>${facts.services.map(item => `<div class="evidence-row"><div><strong>${escape(item.label)}</strong><small>${escape(item.detail)}</small>${link(item.evidence, 'Setup evidence')}</div><span>${escape(humanize(item.status))}</span></div>`).join('')}</details></section>` : '<p class="muted">Setup prerequisites are unavailable until the local service responds.</p>'}<div class="actions"><button class="secondary" data-action="refresh-readiness" ${busy ? 'disabled' : ''}>Refresh setup</button>${facts.canSelectApp ? '<button class="primary" data-action="demo">Use registered app URL</button>' : ''}</div><p class="same-population">The initial pass saves all requested customers. The retest reuses that exact population and its original allowance.</p></section>`;
+  elements.main.innerHTML = `<section class="page setup-page"><button class="back" data-action="setup-back">${backLabel}</button><h1>Connect once.<br>Run with a link.</h1><p class="lead">Connect a supported owned test app. A URL does not grant access to a private repository or payment records.</p>${banner(error)}${banner(readinessError, '<button class="secondary" data-action="refresh-readiness">Retry setup check</button>')}${freshness}${connectionSnapshot(connections) ? '' : `<section class="setup-target"><h2>Your app connection</h2><dl class="connection-facts"><div><dt>App</dt><dd><strong>${facts.appStatus}</strong>${facts.appUrl ? `<span>${escape(facts.appUrl)}</span>` : '<span>The service has not reported a registered app URL.</span>'}</dd></div><div><dt>Repository and source</dt><dd><strong>${facts.sourceStatus}</strong><span>${facts.sourceDetail}</span></dd></div><div><dt>Run readiness</dt><dd><strong>Checked at budget review</strong><span>Registration and owner authorization are separate from browser, payment and repair readiness. The selected app’s quote reports its remaining prerequisites before launch.</span></dd></div></dl><p class="small muted">The general setup check cannot verify source access. Owner-only connection details below report the supported registration capability.</p></section>`}${renderOwner()}${renderConnections(connections, connectionUrl, busy)}${readiness ? `<section class="setup-prerequisites"><h2>Remaining setup</h2>${facts.gates.length ? gates(facts.gates) : '<p>No general setup blockers were reported. This is not a successful journey or approval to execute a target.</p>'}<p class="small muted">Current execution ceiling: ${number(readiness.max_personas)} people. Your requested count is retained; both passes are quoted before launch.</p><details class="integration-details"><summary>Service-reported prerequisites</summary>${facts.services.map(item => `<div class="evidence-row"><div><strong>${escape(item.label)}</strong><small>${escape(item.detail)}</small>${link(item.evidence, 'Setup evidence')}</div><span>${escape(humanize(item.status))}</span></div>`).join('')}</details></section>` : '<p class="muted">Setup prerequisites are unavailable until the local service responds.</p>'}<div class="actions"><button class="secondary" data-action="refresh-readiness" ${busy ? 'disabled' : ''}>Refresh setup</button>${facts.canSelectApp ? '<button class="primary" data-action="demo">Use test app URL</button>' : ''}</div><p class="same-population">The initial pass saves all requested customers. The retest reuses that exact population and its original allowance.</p></section>`;
 }
 function renderOwner(): string {
   return `<section class="owner-panel"><h2>Owner authorization</h2><p>Authorize app setup, repair and retest with the local service’s owner secret. Signing in does not register a repository or prove a working payment flow.</p>${banner(ownerError)}${owner ? '<p class="status-good">Owner session authorized.</p><button class="secondary" data-action="owner-logout">Disconnect owner</button>' : ownerSupported ? `<form id="owner-form" class="owner-form"><label class="label" for="owner-secret">Owner secret</label><input class="field" id="owner-secret" name="secret" type="password" autocomplete="off" required><button class="primary" type="submit" ${busy ? 'disabled' : ''}>Authorize owner</button></form><p class="small muted">The secret is sent only to the local service. It is not saved in this app. The service sets a protected, expiring session cookie.</p>` : '<p class="muted">Owner authorization is unavailable. Check the local service, then refresh.</p>'}</section>`;
@@ -261,7 +270,60 @@ async function refreshReadiness(): Promise<void> {
 async function refreshOwner(): Promise<void> {
   try { const session = await api.owner(); owner = session.owner; ownerSupported = true; ownerError = ''; }
   catch (value) { owner = false; ownerSupported = false; ownerError = errorMessage(value); }
+  if (!owner) {
+    connectionEpoch += 1;
+    connections = { kind: 'guest', message: 'Authorize the owner to inspect approved app and source connections.' };
+    connectionUrl = '';
+  }
   if (view.kind === 'setup') render();
+}
+async function refreshConnections(): Promise<void> {
+  if (!owner) return;
+  const epoch = ++connectionEpoch;
+  const previous = connectionSnapshot(connections);
+  connections = { kind: 'loading', previous };
+  if (view.kind === 'setup') render();
+  try {
+    const data = await api.connections();
+    if (epoch !== connectionEpoch || !owner) return;
+    connections = { kind: 'ready', data };
+    if (!data.targets.some(target => target.app_url === connectionUrl)) connectionUrl = data.targets.find(target => target.app_url === appUrl)?.app_url ?? data.targets[0]?.app_url ?? '';
+  } catch (value) {
+    if (epoch !== connectionEpoch) return;
+    if (value instanceof ApiError && [401, 403].includes(value.status)) {
+      owner = false;
+      connections = { kind: 'guest', message: 'The owner session was declined. Authorize the owner again to inspect connections.' };
+      connectionUrl = '';
+      await refreshOwner();
+    } else if (value instanceof ApiError && value.status === 404) {
+      connections = { kind: 'unsupported', message: 'This service does not expose app registration. Update the local service to use supported owner connections; the general setup check remains available.' };
+    } else connections = { kind: 'unavailable', message: errorMessage(value), previous };
+  }
+  if (view.kind === 'setup') render();
+}
+async function refreshSetup(): Promise<void> {
+  await refreshOwner();
+  await Promise.allSettled([refreshReadiness(), refreshConnections()]);
+}
+async function registerApp(): Promise<void> {
+  if (!owner || connections.kind !== 'ready' || !registrationAvailable(connections)) throw new Error('Refresh owner connection capabilities before registering an app.');
+  const data = connections.data;
+  const url = connectionUrl;
+  if (!data.targets.some(target => target.app_url === url)) throw new Error('Choose an app approved by this service. General customer URLs need a supported source and adapter connection.');
+  const epoch = ++connectionEpoch;
+  connections = { kind: 'loading', previous: data };
+  if (view.kind === 'setup') render();
+  try {
+    const registered = await api.registerConnection(url);
+    const updated = applyRegistration(data, url, registered);
+    if (epoch !== connectionEpoch || !owner) return;
+    connections = { kind: 'ready', data: updated };
+    notify(registrationMessage(registered));
+    await refreshReadiness();
+  } catch (value) {
+    if (epoch === connectionEpoch) connections = { kind: 'unavailable', message: errorMessage(value), previous: data };
+    throw value;
+  }
 }
 async function getQuote(): Promise<void> {
   busy = true; error = ''; render();
@@ -339,7 +401,7 @@ async function mutate(operation: () => Promise<void>): Promise<void> {
 async function action(name: string, id: string): Promise<void> {
   switch (name) {
     case 'home': go({ kind: 'start' }); break;
-    case 'setup': go({ kind: 'setup' }); void refreshReadiness(); void refreshOwner(); break;
+    case 'setup': if (!busy) { go({ kind: 'setup' }); await refreshSetup(); } break;
     case 'setup-back': {
       const previous = setupReturn;
       if (previous?.kind === 'run') {
@@ -357,8 +419,13 @@ async function action(name: string, id: string): Promise<void> {
     case 'history': openModal({ kind: 'history' }); break;
     case 'close': closeModal(); break;
     case 'demo': if (readiness?.target_url && readinessFacts(readiness, readinessError).canSelectApp) { appUrl = readiness.target_url; go({ kind: 'start' }); } break;
-    case 'refresh-readiness': await Promise.allSettled([refreshReadiness(), refreshOwner()]); break;
-    case 'owner-logout': await mutate(async () => { await api.disconnectOwner(); owner = false; notify('Owner disconnected. You can still inspect your saved runs.'); }); break;
+    case 'refresh-readiness': if (!busy) await refreshSetup(); break;
+    case 'use-connection': {
+      const target = connections.kind === 'ready' ? connections.data.targets.find(item => item.id === id) : null;
+      if (target?.registration_status === 'registered' && sourceVerified(target) && !busy) { appUrl = target.app_url; go({ kind: 'start' }); }
+      break;
+    }
+    case 'owner-logout': await mutate(async () => { await api.disconnectOwner(); owner = false; connectionEpoch += 1; connections = { kind: 'guest', message: 'Authorize the owner to inspect approved app and source connections.' }; connectionUrl = ''; notify('Owner disconnected. You can still inspect your saved runs.'); }); break;
     case 'requote': await getQuote(); break;
     case 'confirm-quote': {
       if (view.kind !== 'quote') break;
@@ -443,7 +510,13 @@ document.addEventListener('submit', event => {
     const data = new FormData(event.target);
     const secret = String(data.get('secret') || '');
     event.target.reset();
-    if (secret && !busy) void mutate(async () => { const session = await api.connectOwner(secret); if (!session.owner) throw new Error('Owner authorization was not granted.'); owner = true; ownerSupported = true; ownerError = ''; notify('Owner session authorized.'); });
+    if (secret && !busy) void mutate(async () => { const session = await api.connectOwner(secret); if (!session.owner) throw new Error('Owner authorization was not granted.'); owner = true; ownerSupported = true; ownerError = ''; await refreshConnections(); notify(owner ? 'Owner session authorized.' : 'Owner authorization needs review.'); });
+    return;
+  }
+  if (event.target.id === 'connection-form') {
+    event.preventDefault();
+    const data = new FormData(event.target); connectionUrl = String(data.get('app_url') || '');
+    if (!busy) void mutate(registerApp);
     return;
   }
   if (event.target.id !== 'start-form') return;
@@ -456,6 +529,7 @@ document.addEventListener('submit', event => {
   if (!busy) void getQuote();
 });
 document.addEventListener('input', event => {
+  if (event.target instanceof HTMLSelectElement && event.target.id === 'connection-url') { connectionUrl = event.target.value; return; }
   if (!(event.target instanceof HTMLInputElement)) return;
   if (event.target.id === 'url') appUrl = event.target.value;
   if (event.target.id === 'count') personaCount = event.target.value;

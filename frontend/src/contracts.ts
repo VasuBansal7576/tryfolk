@@ -132,6 +132,19 @@ export const readinessSchema = z.object({
   integrations: z.record(z.string(), z.object({ status: z.string(), detail: z.string(), evidence: z.string().optional() })),
   gates: z.array(gateSchema), target_url: z.string().nullable(), max_personas: count, cfo_plan_status: z.string(),
 });
+export const connectionSchema = z.object({
+  id: z.string().min(1), app_url: z.url(), registration_status: z.enum(['registered', 'unregistered']),
+  execution_ready: z.boolean(), provider: z.string(), revision: z.string(),
+  source: z.object({
+    status: z.string(), repository_label: z.string(), repository_url: z.string().nullable(),
+    commit: z.string().nullable(), digest: z.string().nullable(), detail: z.string(),
+  }),
+  gates: z.array(gateSchema),
+});
+export const connectionsSchema = z.object({
+  version: z.literal('1'), registration_supported: z.boolean(), ownership_scope: z.string(),
+  supported_adapters: z.array(z.string()), targets: z.array(connectionSchema),
+});
 export type Gate = z.infer<typeof gateSchema>;
 export type Quote = z.infer<typeof quoteSchema>;
 export type QuoteV2 = z.infer<typeof quoteV2Schema>;
@@ -145,3 +158,5 @@ export type Finding = z.infer<typeof findingSchema>;
 export type Readiness = z.infer<typeof readinessSchema>;
 export type Provenance = z.infer<typeof provenanceSchema>;
 export type TargetProvenance = z.infer<typeof targetProvenanceSchema>;
+export type Connection = z.infer<typeof connectionSchema>;
+export type Connections = z.infer<typeof connectionsSchema>;
