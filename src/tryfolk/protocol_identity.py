@@ -50,9 +50,13 @@ class FrameIdentityCoverage:
 
     def within_document(self, event):
         frame = self.frames.get(event.get("frameId"))
-        if frame is not None:
+        same_url = frame is not None and bool(self.full_url(frame)) and event.get("url") == self.full_url(frame)
+        # pushState/replaceState can emit an event without changing the full
+        # URL or physical document. Preserve its anchor and document epoch;
+        # the event revision still fences changes during independent reads.
+        if frame is not None and not same_url:
             frame["url"], frame["urlFragment"] = event.get("url"), ""
-        if event.get("frameId") in (self.root_id, self.target_id):
+        if not same_url and event.get("frameId") in (self.root_id, self.target_id):
             self.document_revision += 1
         self.revision += 1
 

@@ -85,7 +85,8 @@ async def covered_return(monkeypatch, *, oopif=False):
 
     page.evaluate = child.evaluate = guard.parent_reader = forbidden
     return SimpleNamespace(guard=guard, boundary=boundary, primary=primary_session,
-                           native_session=native_session, native=copy.deepcopy(native), request=request)
+                           native_session=native_session, native=copy.deepcopy(native), request=request,
+                           page=page, identity=identity)
 
 
 @pytest.mark.parametrize("oopif", [False, True])

@@ -151,3 +151,27 @@ async def test_native_session_rejects_intervening_document_request_without_commi
     )
     with pytest.raises(ValueError):
         await coverage.attest()
+
+
+async def test_same_fullURL_history_preserves_fragmented_frame_anchor_without_renderer_refresh():
+    session = Session()
+    session.frame["urlFragment"] = "#owned"
+    session.target["url"] += "#owned"
+    coverage = FrameIdentityCoverage(session, "main", "page")
+    await coverage.attach()
+    await coverage.refresh()
+    session.emit("Page.navigatedWithinDocument", {"frameId": "main", "url": session.target["url"]})
+    session.paused, session.calls = True, []
+    observed = await coverage.attest()
+    assert observed["frameTree"]["frame"]["url"] == session.frame["url"]
+    assert observed["frameTree"]["frame"]["urlFragment"] == "#owned"
+    assert session.calls == ["Target.getTargetInfo", "Target.getTargetInfo"]
+
+
+@pytest.mark.parametrize("event", ["Page.documentOpened", "Inspector.targetCrashed", "Inspector.detached"])
+async def test_same_fullURL_history_never_restores_lost_document_coverage(event):
+    session, coverage = await fixture(iframe=True)
+    session.emit(event, {})
+    session.emit("Page.navigatedWithinDocument", {"frameId": "native", "url": session.target["url"]})
+    with pytest.raises(ValueError, match="committed"):
+        await coverage.attest()
