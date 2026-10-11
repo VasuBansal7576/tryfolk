@@ -11,6 +11,7 @@ import type { SavedRun } from './session';
 import { readinessFacts, renderConnections } from './setup';
 import { applyRegistration, connectionSnapshot, registrationAvailable, registrationMessage, sourceVerified } from './connections';
 import type { ConnectionState } from './connections';
+import { readRunEvidence } from './run-read';
 
 type View = { kind: 'start' } | { kind: 'setup' } | { kind: 'quote'; quote: Quote } | { kind: 'run'; id: string };
 type Modal = { kind: 'people'; query: string; page: number } | { kind: 'person'; id: string } | { kind: 'finding'; id: string } | { kind: 'trace' } | { kind: 'history' } | { kind: 'cancel' } | { kind: 'repair'; findingId: string } | { kind: 'replay' } | { kind: 'pending' } | { kind: 'screenshot'; eventId: number } | { kind: 'about' };
@@ -347,38 +348,42 @@ async function submitSavedRequest(): Promise<void> {
     result => remember(result.status, result.access_token));
     run = result.status;
     const entry = savedRuns.find(item => item.id === result.id);
-    if (entry) await openRun(entry);
+    if (entry) await openRun(entry, result.status);
   } catch (value) {
     if (value instanceof ApiError) requestJournal.decline(value.status, value.code, value.message);
     throw value;
   }
 }
-async function openRun(entry: SavedRun): Promise<void> {
+async function openRun(entry: SavedRun, initial?: Run): Promise<void> {
   stopPolling(); closeModal(); error = ''; pollError = ''; findings = []; findingsError = '';
   view = { kind: 'run', id: entry.id };
   location.hash = `run=${encodeURIComponent(entry.id)}`;
   render();
-  await pollRun(pollEpoch);
+  await pollRun(pollEpoch, initial);
 }
 async function refreshFindings(id: string, token: string): Promise<void> {
-  try { const result = await api.findings(id, token); if (view.kind === 'run' && view.id === id) { findings = result.findings; findingsError = ''; } }
-  catch (value) { if (view.kind === 'run' && view.id === id) findingsError = errorMessage(value); }
+  const epoch = pollEpoch;
+  try { const result = await api.findings(id, token); if (epoch === pollEpoch && view.kind === 'run' && view.id === id) { findings = result.findings; findingsError = ''; } }
+  catch (value) { if (epoch === pollEpoch && view.kind === 'run' && view.id === id) findingsError = errorMessage(value); }
 }
-async function pollRun(epoch: number): Promise<void> {
+async function pollRun(epoch: number, initial?: Run): Promise<void> {
   if (view.kind !== 'run' || epoch !== pollEpoch) return;
   const id = view.id;
   const entry = savedRuns.find(item => item.id === id);
   if (!entry) { error = 'This tab has no access token for the run. Open one from Runs, or start a new test.'; render(); return; }
   try {
-    const next = await api.run(id, entry.token);
+    const reads = readRunEvidence(api, { id, token: entry.token, initial });
+    const next = await reads.run;
+    if (epoch !== pollEpoch || view.kind !== 'run' || view.id !== id) return;
+    const nextFindings = await reads.findings;
     if (epoch !== pollEpoch || view.kind !== 'run' || view.id !== id) return;
     const changed = JSON.stringify(run) !== JSON.stringify(next) || !!pollError;
     run = next; pollError = ''; error = '';
     if (entry.parentRunId !== next.parent_run_id) remember(next, entry.token);
     const previousFindings = JSON.stringify(findings);
     const previousError = findingsError;
-    await refreshFindings(id, entry.token);
-    if (epoch !== pollEpoch) return;
+    if (nextFindings.kind === 'ready') { findings = nextFindings.findings; findingsError = ''; }
+    else findingsError = errorMessage(nextFindings.error);
     if (changed || previousFindings !== JSON.stringify(findings) || previousError !== findingsError) render();
     if (isActive(next) || next.repair?.status === 'queued' || next.repair?.status === 'running') pollTimer = setTimeout(() => void pollRun(epoch), 1000);
   } catch (value) {
@@ -547,13 +552,15 @@ void (async () => {
   const requestedId = location.hash.startsWith('#run=') ? decodeURIComponent(location.hash.slice(5)) : null;
   if (!requestedId) return;
   let existing = savedRuns.find(item => item.id === requestedId);
+  let initial: Run | undefined;
   if (!existing && owner) {
     try {
       const requested = await api.run(requestedId, '');
       remember(requested, '');
       existing = savedRuns.find(item => item.id === requestedId);
+      initial = requested;
     } catch (value) { error = errorMessage(value); render(); }
   }
-  if (existing) await openRun(existing);
+  if (existing) await openRun(existing, initial);
   else if (!owner) { ownerError = 'Authorize the local owner to inspect this run link, or open a run saved in this tab.'; go({ kind: 'setup' }); setupReturn = { kind: 'run', id: requestedId }; render(); }
 })();
