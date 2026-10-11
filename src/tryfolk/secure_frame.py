@@ -15,7 +15,7 @@ def redact_frame_config(value):
         return PRIVATE_VALUE.sub("[redacted]", FRAME_URL.sub(DODO_SECURE_FRAME, value))
     if isinstance(value, dict):
         return {
-            key: "[redacted]" if key in ("publishableKey", "clientSecret") else redact_frame_config(item)
+            key: "[redacted]" if key in ("publishableKey", "clientSecret", "payment_link", "private_payment_link") else redact_frame_config(item)
             for key, item in value.items()
         }
     if isinstance(value, (list, tuple)):

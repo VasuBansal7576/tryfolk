@@ -209,7 +209,7 @@ class DodoTarget:
         order = orders[0]
         if not order.get("active") or any(order.get(key) != fixture[key] for key in OWNERSHIP):
             return denied
-        receipt = await self.request("GET", "/api/target/receipts", params={"order_id": order["order_id"]})
+        receipt = await self.request("GET", "/api/target/receipts", params={"order_id": order["order_id"], "browser_parent": "1"})
         payment, checkout = receipt.get("payment") or {}, receipt.get("checkout") or {}
         metadata = payment.get("metadata") or {}
         operation = observed.get("operation", "bootstrap")
@@ -253,4 +253,6 @@ class DodoTarget:
             "receipt_evidence_id": receipt.get("evidence_id"),
             "secret_authenticated": False,
             "payment_status": payment["status"],
+            # Private callback only; ordinary verification/evidence excludes it.
+            "payment_link": receipt.get("private_payment_link"),
         }

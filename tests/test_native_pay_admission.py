@@ -11,6 +11,7 @@ import tryfolk.browser_network as network
 from tryfolk.browser_policy import DODO_CHECKOUT, DODO_SECURE_FRAME
 from tryfolk.secure_frame import frame_config, BROWSER_API
 from tryfolk.native_card_observation import READ_CONTEXT
+from tryfolk.browser_settlement import DOCUMENT_STATE
 
 PARENT = DODO_CHECKOUT + "/session/fixture_parent"
 RAW = DODO_SECURE_FRAME + "?" + urlencode({
@@ -28,12 +29,12 @@ async def admission_fixture(monkeypatch):
                      fixture_id="fixture_fixture", target_revision="revision_fixture")
     identity = {"approved": True, "provider_environment": "test_mode", "payment_correlated": True,
                 "customer_correlated": True, "payment_id": "pay_fixture", "checkout_session_id": "cks_fixture",
-                "order_id": "order_fixture", "ownership": ownership}
+                "order_id": "order_fixture", "ownership": ownership, "payment_link": PARENT}
     page = SimpleNamespace()
     page.main_frame = SimpleNamespace(page=page, url=PARENT, parent_frame=None)
 
     async def contact(_):
-        return {}
+        return {"url": page.main_frame.url, "generation": state.get("parent_generation", 1000), "ready_state": "complete", "body_present": True} if _ == DOCUMENT_STATE else {}
 
     page.evaluate = contact
 
@@ -135,4 +136,41 @@ async def test_native_pay_admission_reports_exact_closed_failure(monkeypatch, mu
         await guard.arm_native_pay(FIELDS, cards)
         assert guard.card_attempt is not None
         assert all(guard.events[-1]["arm_admission_checks"].values())
+    assert PARENT not in json.dumps(guard.events[-1])
+
+
+async def test_pay_freezes_authenticated_distinct_payment_parent_and_rejects_unrelated_url(monkeypatch):
+    guard, page, child, state, identity, cards = await admission_fixture(monkeypatch)
+    identity["payment_link"] = DODO_CHECKOUT + "/Private1"
+    page.main_frame.url = identity["payment_link"]
+    await guard.arm_native_pay(FIELDS, cards)
+    assert guard.card_attempt.parent_url == identity["payment_link"]
+    assert guard.owned_checkout(identity)["url"] == PARENT
+
+
+@pytest.mark.parametrize("mutation", ["link", "parent", "generation", "order", "account", "checkout", "payment"])
+async def test_fresh_confirmation_rechecks_frozen_parent_even_for_owned_return(monkeypatch, mutation):
+    guard, page, child, state, identity, cards = await admission_fixture(monkeypatch)
+    await guard.arm_native_pay(FIELDS, cards)
+    state["native"].update(return_source="CONFIRM", return_url=guard.policy.origin + "/checkout/return")
+    if mutation == "link":
+        identity["payment_link"] = DODO_CHECKOUT + "/Other111"
+    elif mutation == "parent":
+        page.main_frame.url += "?other=1"
+    elif mutation == "generation":
+        state["parent_generation"] = 2000
+    elif mutation == "order":
+        identity["order_id"] = "order_other"
+    elif mutation == "account":
+        identity["ownership"]["account_id"] = "account_other"
+    elif mutation == "checkout":
+        identity["checkout_session_id"] = "cks_other"
+    elif mutation == "payment":
+        identity["payment_id"] = "pay_other"
+    request = SimpleNamespace(url=BROWSER_API + "/payments/pay_fixture/confirm", method="POST", resource_type="fetch",
+                              post_data="{}", redirected_from=None, is_navigation_request=lambda: False)
+    with pytest.raises(ValueError, match="Native confirmation parent failed"):
+        await guard.bind_api(request, {}, child)
+    assert guard.card_attempt.confirmed is False
+    assert guard.events[-1]["decision"] == "deny_native_current_parent"
     assert PARENT not in json.dumps(guard.events[-1])

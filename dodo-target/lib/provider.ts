@@ -43,6 +43,7 @@ export const CheckoutStatus=z.object({id:Id,payment_id:Id.nullish(),payment_stat
 export const Payment=z.object({
   business_id:Id,payment_provider:z.literal('dodo'),
   payment_id:Id,status:z.string().nullish(),checkout_session_id:Id.nullish(),
+  payment_link:z.string().nullish(),
   customer:z.object({customer_id:Id,email:z.email()}),
   metadata:z.record(z.string(),z.string()),product_cart:z.array(z.object({product_id:Id,quantity:z.number().int()})).nullish(),
   total_amount:z.number().int().nonnegative(),currency:z.string(),

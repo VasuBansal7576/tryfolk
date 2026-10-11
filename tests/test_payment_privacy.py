@@ -1,6 +1,12 @@
 from tryfolk.payment_privacy import redact_payment
 
 
+def test_private_payment_parent_authority_never_enters_proof_or_model_context():
+    link = "https://test.checkout.dodopayments.com/Private1?private-token=secret"
+    value = {"identity": {"payment_link": link}, "private_payment_link": link}
+    assert link not in str(redact_payment(value))
+
+
 def test_payment_payload_fingerprint_and_visible_test_values_are_removed_before_evidence_or_model_context():
     value = {
         "payment_method_data": {"card": {"card_number": "4242424242424242", "card_cvc": "123"},

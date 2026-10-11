@@ -59,6 +59,24 @@ test('fixture creates a fresh account and a single-use login without selecting e
 });
 
 import type { Provider } from '../lib/provider';
+
+test('authenticated browser parent read keeps payment link out of receipt evidence', async () => {
+  const provider=new ExternalProviderFixture(),app=createTarget({env:sandboxEnv(),databasePath:':memory:',provider});
+  const {checkout,event}=await settledFixture(app,provider);
+  const link='https://test.checkout.dodopayments.com/Private1';
+  provider.payments.set(event.data.payment_id,{...event.data,payment_link:link});
+  const path=`/api/target/receipts?order_id=${checkout.order_id}`;
+  const ordinary=await (await call(app,path)).json();
+  assert.ok(!JSON.stringify(ordinary).includes(link));
+  const privateRead=await (await call(app,`${path}&browser_parent=1`)).json();
+  assert.equal(privateRead.private_payment_link,link);
+  const evidence=await (await call(app,`/api/target/evidence?evidence_id=${privateRead.evidence_id}`)).json();
+  assert.ok(!JSON.stringify(evidence).includes(link));
+  assert.equal((await call(app,`${path}&browser_parent=1`,undefined,{'Authorization':'Bearer wrong'})).status,401);
+  assert.equal((await call(app,`${path}&browser_parent=all`)).status,400);
+  app.close();
+});
+
 class ExternalProviderFixture implements Provider {
   readonly source='external_provider_fixture';
   checkouts = new Map<string,unknown>();

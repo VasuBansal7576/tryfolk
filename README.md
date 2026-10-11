@@ -80,6 +80,17 @@ match the account entitlement; fixture receipts do not satisfy that requirement.
 delivery remains unverified. Customer-triggered, independently server-verified API reconciliation
 is a distinct fulfillment path, while receipt and entitlement GET remain read-only.
 
+The native card guard preserves the original owned checkout creation URL separately from
+the current payment parent. The existing authenticated receipt read can return the provider's
+nullable `payment_link` through a private controller callback; ordinary receipts and stored
+evidence exclude that URL. Full parent equality to that independently correlated link is
+preferred. A session-to-payment URL difference requires the already occurring session-bound
+billing POST response, the currently captured reviewed hosted bundle, one bound Continue
+action, and an exact complete URL transformation with the original query and explicit
+customization. Missing links, unknown source, unrelated checkouts and stale generations stay
+gated. Confirmation rechecks the frozen parent, payment, checkout and ownership before any
+native request is forwarded. Local routing fixtures do not prove provider settlement or access.
+
 The sole repair source seam is `lib/fulfillment-policy.ts`; immutable public regressions must turn red to green under the original broken configuration. The worker verifies the protected export contract, actual Codex/Entire source association, fixed checks and an exact commit/digest production preview. Known replay uses the actual failed saved profile, fresh identity and freshly observed equivalent controls, then runs all original N profiles. Separate unpaid access and duplicate confirmation controls create no extra provider checkout. Source ownership, registration, replay binding and cancellation have unit checks. A genuine Stagehand local iframe probe confirms its supported cross-frame snapshot/input APIs without model or provider calls. The Dodo browser/persona repair cycle remains unverified until executed and independently correlated. Retain each fixture result's separate provenance.
 
 Allowance consumption is an economic scheduling estimate. Authenticated Codex allowance,

@@ -8,6 +8,8 @@ import tryfolk.browser_network as network
 import json
 from types import SimpleNamespace
 from urllib.parse import urlencode, urldefrag
+from tryfolk.browser_settlement import DOCUMENT_STATE
+from tryfolk.checkout_navigation import BILLING_SOURCE_SHA256
 
 
 def owned_response_fixture(body):
@@ -127,6 +129,69 @@ async def test_owned_checkout_body_is_captured_before_response_continues(change)
     await guard.redirect_response(session, event, **target)
     assert session.calls[-1] == "Fetch.continueResponse"
     assert ("Fetch.getResponseBody" in session.calls) is (change in (None, "cdp_xhr"))
+
+
+@pytest.mark.parametrize("change", [None, "foreign_target", "child_frame", "redirect", "wrong_status", "wrong_body", "wrong_method", "wrong_session", "foreign_request_frame", "stale_document", "unknown_source"])
+async def test_session_billing_response_captures_only_existing_owned_current_primary_fetch(change):
+    entry = DODO_CHECKOUT + "/session/cks_fixture?theme=light"
+    link = DODO_CHECKOUT + "/Private1"
+    creation = owned_checkout_fixture() | {"checkout_url": entry, "navigation_customization": {"hide_order_details": False, "hide_on_demand_tag": False}}
+    guard, response = owned_response_fixture(creation)
+    assert await guard.observe_owned_checkout_response(response)
+    page = guard.primary_page
+    page.main_frame.url = entry
+    document = {"url": entry, "generation": 1000, "body_present": True, "ready_state": "complete"}
+
+    async def evaluate(script):
+        assert script == DOCUMENT_STATE
+        return dict(document)
+    page.evaluate = evaluate
+    guard.primary_response_target = "target_fixture"
+    guard.checkout_navigation.observe_source("0" * 64 if change == "unknown_source" else BILLING_SOURCE_SHA256, document)
+    guard.expect_billing_continue(document)
+    request = SimpleNamespace(frame=page.main_frame, method="POST", resource_type="fetch", redirected_from=None,
+                              url=DODO_CHECKOUT + "/api/checkout/sessions/cks_fixture/confirm",
+                              post_data='{"mode":"test","data":{}}', is_navigation_request=lambda: False)
+    if change == "wrong_session":
+        request.url = request.url.replace("cks_fixture", "cks_other")
+    elif change == "foreign_request_frame":
+        request.frame = object()
+    bound = await guard.bind_billing_submission(request)
+    assert bound is (change not in ("wrong_session", "foreign_request_frame"))
+    event = {"requestId": "billing_fixture", "frameId": "main_fixture", "resourceType": "XHR",
+             "request": {"url": request.url, "method": "POST", "postData": request.post_data},
+             "responseStatusCode": 200, "responseHeaders": [{"name": "Content-Type", "value": "application/json"}]}
+    target = {"target_id": "target_other" if change == "foreign_target" else "target_fixture", "target_type": "page"}
+    if change == "child_frame":
+        event["frameId"] = "other_frame"
+    elif change == "redirect":
+        event["redirectedRequestId"] = "prior_fixture"
+    elif change == "wrong_status":
+        event["responseStatusCode"] = 201
+    elif change == "wrong_body":
+        event["request"]["postData"] = '{"mode":"live","data":{}}'
+    elif change == "wrong_method":
+        event["request"]["method"] = "GET"
+    elif change == "stale_document":
+        document["generation"] = 2000
+
+    class Session:
+        calls = []
+        async def send(self, method, params=None):
+            self.calls.append(method)
+            if method == "Page.getFrameTree":
+                return {"frameTree": {"frame": {"id": "main_fixture", "url": entry}}}
+            if method == "Fetch.getResponseBody":
+                return {"body": json.dumps({"payment_link": link}), "base64Encoded": False}
+            if method == "Fetch.continueResponse" and change is None:
+                assert any(e.get("decision") == "owned_billing_response_captured" for e in guard.events)
+            return {}
+    session = Session()
+    await guard.redirect_response(session, event, **target)
+    assert session.calls[-1] == "Fetch.continueResponse"
+    parent = {"url": link + "?theme=light&from=session", "generation": 1000}
+    assert all(guard.checkout_navigation.parent_checks(link, parent).values()) is (change is None)
+    assert entry not in json.dumps(guard.events) and link not in json.dumps(guard.events)
 
 
 def test_three_reviewed_modules_load_only_as_scripts_inside_the_direct_secure_frame():

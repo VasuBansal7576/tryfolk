@@ -36,6 +36,7 @@ ADAPTER_FILES = (
     "src/tryfolk/payment_privacy.py",
     "src/tryfolk/checkout_discovery.py",
     "src/tryfolk/manual_address.py",
+    "src/tryfolk/checkout_navigation.py",
 )
 
 

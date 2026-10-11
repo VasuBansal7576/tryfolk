@@ -15,6 +15,7 @@ async def test_pre_pay_frame_identity_requires_fresh_independent_test_receipt(re
     receipt["checkout"]["payment_status"] = "requires_payment_method"
     order["customer_id"] = "cus_fixture"
     receipt["payment"]["customer_id"] = "cus_fixture"
+    receipt["private_payment_link"] = "https://test.checkout.dodopayments.com/Private1"
     if mutation == "other_customer":
         receipt["payment"]["customer_id"] = "cus_other"
     if mutation == "missing_customer":
@@ -56,6 +57,7 @@ async def test_pre_pay_frame_identity_requires_fresh_independent_test_receipt(re
         elif request.url.path == "/api/target/orders":
             body = {"orders": [order]}
         elif request.url.path == "/api/target/receipts":
+            assert request.url.params["browser_parent"] == "1"
             body = receipt
         else:
             raise AssertionError("No additional endpoint or provider write authorized")
@@ -88,6 +90,7 @@ async def test_pre_pay_frame_identity_requires_fresh_independent_test_receipt(re
         assert result["customer_correlated"]
         assert result["payment_correlated"] and result["provider_environment"] == "test_mode"
         assert result["checkout_session_id"] == "cs"
+        assert result["payment_link"] == receipt["private_payment_link"]
 
 
 @pytest.fixture

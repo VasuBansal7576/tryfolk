@@ -311,6 +311,8 @@ async def run(stack):
                     if not action.get("_tryfolk", {}).get("frame_url"):
                         policy.check_url(control.get("destination") or current_url)
                     fresh_actions = []
+                    if action.get("_tryfolk", {}).get("kind") == "billing_continue":
+                        guard.expect_billing_continue(fresh_document)
                     if action.get("_tryfolk", {}).get("kind") == "pay":
                         await guard.arm_native_pay(completed_fields, completed_cards)
 

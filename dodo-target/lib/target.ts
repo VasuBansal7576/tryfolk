@@ -86,10 +86,11 @@ export function createTarget(options: {env: Env; databasePath: string; provider?
     store.put('fulfillments',current.order_id,entry);
     return {...entry,state,grant_applied:grantApplied};
   }
-  async function receipt(order:Order) {
+  async function receipt(order:Order,browserParent=false) {
     const ownership={...Ownership.parse(order),order_id:order.order_id,expected_product_id:order.expected_product_id};
     const source=options.provider?.source || 'dodo_test_api';
     let result:Observation;
+    let privatePaymentLink:string|null=null;
     if (config.errors.length) result={state:'setup_required',errors:config.errors};
     else if (!order.checkout_session_id) result=order.state === 'creation_error' ? {state:'provider_error',reason:order.state} : {state:'pending',reason:order.state,checkout:null,payment:null};
     else {
@@ -100,6 +101,7 @@ export function createTarget(options: {env: Env; databasePath: string; provider?
         else if (!checkout.payment_id) result={state:'pending',reason:'checkout_details_unsettled',checkout,payment:null};
         else {
           const payment=Payment.parse(await api.getPayment(checkout.payment_id));
+          privatePaymentLink=payment.payment_link ?? null;
           const mismatches=paymentMismatches(order,payment);
           if (payment.payment_id !== checkout.payment_id) mismatches.push('payment_id');
           const account=store.get('accounts',order.account_id,Account);
@@ -117,7 +119,9 @@ export function createTarget(options: {env: Env; databasePath: string; provider?
       }
     }
     const data={...result,source,ownership,checkout_session_id:order.checkout_session_id};
-    return {...data,evidence_id:evidence(data)};
+    // Routing authority crosses only the controller's private callback read.
+    // Neither normalized receipts nor persisted evidence contain the link.
+    return {...data,evidence_id:evidence(data),...(browserParent ? {private_payment_link:privatePaymentLink} : {})};
   }
   async function body<T>(request:Request,schema:z.ZodType<T>):Promise<T> {
     const raw=await request.text();
@@ -279,7 +283,10 @@ export function createTarget(options: {env: Env; databasePath: string; provider?
           store.put('orders',order.order_id,order);
         });
         if (!order.active) throw new HttpError(409,'run_reset_during_checkout');
-        return Response.json({order_id:order.order_id,checkout_session_id:created.session_id,checkout_url:created.checkout_url,ownership:Ownership.parse(order),source:api.source},{status:201});
+        return Response.json({order_id:order.order_id,checkout_session_id:created.session_id,checkout_url:created.checkout_url,ownership:Ownership.parse(order),source:api.source,
+          // No show_* customization is supplied to createCheckout above. The
+          // hosted source applies these flags only for explicit false values.
+          navigation_customization:{hide_order_details:false,hide_on_demand_tag:false}},{status:201});
       } catch(error) {
         order.state='creation_error';store.put('orders',order.order_id,order);
         if (error instanceof HttpError) throw error;
@@ -294,7 +301,9 @@ export function createTarget(options: {env: Env; databasePath: string; provider?
     }
     if (path === '/api/target/receipts' && request.method === 'GET') {
       controller(request);
-      return Response.json(await receipt(orderFor(url.searchParams.get('order_id'))));
+      const browserParent=url.searchParams.get('browser_parent');
+      if (browserParent !== null && browserParent !== '1') throw new HttpError(400,'invalid_browser_parent');
+      return Response.json(await receipt(orderFor(url.searchParams.get('order_id')),browserParent === '1'));
     }
     if (path === '/api/target/reconcile' && request.method === 'POST') {
       const account=accountFor(request);

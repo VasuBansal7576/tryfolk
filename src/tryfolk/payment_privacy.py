@@ -14,7 +14,7 @@ def redact_payment(value):
         card_action = str(value.get("_tryfolk", {}).get("field", "")).startswith("card_") if isinstance(value.get("_tryfolk"), dict) else False
         return {
             key: "[redacted_payment_payload]"
-            if key in ("payment_method_data", "browser_info", "customer_acceptance")
+            if key in ("payment_method_data", "browser_info", "customer_acceptance", "payment_link", "private_payment_link")
             else ["[redacted_test_card]"] if key == "arguments" and card_action
             else redact_payment(item)
             for key, item in value.items()
