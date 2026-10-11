@@ -173,10 +173,13 @@ class Worker:
                         "INSERT INTO findings VALUES (?,?,?)", (finding["id"], run_id, json.dumps(finding))
                     )
             await emit("verification", result, persona["id"])
-        self.phase(run_id, "completed")
-        if run["pass"] == "after":
-            with self.store.transaction() as db:
-                current = self.store.load(db, "runs", run_id)
+        # A terminal poll must see comparison and released allowance together.
+        with self.store.transaction() as db:
+            current = self.store.load(db, "runs", run_id)
+            if current["phase"] == "cancelled":
+                raise Cancelled()
+            current.update(phase="completed", updated_at=now())
+            if run["pass"] == "after":
                 before = self.store.load(db, "runs", run["parent_run_id"])
                 b, a = self.service.view(db, before), self.service.view(db, current)
                 current["comparison"] = {
@@ -191,10 +194,10 @@ class Worker:
                     "total_spent_microusd": a["budget"]["spent_microusd"],
                     "unused_microusd": a["budget"]["unused_microusd"],
                 }
-                self.store.save(db, "runs", current)
                 db.execute(
                     "UPDATE reservations SET released=reserved-spent WHERE id=?", (run["reservation_id"],)
                 )
+            self.store.save(db, "runs", current)
 
     async def serve(self):
         # A killed worker never resumes ambiguous payment actions automatically.
