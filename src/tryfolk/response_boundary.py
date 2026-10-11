@@ -34,19 +34,29 @@ class ResponseBoundary:
         primary = self.coverages.get(self.guard.primary_response_target)
         if not primary:
             raise ValueError("Primary protocol coverage is unavailable.")
+        revision, frames = primary.revision, copy.deepcopy(primary.frames)
         before = await primary.attest(request.url, request.method)
         native = None
+        native_revision = None
         main_url = FrameIdentityCoverage.full_url(before["frameTree"]["frame"])
         capability = self.guard.card_attempt
         if capability and main_url == capability.parent_url and self.guard._native_protocol_target:
             coverage = self.coverages.get(self.guard._native_protocol_target)
             if not coverage:
                 raise ValueError("Selected native protocol coverage is unavailable.")
+            native_revision = coverage.revision
             native = await coverage.attest()
         after = await primary.attest(request.url, request.method)
-        if before != after:
+        if before != after or revision != primary.revision or frames != primary.frames:
             raise ValueError("Primary protocol identity changed across native attestation.")
-        return {"main": before, "native": native}
+        if native is not None and native_revision != coverage.revision:
+            raise ValueError("Native protocol identity changed across primary attestation.")
+        root_id = before["frameTree"]["frame"]["id"]
+        before["frameTree"]["childFrames"] = [
+            {"frame": frame} for frame in frames.values() if frame.get("parentId") == root_id
+        ]
+        return {"main": before, "native": native,
+                "protocol_revision": {"main": revision, "native": native_revision}}
 
     async def response_protocol_reader(self):
         """Live browser Target fences and exact continuous document events only."""

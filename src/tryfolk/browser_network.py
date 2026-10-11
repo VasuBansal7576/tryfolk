@@ -469,7 +469,10 @@ class ResourceGuard:
             raise ValueError("Paused navigation lacks active protocol attestation.")
         async with asyncio.timeout(5):
             current = await self.return_protocol_reader(request)
-        return self.combined_protocol_frames(current["main"]["frameTree"], current.get("native"))
+        frames = self.combined_protocol_frames(current["main"]["frameTree"], current.get("native"))
+        if "protocol_revision" in current:
+            frames["protocol_revision"] = copy.deepcopy(current["protocol_revision"])
+        return frames
 
     async def capture_confirm_protocol(self, document):
         """Freeze live loader identities beside freshly checked CONFIRM facts.
