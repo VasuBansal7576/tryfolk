@@ -143,6 +143,67 @@ async def test_country_initialization_waits_for_passively_observed_test_mode_aft
     assert actions == ["read"] * 3
 
 
+async def test_billing_without_observed_test_badge_exhausts_original_deadline():
+    """Invented document reads exercise the actual passive gate, without a browser."""
+    document = observed()[1] | {"hosted_test_mode_visible": False}
+    reads, events = [], []
+
+    async def read():
+        reads.append("read")
+        return document
+
+    with pytest.raises(ManualAddressGate, match="billing_initialization_unobserved"):
+        await wait_for_billing_initialization(
+            read, BrowserPolicy("http://127.0.0.1:3300", "dodo"),
+            deadline=asyncio.get_running_loop().time() + 0.01, on_event=events.append,
+        )
+    assert reads
+    assert all(event["initialization_observed"] is False for event in events)
+
+
+async def test_billing_deadline_cannot_be_extended_by_a_slow_document_read():
+    async def read():
+        await asyncio.sleep(60)
+        return observed()[1] | {"hosted_test_mode_visible": True}
+
+    with pytest.raises(ManualAddressGate, match="billing_initialization_unobserved"):
+        await wait_for_billing_initialization(
+            read, BrowserPolicy("http://127.0.0.1:3300", "dodo"),
+            deadline=asyncio.get_running_loop().time() + 0.01,
+        )
+
+
+@pytest.mark.parametrize("change", [{"generation": 2}, {"url": URL + "-changed"}])
+async def test_billing_readiness_cannot_move_to_another_document(change):
+    documents = iter([
+        observed()[1] | {"hosted_test_mode_visible": False},
+        observed()[1] | change | {"hosted_test_mode_visible": True},
+    ])
+
+    async def read():
+        return next(documents)
+
+    with pytest.raises(ManualAddressGate, match="manual_document_changed"):
+        await wait_for_billing_initialization(
+            read, BrowserPolicy("http://127.0.0.1:3300", "dodo"),
+            deadline=asyncio.get_running_loop().time() + 1,
+        )
+
+
+@pytest.mark.parametrize("change", [
+    {"busy": True}, {"body_present": False}, {"ready_state": "loading"},
+])
+async def test_test_badge_alone_does_not_establish_billing_readiness(change):
+    async def read():
+        return observed()[1] | change | {"hosted_test_mode_visible": True}
+
+    with pytest.raises(ManualAddressGate, match="billing_initialization_unobserved"):
+        await wait_for_billing_initialization(
+            read, BrowserPolicy("http://127.0.0.1:3300", "dodo"),
+            deadline=asyncio.get_running_loop().time() + 0.01,
+        )
+
+
 async def test_already_executed_sdk_manual_action_cannot_be_repeated_without_current_source():
     first = observed(variant="enter_address_manually")
     acts = []

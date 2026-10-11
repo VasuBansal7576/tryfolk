@@ -162,6 +162,8 @@ async def test_wrong_source_bytes_report_the_first_capture_exclusion_without_rou
         ("wrong_resource", "resource_method_bound"),
         ("redirect", "no_redirect"),
         ("wrong_status", "response_200"),
+        ("missing_status", "response_200"),
+        ("response_error", "response_200"),
         ("wrong_content_type", "response_content_type_bound"),
         ("foreign_target", "primary_page_target"),
         ("child_frame", "primary_main_frame"),
@@ -225,6 +227,10 @@ async def test_source_capture_exclusions_never_grant_a_distinct_parent(monkeypat
     }
     if change == "redirect":
         event["redirectedRequestId"] = "previous_fixture"
+    if change in ("missing_status", "response_error"):
+        event.pop("responseStatusCode")
+    if change == "response_error":
+        event["responseErrorReason"] = "ConnectionReset"
     continued = []
 
     class Session:
@@ -259,6 +265,8 @@ async def test_source_capture_exclusions_never_grant_a_distinct_parent(monkeypat
     )
     exclusion = next(e for e in guard.events if e.get("decision") == "billing_source_unverified")
     assert exclusion["first_capture_subpredicate"] == predicate
+    if change in ("missing_status", "response_error"):
+        assert reads == 0
     parent_checks = guard.checkout_navigation.parent_checks(
         DODO_CHECKOUT + "/Private1", {"url": DODO_CHECKOUT + "/Private1?from=session", "generation": 1000}
     )
