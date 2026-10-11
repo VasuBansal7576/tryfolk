@@ -10,9 +10,11 @@ Core can read this JSON without a new service. Keep the catalog version and sele
 
 Select cases from actual registered target capabilities and conditions first. Prefer relevant risks such as settled payment without access and incorrect account binding. Save a plain selection reason with each assignment. Use useful purchase context and constraints when pairing a profile; do not infer fraud, payment method, wealth or reliability from demographics.
 
-Before quote acceptance, reject assignments whose required capability or fixture is unavailable. Quote both fixed N-persona passes upfront. Acceptance freezes the selected scenario, profile, initial memory, condition and quote snapshots with their hashes. The after pass restores the exact saved scenario/profile/initial memory/conditions and uses fresh isolated account, cookie, order and checkout identities. Pin before/after source manifests separately. Never regenerate a profile, inherit before-pass memory, expand N or update an accepted quote from a newer catalog.
+Before quote acceptance, reject assignments whose required capability or fixture is unavailable. Quote both fixed N-persona passes upfront. Acceptance freezes the selected scenario, seed when used, condition and quote snapshots with their hashes. Actual generated profiles and initial memory do not exist yet. Freeze those once after generation and before the first journey. The after pass restores the exact saved scenario/profile/initial memory/conditions and uses fresh isolated account, cookie, order and checkout identities. Pin before/after source manifests separately. Never regenerate a profile, inherit before-pass memory, expand N or update an accepted quote from a newer catalog.
 
 Catalog IDs are stable; `catalog_version` identifies changed input content. Store exact UTF-8 snapshot bytes and SHA-256 together. A later catalog release can affect a new quote, not an accepted one.
+
+For the core 204 importer, `version` aliases `catalog_version`, `risk_priority` is a deterministic selection weight, and `required_capabilities.conditions` names actual required registration values. Runnable entries use explicit capability IDs. Registration remains an owner declaration that must be checked against the real target and approved fixture, never an observed result.
 
 ## Report only exercised coverage
 

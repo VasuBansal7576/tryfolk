@@ -1,6 +1,6 @@
 {
   "schema_version": "tryfolk.payment-scenarios.v1",
-  "catalog_version": "2026-10-11.1",
+  "catalog_version": "2026-10-11.2",
   "input_semantics": "hypothetical_test_inputs",
   "coverage_policy": {
     "catalog_entries_are_observed_results": false,
@@ -34,15 +34,29 @@
       "exercise_status": "not_exercised",
       "required_capabilities": {
         "target": [
-          "Existing isolated login, one-time product, checkout, reconciliation, entitlement and download routes."
+          "isolated_test_auth",
+          "one_time_checkout",
+          "receipt_readonly",
+          "entitlement_readonly",
+          "protected_download",
+          "source_revision_manifest"
         ],
         "provider": [
-          "Test-mode card checkout and independent checkout/payment reads."
+          "test_card_checkout",
+          "checkout_read",
+          "payment_read"
         ],
         "condition": [
           "Approved existing dodo-public-success-card-us-desktop-v1 condition; fixed USD product."
         ],
-        "missing": []
+        "missing": [],
+        "conditions": {
+          "device": "desktop Chromium",
+          "locale": "en-US",
+          "billing_country": "US",
+          "account_history": "new",
+          "fixture_id": "dodo-public-success-card-us-desktop-v1"
+        }
       },
       "provider_support": {
         "status": "documented",
@@ -89,7 +103,8 @@
       "condition_fixture": {
         "id": "dodo-public-success-card-us-desktop-v1",
         "registration": "existing_driver"
-      }
+      },
+      "risk_priority": 80
     },
     {
       "id": "card-decline-safe-retry",
@@ -125,7 +140,8 @@
         ],
         "missing": [
           "Current driver only fills its fixed success card; decline and retry conditions are not implemented."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "documented",
@@ -170,7 +186,8 @@
       "condition_fixture": {
         "id": "proposed-card-decline-safe-retry-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 50
     },
     {
       "id": "pending-payment-no-access",
@@ -206,7 +223,8 @@
         ],
         "missing": [
           "Current success-card driver cannot deliberately hold a non-final state."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "documented",
@@ -249,7 +267,8 @@
       "condition_fixture": {
         "id": "proposed-pending-payment-no-access-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 80
     },
     {
       "id": "upi-india-one-time",
@@ -287,7 +306,8 @@
           "Target restricts checkout to credit/debit.",
           "Driver fixes US billing and a success card.",
           "Non-Indian merchant adaptive-currency requirements need an explicitly approved target design."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "conditional",
@@ -332,7 +352,8 @@
       "condition_fixture": {
         "id": "proposed-upi-india-one-time-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 50
     },
     {
       "id": "issuer-3ds-challenge",
@@ -369,7 +390,8 @@
         "missing": [
           "Current driver has no challenge fixture or challenge automation.",
           "Target does not request force_3ds."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "conditional",
@@ -411,7 +433,8 @@
       "condition_fixture": {
         "id": "proposed-issuer-3ds-challenge-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 50
     },
     {
       "id": "wallet-device-eligibility",
@@ -448,7 +471,8 @@
           "Current target allows only credit/debit.",
           "Current driver is desktop Chromium.",
           "No approved synthetic wallet fixture is established within the current safety boundary."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "conditional",
@@ -488,7 +512,8 @@
       "condition_fixture": {
         "id": "proposed-wallet-device-eligibility-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 50
     },
     {
       "id": "paypal-unavailable-method",
@@ -524,7 +549,8 @@
         "missing": [
           "Target is card-only.",
           "Current official method guide marks PayPal temporarily unavailable for new transactions."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "conditional",
@@ -565,7 +591,8 @@
       "condition_fixture": {
         "id": "proposed-paypal-unavailable-method-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 50
     },
     {
       "id": "forged-return-no-payment",
@@ -600,7 +627,8 @@
         ],
         "missing": [
           "Current browser policy does not expose a general forged-return condition; an approved security fixture is needed."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "documented",
@@ -639,7 +667,8 @@
       "condition_fixture": {
         "id": "proposed-forged-return-no-payment-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 80
     },
     {
       "id": "foreign-account-order-binding",
@@ -674,7 +703,8 @@
         ],
         "missing": [
           "Current persona browser driver has no identifier-swap security fixture."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "documented",
@@ -713,7 +743,8 @@
       "condition_fixture": {
         "id": "proposed-foreign-account-order-binding-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 80
     },
     {
       "id": "fraud-error-safe-disclosure",
@@ -750,7 +781,8 @@
         "missing": [
           "Current sanitized receipt omits error fields.",
           "No merchant error-mapping check or failure browser fixture is implemented."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "documented",
@@ -792,7 +824,8 @@
       "condition_fixture": {
         "id": "proposed-fraud-error-safe-disclosure-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 50
     },
     {
       "id": "hosted-card-data-boundary",
@@ -828,7 +861,8 @@
         ],
         "missing": [
           "No dedicated scoped card-data/log-boundary audit fixture exists in the current scenario executor."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "documented",
@@ -869,7 +903,8 @@
       "condition_fixture": {
         "id": "proposed-hosted-card-data-boundary-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 80
     },
     {
       "id": "international-fixed-currency",
@@ -906,7 +941,8 @@
         "missing": [
           "Current driver fixes US billing.",
           "Business/product GBP eligibility has not been established by this catalog."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "conditional",
@@ -949,7 +985,8 @@
       "condition_fixture": {
         "id": "proposed-international-fixed-currency-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 50
     },
     {
       "id": "checkout-language-consistency",
@@ -987,7 +1024,8 @@
           "App price rendering uses fixed English formatting.",
           "Target does not set force_language.",
           "Current driver uses en-US."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "documented",
@@ -1027,7 +1065,8 @@
       "condition_fixture": {
         "id": "proposed-checkout-language-consistency-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 50
     },
     {
       "id": "tax-inclusive-total-display",
@@ -1063,7 +1102,8 @@
         ],
         "missing": [
           "Current receipt sanitization omits tax/line items and UI does not expose their breakdown."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "documented",
@@ -1104,7 +1144,8 @@
       "condition_fixture": {
         "id": "proposed-tax-inclusive-total-display-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 50
     },
     {
       "id": "full-refund-access-policy",
@@ -1142,7 +1183,8 @@
           "Current write/read key grants exclude Refunds.",
           "Target has no refund API, event handler or access-revocation policy.",
           "Current task authorizes no refund operation."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "documented",
@@ -1185,7 +1227,8 @@
       "condition_fixture": {
         "id": "proposed-full-refund-access-policy-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 50
     },
     {
       "id": "partial-refund-tax-binding",
@@ -1222,7 +1265,8 @@
         "missing": [
           "Current target is one product/quantity one.",
           "Refund grants, handlers, projections and policy are absent."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "documented",
@@ -1264,7 +1308,8 @@
       "condition_fixture": {
         "id": "proposed-partial-refund-tax-binding-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 50
     },
     {
       "id": "subscription-initial-activation",
@@ -1301,7 +1346,8 @@
         "missing": [
           "Current target, key scopes and receipt schema allow only one-time purchases.",
           "All subscriptions and paid trials are forbidden under current authority."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "documented",
@@ -1344,7 +1390,8 @@
       "condition_fixture": {
         "id": "proposed-subscription-initial-activation-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 50
     },
     {
       "id": "renewal-failure-grace-period",
@@ -1381,7 +1428,8 @@
         "missing": [
           "Subscriptions are forbidden on the current target.",
           "No lifecycle clock, event handler, read scope or grace policy is implemented."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "documented",
@@ -1423,7 +1471,8 @@
       "condition_fixture": {
         "id": "proposed-renewal-failure-grace-period-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 50
     },
     {
       "id": "cancel-at-period-end",
@@ -1460,7 +1509,8 @@
         "missing": [
           "Current target has no subscription, cancellation route, key scope or lifecycle policy.",
           "Recurring operations are forbidden under current authority."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "documented",
@@ -1500,7 +1550,8 @@
       "condition_fixture": {
         "id": "proposed-cancel-at-period-end-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 50
     },
     {
       "id": "dispute-chargeback-lifecycle",
@@ -1537,7 +1588,8 @@
         "missing": [
           "Current target/key scopes do not include dispute resources or handlers.",
           "Current card-only driver lacks a dispute condition and merchant policy."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "conditional",
@@ -1580,7 +1632,8 @@
       "condition_fixture": {
         "id": "proposed-dispute-chargeback-lifecycle-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 50
     },
     {
       "id": "invoice-receipt-owned-purchase",
@@ -1617,7 +1670,8 @@
         "missing": [
           "Current sanitized receipt omits invoice fields and target has no invoice UI.",
           "Controller needs an explicit approved invoice-origin policy before any link is visited."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "documented",
@@ -1658,7 +1712,8 @@
       "condition_fixture": {
         "id": "proposed-invoice-receipt-owned-purchase-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 50
     },
     {
       "id": "signed-webhook-grant-once",
@@ -1694,7 +1749,8 @@
         ],
         "missing": [
           "Current canonical run has no authorized signed webhook endpoint/secret/delivery fixture."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "documented",
@@ -1735,7 +1791,8 @@
       "condition_fixture": {
         "id": "proposed-signed-webhook-grant-once-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 80
     },
     {
       "id": "unhandled-lifecycle-event-disclosed",
@@ -1772,7 +1829,8 @@
         "missing": [
           "Current webhook route only applies payment.succeeded.",
           "Refund/dispute/subscription policy handlers are absent and related operations are not authorized."
-        ]
+        ],
+        "conditions": {}
       },
       "provider_support": {
         "status": "documented",
@@ -1815,7 +1873,8 @@
       "condition_fixture": {
         "id": "proposed-unhandled-lifecycle-event-disclosed-v1",
         "registration": "not_registered"
-      }
+      },
+      "risk_priority": 80
     },
     {
       "id": "paid-no-access-download-retest",
@@ -1841,15 +1900,30 @@
       "exercise_status": "not_exercised",
       "required_capabilities": {
         "target": [
-          "Existing broken source disposition, genuine changed-source repair boundary, account/receipt/entitlement/download routes."
+          "isolated_test_auth",
+          "one_time_checkout",
+          "receipt_readonly",
+          "entitlement_readonly",
+          "protected_download",
+          "source_revision_manifest",
+          "source_fault_repair"
         ],
         "provider": [
-          "One-time test card success and independent checkout/payment reads."
+          "test_card_checkout",
+          "checkout_read",
+          "payment_read"
         ],
         "condition": [
           "Approved existing success-card US desktop condition; separately pinned before/after source manifests."
         ],
-        "missing": []
+        "missing": [],
+        "conditions": {
+          "device": "desktop Chromium",
+          "locale": "en-US",
+          "billing_country": "US",
+          "account_history": "new",
+          "fixture_id": "dodo-public-success-card-us-desktop-v1"
+        }
       },
       "provider_support": {
         "status": "documented",
@@ -1900,7 +1974,8 @@
       "condition_fixture": {
         "id": "dodo-public-success-card-us-desktop-v1",
         "registration": "existing_driver"
-      }
+      },
+      "risk_priority": 90
     }
   ],
   "catalog_owner": "tryfolk-dodo-r1",
@@ -2106,7 +2181,19 @@
     ],
     "accepted_quote_may_change": false,
     "target_revision_rule": "Pin exact before/after target manifests separately. Revision is the intended changed variable; no regenerated profile or remembered before-pass knowledge enters the after initial memory.",
-    "hash_rule": "Persist exact UTF-8 snapshot bytes with SHA-256. Read those frozen bytes for replay, not a newer catalog or regenerated dataset row."
+    "hash_rule": "Persist exact UTF-8 snapshot bytes with SHA-256. Read those frozen bytes for replay, not a newer catalog or regenerated dataset row.",
+    "generated_state_freeze_at": "before_first_journey",
+    "accepted_assignment_fields": [
+      "scenario_snapshot",
+      "condition_fixture_snapshot",
+      "accepted_quote_snapshot",
+      "seed_snapshot_when_selected"
+    ],
+    "generated_state_fields": [
+      "profile_snapshot",
+      "initial_memory_snapshot"
+    ],
+    "generated_state_rule": "Actual generated profile and initial memory do not exist at quote acceptance. Freeze them once after generation and before the first journey; restore those exact bytes before the after journey. Accepted quote and assignments never change."
   },
   "selection_policy": {
     "owner": "core backend; UI renders saved data",
@@ -2119,5 +2206,6 @@
     "rationale_rule": "Save the case ID, risk, supported capability/condition IDs, customer goal and plain reason for each selected assignment. Reject unsupported requirements before accepting the quote.",
     "budget_rule": "Quote both fixed N-persona passes upfront and freeze selected assignments. Thousands of available seeds do not expand N or spending.",
     "coverage_rule": "Report assigned, attempted, independently verified and inconclusive IDs separately for each pass. Held-out and merchant/event checks use separate counts. Selected N establishes coverage only for the selected actually exercised cases."
-  }
+  },
+  "version": "2026-10-11.2"
 }

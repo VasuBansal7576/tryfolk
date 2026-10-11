@@ -22,6 +22,7 @@ const caseSchema = z.object({
   required_capabilities: z.object({
     target: z.array(text).min(1), provider: z.array(text).min(1),
     condition: z.array(text).min(1), missing: z.array(text),
+    conditions: z.record(text, text),
   }),
   provider_support: z.object({
     status: z.enum(['documented', 'conditional', 'not_established']),
@@ -54,6 +55,9 @@ test('accepted replay and small selections cannot drift into new personas or who
   const catalog = z.object({
     replay_policy: z.object({
       freeze_at: z.literal('quote_acceptance'),
+      generated_state_freeze_at: z.literal('before_first_journey'),
+      accepted_assignment_fields: z.array(text),
+      generated_state_fields: z.array(text),
       immutable_fields: z.array(text),
       restore_exactly: z.array(text),
       fresh_identifiers: z.array(text),
@@ -76,6 +80,8 @@ test('accepted replay and small selections cannot drift into new personas or who
     assert.ok(catalog.replay_policy.immutable_fields.includes(name), `accepted ${name} must be frozen`);
   }
   assert.deepEqual(catalog.replay_policy.restore_exactly, ['scenario_snapshot', 'profile_snapshot', 'initial_memory_snapshot', 'condition_fixture_snapshot']);
+  assert.deepEqual(catalog.replay_policy.generated_state_fields, ['profile_snapshot', 'initial_memory_snapshot']);
+  assert.equal(catalog.replay_policy.accepted_assignment_fields.includes('initial_memory_snapshot'), false);
   assert.ok(catalog.replay_policy.fresh_identifiers.includes('account_id'));
   assert.ok(catalog.replay_policy.fresh_identifiers.includes('checkout_session_id'));
   for (const scenario of catalog.scenarios) {
