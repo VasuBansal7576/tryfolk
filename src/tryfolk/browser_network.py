@@ -9,6 +9,7 @@ import asyncio
 import base64
 import hashlib
 import ipaddress
+import re
 import socket
 from types import SimpleNamespace
 from urllib.parse import urlsplit, urljoin, urldefrag
@@ -938,15 +939,34 @@ class ResourceGuard:
         url = request.get("url", "")
         pending = self._billing_submission_request
         submitted = bool(pending) and url == pending.url
+        checks = {}
+
+        def unverified():
+            self.events.append({
+                "decision": "billing_response_unverified" if submitted else "billing_source_unverified",
+                "binding_checks": dict(checks),
+                "first_capture_subpredicate": next((name for name, value in checks.items() if not value), None),
+            })
+            return False
+
         try:
             parsed = urlsplit(url)
-            script = (f"{parsed.scheme}://{parsed.netloc}" == DODO_CHECKOUT and parsed.path.endswith(".js")
-                      and not parsed.query and not parsed.fragment and not (parsed.username or parsed.password))
+            script = f"{parsed.scheme}://{parsed.netloc}" == DODO_CHECKOUT and parsed.path.endswith(".js")
             if not (submitted or script):
                 return False
+            if not submitted:
+                # Existing Next.js scripts carry one deployment cache key. This
+                # recognizes source metadata, never a payment-parent URL alias.
+                # Preserve encoded route segments without decoding/rebuilding.
+                checks.update({
+                    "source_public_static_path": parsed.path.startswith("/_next/static/"),
+                    "source_deployment_query_bound": not parsed.query or bool(re.fullmatch(r"dpl=dpl_[A-Za-z0-9]{1,128}", parsed.query)),
+                    "source_fragment_absent": not parsed.fragment and "#" not in url,
+                    "source_credentials_absent": not (parsed.username or parsed.password),
+                })
             headers = event.get("responseHeaders", [])
             types = [header["value"].split(";", 1)[0].strip().lower() for header in headers if header["name"].lower() == "content-type"]
-            checks = {
+            checks.update({
                 "primary_page_target": target.get("target_type") == "page" and target.get("target_id") == self.primary_response_target,
                 "response_200": event.get("responseStatusCode") == 200,
                 "no_redirect": not event.get("redirectedRequestId") and not any(h["name"].lower() == "location" for h in headers),
@@ -956,39 +976,55 @@ class ResourceGuard:
                 "existing_submission_bound": not submitted or pending.frame == self.primary_page.main_frame
                 and pending.method == "POST" and pending.resource_type == "fetch" and pending.redirected_from is None
                 and request.get("postData") == pending.post_data,
-            }
+            })
             if not all(checks.values()):
-                if submitted:
-                    self.events.append({"decision": "billing_response_unverified", "binding_checks": checks})
-                return False
+                return unverified()
             async with asyncio.timeout(5):
                 tree = (await session.send("Page.getFrameTree"))["frameTree"]["frame"]
-                if event.get("frameId") != tree["id"] or tree["url"] != navigation.entry_url:
-                    return False
+                checks["primary_main_frame"] = event.get("frameId") == tree["id"]
+                checks["original_owned_entry_current"] = tree["url"] == navigation.entry_url
+                if not all(checks.values()):
+                    return unverified()
                 before = await self.primary_page.evaluate(DOCUMENT_STATE)
                 body = await session.send("Fetch.getResponseBody", {"requestId": event["requestId"]})
                 after = await self.primary_page.evaluate(DOCUMENT_STATE)
-            if before.get("url") != after.get("url") or before.get("generation") != after.get("generation"):
-                return False
+            checks["same_document_during_capture"] = before.get("url") == after.get("url") and before.get("generation") == after.get("generation")
+            if not all(checks.values()):
+                return unverified()
             encoded = body.get("body")
             limit = 30_000 if submitted else 3_000_000
-            if not isinstance(encoded, str) or len(encoded) > limit:
-                return False
+            checks["response_body_bounded"] = isinstance(encoded, str) and 0 < len(encoded) <= limit
+            if not all(checks.values()):
+                return unverified()
+            checks["response_body_decoded"] = False
             raw = base64.b64decode(encoded, validate=True) if body.get("base64Encoded") else encoded.encode()
+            checks["response_body_decoded"] = True
             if submitted:
                 captured = navigation.observe_response(raw, after)
                 self._billing_submission_request = None
+                checks["current_source_bound"] = navigation.source_generation == after.get("generation")
+                checks["owned_transition_response_bound"] = captured
                 self.events.append({"decision": "owned_billing_response_captured" if captured else "billing_response_unverified",
                                     "binding_checks": checks, "private_routing_values_retained": captured,
-                                    "current_source_bound": navigation.source_generation == after.get("generation")})
+                                    "current_source_bound": checks["current_source_bound"],
+                                    "first_capture_subpredicate": next((name for name, value in checks.items() if not value), None)})
             else:
-                captured = navigation.observe_source(hashlib.sha256(raw).hexdigest(), after)
+                source_digest = hashlib.sha256(raw).hexdigest()
+                checks.update(navigation.source_checks(source_digest, after))
+                captured = navigation.observe_source(source_digest, after)
                 if captured:
                     self.events.append({"decision": "owned_billing_source_captured", "current_generation_bound": True,
-                                        "source_sha256": hashlib.sha256(raw).hexdigest()})
+                                        "source_sha256": source_digest, "binding_checks": dict(checks)})
+                else:
+                    unverified()
+                    self.events[-1]["source_sha256"] = source_digest
+                    return False
             return captured
         except Exception as error:
-            self.events.append({"decision": "billing_response_unavailable", "error_type": type(error).__name__})
+            if all(checks.values()):
+                checks["capture_exception_absent"] = False
+            unverified()
+            self.events[-1]["error_type"] = type(error).__name__
             return False
 
     async def redirect_response(self, session, event, **target):

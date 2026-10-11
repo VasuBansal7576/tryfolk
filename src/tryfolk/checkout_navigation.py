@@ -42,9 +42,15 @@ class CheckoutNavigation:
             and document.get("ready_state") in ("interactive", "complete")
         )
 
+    def source_checks(self, digest, document):
+        return {
+            "reviewed_source_hash_bound": digest == BILLING_SOURCE_SHA256,
+            "source_original_entry_current": document.get("url") == self.entry_url and valid_test_link(self.entry_url),
+            "source_generation_available": isinstance(document.get("generation"), (int, float)),
+        }
+
     def observe_source(self, digest, document):
-        if (digest == BILLING_SOURCE_SHA256 and document.get("url") == self.entry_url
-                and valid_test_link(self.entry_url) and isinstance(document.get("generation"), (int, float))):
+        if all(self.source_checks(digest, document).values()):
             self.source_generation = document["generation"]
             return True
         return False
