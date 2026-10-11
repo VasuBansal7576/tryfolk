@@ -291,7 +291,17 @@ class ResourceGuard:
             and frame.parent_frame == self.primary_page.main_frame and frame.parent_frame.url == capability.parent_url
         if not all(checks.values()):
             return checks
-        identity = await self.frame_verify({**frame_config(capability.raw), "operation": "poll"})
+        try:
+            identity = await self.frame_verify({**frame_config(capability.raw), "operation": "poll",
+                                               "identity_stage": "native_response_capture"})
+        except Exception as error:
+            if getattr(error, "identity_diagnostics", None):
+                self.events.append({"decision": "independent_native_identity_read",
+                                    "identity_diagnostics": error.identity_diagnostics})
+            raise
+        if identity.get("identity_diagnostics"):
+            self.events.append({"decision": "independent_native_identity_read",
+                                "identity_diagnostics": identity["identity_diagnostics"]})
         checks.update(self.owned_checkout_checks(identity))
         checks.update({
             "same_owned_payment": identity.get("payment_id") == capability.context["payment_id"],

@@ -113,14 +113,29 @@ class DodoTarget:
         self.origin = origin.rstrip("/")
         self.headers = {"Authorization": "Bearer " + os.environ.get("TARGET_CONTROL_TOKEN", "")}
 
-    async def request(self, method, path, **kwargs):
-        async with httpx.AsyncClient(trust_env=False, follow_redirects=False, timeout=15) as client:
-            response = await client.request(method, self.origin + path, headers=self.headers, **kwargs)
-            response.raise_for_status()
-            return response.json()
+    async def request(self, method, path, *, _trace=None, **kwargs):
+        item = None
+        if _trace is not None:
+            item = {"stage": {"/api/target/readiness": "readiness", "/api/target/orders": "orders",
+                              "/api/target/receipts": "receipt"}.get(path, "other"),
+                    "response_received": False}
+            _trace.append(item)
+        try:
+            async with httpx.AsyncClient(trust_env=False, follow_redirects=False, timeout=15) as client:
+                response = await client.request(method, self.origin + path, headers=self.headers, **kwargs)
+                if item is not None:
+                    item.update(response_received=True, http_status=response.status_code)
+                response.raise_for_status()
+                return response.json()
+        except Exception as error:
+            if item is not None:
+                item["error_type"] = type(error).__name__ if isinstance(
+                    error, (httpx.HTTPStatusError, json.JSONDecodeError)) else "transport_error" \
+                    if isinstance(error, httpx.RequestError) else "unrecognized"
+            raise
 
-    async def registration(self):
-        readiness = await self.request("GET", "/api/target/readiness")
+    async def registration(self, *, _trace=None):
+        readiness = await self.request("GET", "/api/target/readiness", _trace=_trace)
         manifest = readiness["manifest"]
         if (
             manifest["app_origin"] != self.origin
@@ -189,33 +204,94 @@ class DodoTarget:
         if observed.get("operation") == "contact":
             contact = await self.private_contact(observed, run, fixture)
             return {"approved": bool(contact), "private_contact": contact}
+        bounded = observed.get("operation") == "poll" and observed.get("identity_stage") == "native_response_capture"
+        reads = []
+        active_trace = []
+
+        async def observe():
+            nonlocal active_trace
+            initial_binding = None
+            for attempt in range(3 if bounded else 1):
+                trace = active_trace = []
+                try:
+                    result = await self._frame_context_read(observed, run, fixture, trace)
+                except Exception as error:
+                    error_type = type(error).__name__ if type(error) in (
+                        httpx.HTTPStatusError, json.JSONDecodeError, ValueError, KeyError, TypeError
+                    ) else "transport_error" if isinstance(error, httpx.RequestError) else "unrecognized"
+                    reads.append({"stage": trace[-1]["stage"] if trace else "identity_read",
+                                  "outcome": "error", "error_type": error_type, "HTTP_reads": trace})
+                    error.identity_diagnostics = {"reads": reads, "retry_bound_exhausted": False}
+                    raise
+                facts = result.pop("_identity_read")
+                binding = result.pop("_identity_binding", None)
+                if initial_binding is not None and binding is not None and binding != initial_binding:
+                    result = {"approved": False, "reason": "independent_frame_context_mismatch",
+                              "secret_authenticated": False}
+                    facts.update(stage="identity_binding", outcome="denied",
+                                 first_failed_predicate="same_identity_across_convergence_reads")
+                    facts["checks"]["same_identity_across_convergence_reads"] = False
+                elif binding is not None:
+                    initial_binding = binding
+                facts["HTTP_reads"] = trace
+                reads.append(facts)
+                active_trace = []
+                retry = facts["outcome"] == "checkout_status_convergence_pending"
+                result["identity_diagnostics"] = {"reads": list(reads),
+                    "retry_bound_exhausted": bounded and retry and attempt == 2}
+                if not (bounded and retry and attempt < 2):
+                    return result
+                await asyncio.sleep(0.1)
+
+        if bounded:
+            # A smaller cap inside the existing five-second response capture;
+            # no new capture/aggregate deadline, browser action or confirmation.
+            try:
+                async with asyncio.timeout(2):
+                    return await observe()
+            except TimeoutError as error:
+                error.identity_diagnostics = {"reads": reads + [{"stage": "identity_read_deadline",
+                    "outcome": "error", "error_type": "TimeoutError", "HTTP_reads": active_trace}],
+                    "retry_bound_exhausted": True}
+                raise
+        return await observe()
+
+    async def _frame_context_read(self, observed, run, fixture, trace):
         denied = {
             "approved": False,
             "reason": "independent_frame_context_mismatch",
             "secret_authenticated": False,
         }
-        manifest = (await self.registration())["manifest"]
-        if (
-            manifest.get("target_revision") != run["revision"]
-            or fixture.get("run_id") != run["id"]
-            or fixture.get("target_revision") != run["revision"]
-            or observed.get("api_url") != BROWSER_API
-            or observed.get("browser_api_role") != "observed_approved_shared_service_config"
-            or observed.get("service_sandbox_only_attested") is not False
-            or not all(
-                observed.get(key) is True for key in ("api_base_verified", "sandbox_key", "parent_matches")
-            )
-        ):
-            return denied
+
+        def decision(checks, stage, outcome="denied"):
+            return {**denied, "_identity_read": {"stage": stage, "outcome": outcome, "checks": checks,
+                "first_failed_predicate": next((key for key, value in checks.items() if not value), None)}}
+
+        manifest = (await self.registration(_trace=trace))["manifest"]
+        checks = {
+            "current_target_revision": manifest.get("target_revision") == run["revision"],
+            "fixture_current_run": fixture.get("run_id") == run["id"],
+            "fixture_current_revision": fixture.get("target_revision") == run["revision"],
+            "approved_browser_API": observed.get("api_url") == BROWSER_API,
+            "approved_browser_API_role": observed.get("browser_api_role") == "observed_approved_shared_service_config",
+            "browser_service_sandbox_only_not_claimed": observed.get("service_sandbox_only_attested") is False,
+            "browser_API_base_verified": observed.get("api_base_verified") is True,
+            "browser_sandbox_key": observed.get("sandbox_key") is True,
+            "browser_parent_matches": observed.get("parent_matches") is True,
+        }
+        if not all(checks.values()):
+            return decision(checks, "configuration")
         orders = (
-            await self.request("GET", "/api/target/orders", params={"account_id": fixture["account_id"]})
+            await self.request("GET", "/api/target/orders", params={"account_id": fixture["account_id"]}, _trace=trace)
         )["orders"]
         if len(orders) != 1:
-            return denied
+            return decision({"single_owned_order": False}, "orders")
         order = orders[0]
-        if not order.get("active") or any(order.get(key) != fixture[key] for key in OWNERSHIP):
-            return denied
-        receipt = await self.request("GET", "/api/target/receipts", params={"order_id": order["order_id"], "browser_parent": "1"})
+        checks = {"active_owned_order": bool(order.get("active")),
+                  "exact_order_ownership": all(order.get(key) == fixture[key] for key in OWNERSHIP)}
+        if not all(checks.values()):
+            return decision(checks, "orders")
+        receipt = await self.request("GET", "/api/target/receipts", params={"order_id": order["order_id"], "browser_parent": "1"}, _trace=trace)
         payment, checkout = receipt.get("payment") or {}, receipt.get("checkout") or {}
         metadata = payment.get("metadata") or {}
         operation = observed.get("operation", "bootstrap")
@@ -224,30 +300,53 @@ class DodoTarget:
             if operation == "poll" else {"requires_payment_method"}
         )
         expected = {key: order[key] for key in (*OWNERSHIP, "order_id", "expected_product_id")}
-        if (
-            receipt.get("source") != "dodo_test_api"
-            or operation not in ("bootstrap", "session_tokens", "confirm", "poll")
-            or receipt.get("state") not in (("pending", "succeeded", "failed") if operation == "poll" else ("pending",))
-            or receipt.get("ownership") != expected
-            or receipt.get("mismatches")
-            or not observed.get("payment_id")
-            or payment.get("payment_id") != observed["payment_id"]
-            or not order.get("customer_id")
-            or payment.get("customer_id") != order["customer_id"]
-            or receipt.get("checkout_session_id") != order["checkout_session_id"]
-            or checkout.get("id") != order["checkout_session_id"]
-            or checkout.get("payment_id") != payment.get("payment_id")
-            or payment.get("checkout_session_id") != order["checkout_session_id"]
-            or checkout.get("payment_status") != payment.get("status")
-            or payment.get("status") not in allowed_status
-            or any(metadata.get(key) != order[key] for key in (*OWNERSHIP, "order_id"))
-            or metadata.get("product_id") != order["expected_product_id"]
-            or payment.get("product_cart") != [{"product_id": order["expected_product_id"], "quantity": 1}]
-            or payment.get("amount_minor") != order["amount_minor"]
-            or payment.get("currency") != order["currency"]
-        ):
-            return denied
+        # Private comparison only. No identifiers or source values enter the
+        # closed diagnostics. A retry may change status, never its identity.
+        binding = {
+            "source": {key: manifest.get(key) for key in ("source_commit", "source_sha256", "target_revision")},
+            "order": {key: order.get(key) for key in (*OWNERSHIP, "order_id", "expected_product_id",
+                      "checkout_session_id", "customer_id", "amount_minor", "currency")},
+            "payment_id": payment.get("payment_id"), "payment_link": receipt.get("private_payment_link"),
+        }
+        checks = {
+            "receipt_Test_API_source": receipt.get("source") == "dodo_test_api",
+            "supported_identity_operation": operation in ("bootstrap", "session_tokens", "confirm", "poll"),
+            "receipt_state_allowed": receipt.get("state") in (("pending", "succeeded", "failed") if operation == "poll" else ("pending",)),
+            "receipt_exact_owned_order": receipt.get("ownership") == expected,
+            "receipt_mismatches_absent": not receipt.get("mismatches"),
+            "observed_payment_present": bool(observed.get("payment_id")),
+            "exact_observed_payment": payment.get("payment_id") == observed.get("payment_id"),
+            "owned_customer_present": bool(order.get("customer_id")),
+            "exact_owned_customer": payment.get("customer_id") == order.get("customer_id"),
+            "receipt_exact_checkout": receipt.get("checkout_session_id") == order["checkout_session_id"],
+            "checkout_exact_id": checkout.get("id") == order["checkout_session_id"],
+            "checkout_exact_payment": checkout.get("payment_id") == payment.get("payment_id"),
+            "payment_exact_checkout": payment.get("checkout_session_id") == order["checkout_session_id"],
+            "checkout_payment_status_matches": checkout.get("payment_status") == payment.get("status"),
+            "payment_status_allowed": payment.get("status") in allowed_status,
+            "exact_owned_metadata": all(metadata.get(key) == order[key] for key in (*OWNERSHIP, "order_id")),
+            "exact_owned_product_metadata": metadata.get("product_id") == order["expected_product_id"],
+            "exact_single_owned_product": payment.get("product_cart") == [{"product_id": order["expected_product_id"], "quantity": 1}],
+            "exact_owned_amount": payment.get("amount_minor") == order["amount_minor"],
+            "exact_owned_currency": payment.get("currency") == order["currency"],
+        }
+        if not all(checks.values()):
+            status_checks = {"receipt_state_allowed", "receipt_mismatches_absent", "checkout_payment_status_matches"}
+            temporary = operation == "poll" and receipt.get("state") == "mismatch" \
+                and receipt.get("mismatches") == ["checkout.payment_status"] \
+                and payment.get("status") == "succeeded" and checkout.get("payment_status") == "requires_payment_method" \
+                and all(value for key, value in checks.items() if key not in status_checks)
+            result = decision(checks, "receipt", "checkout_status_convergence_pending" if temporary else "denied")
+            if temporary:
+                result["_identity_binding"] = binding
+            result["_identity_read"]["provider_HTTP_status_available"] = False
+            result["_identity_read"]["receipt_state"] = receipt.get("state") if receipt.get("state") in (
+                "pending", "succeeded", "failed", "mismatch", "provider_error", "setup_required") else "unrecognized"
+            return result
         return {
+            "_identity_binding": binding,
+            "_identity_read": {"stage": "receipt", "outcome": "approved", "checks": checks,
+                               "first_failed_predicate": None},
             "approved": True,
             "provider_environment": "test_mode",
             "payment_correlated": True,
