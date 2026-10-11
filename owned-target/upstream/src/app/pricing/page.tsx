@@ -1,0 +1,1489 @@
+"use client";
+import { Badge } from "@/components/Badge";
+import { Button } from "@/components/Button";
+import { Label } from "@/components/Label";
+import { Switch } from "@/components/Switch";
+import { Tooltip } from "@/components/Tooltip";
+import { ArrowAnimated } from "@/components/ui/ArrowAnimated";
+import { AuthChoiceModal } from "@/components/ui/AuthChoiceModal";
+import DemoBottomPopup from "@/components/ui/DemoBottomPopup";
+import { Faqs } from "@/components/ui/Faqs";
+import Testimonial from "@/components/ui/Testimonial";
+import { cx } from "@/lib/utils";
+import {
+  RiCheckLine,
+  RiCloudLine,
+  RiInformationLine,
+  RiSubtractLine,
+  RiUserLine,
+} from "@remixicon/react";
+import Link from "next/link";
+import React, { Fragment } from "react";
+import { useRouter } from "next/navigation";
+import { useSession } from "next-auth/react";
+import { DodoPayments } from "dodopayments-checkout";
+import {
+  getApplePayCheckoutOptions,
+  type ApplePayBillingFrequency,
+  type ApplePayCheckoutKind,
+} from "@/lib/apple-pay-options";
+// Removed custom BillingAddressModal; unified Checkout Sessions will collect needed details
+
+type FixedPrice = string;
+
+interface VariablePrice {
+  monthly: string;
+  annually: string;
+}
+
+interface Plan {
+  name: string;
+  price: FixedPrice | VariablePrice;
+  description: string;
+  capacity: string[];
+  features: string[];
+  isStarter: boolean;
+  isRecommended: boolean;
+  buttonText: string;
+  buttonLink: string;
+  billingType: 'prepaid-credits' | 'credit-based' | 'subscription' | 'special-download';
+}
+
+const plans: Plan[] = [
+  {
+    name: "Starter Credits",
+    price: "$10",
+    description:
+      "10 prepaid credits, never expire. Top up anytime.",
+    capacity: ["10 credits upfront", "Never expire"],
+    features: [
+      "10 AI image credits",
+      "Standard generation speed",
+      "Basic art styles",
+      "1024x1024 resolution",
+      "Credits never expire",
+      "Add more anytime",
+    ],
+    isStarter: true,
+    isRecommended: false,
+    buttonText: "Buy credits",
+    buttonLink: "#",
+    billingType: "prepaid-credits",
+  },
+  {
+    name: "Credit Pack",
+    price: { monthly: "$10", annually: "$8" },
+    description: "25 credits per month. Save 20% with annual billing.",
+    capacity: ["25 credits/month", "Rollover included"],
+    features: [
+      "25 AI credits per month",
+      "Up to 2048x2048 resolution",
+      "Priority generation",
+      "50% credit rollover",
+      "Low balance alerts",
+      "Full credit ledger history",
+    ],
+    isStarter: false,
+    isRecommended: false,
+    buttonText: "Buy credits",
+    buttonLink: "#",
+    billingType: "credit-based",
+  },
+  {
+    name: "Unlimited Pro",
+    price: { monthly: "$20", annually: "$16" },
+    description:
+      "Unlimited generation for professionals.",
+    capacity: ["Unlimited images", "Commercial rights"],
+    features: [
+      "Unlimited high-quality images",
+      "All premium art styles",
+      "Up to 4096x4096 resolution",
+      "Fastest generation speed",
+      "Advanced AI models",
+      "API access",
+    ],
+    isStarter: false,
+    isRecommended: true,
+    buttonText: "Get started",
+    buttonLink: "#",
+    billingType: "subscription",
+  },
+  {
+    name: "Special Downloads",
+    price: "$12",
+    description: "Curated art pack of 12 premium artworks. One-time purchase.",
+    capacity: ["12 premium artworks", "Instant download"],
+    features: [
+      "12 curated artworks",
+      "4096x4096 resolution",
+      "Famous painter styles",
+      "Commercial use allowed",
+      "No credits required",
+      "Digital ownership",
+    ],
+    isStarter: false,
+    isRecommended: false,
+    buttonText: "Get Art Pack",
+    buttonLink: "#",
+    billingType: "special-download",
+  },
+];
+
+interface Feature {
+  name: string;
+  plans: Record<string, boolean | string>;
+  tooltip?: string;
+}
+
+interface Section {
+  name: string;
+  features: Feature[];
+}
+
+const sections: Section[] = [
+  {
+    name: "Generation Features",
+    features: [
+      {
+        name: "Image Resolution",
+        tooltip: "Maximum resolution available for your generated images.",
+        plans: {
+          "Starter Credits": "1024x1024",
+          "Credit Pack": "2048x2048",
+          "Unlimited Pro": "4096x4096",
+          "Special Downloads": "4096x4096",
+        },
+      },
+      {
+        name: "Art Styles",
+        tooltip: "Number and variety of artistic styles available.",
+        plans: {
+          "Starter Credits": "Basic (10 styles)",
+          "Credit Pack": "Premium (50+ styles)",
+          "Unlimited Pro": "All styles (100+)",
+          "Special Downloads": "Famous painters (50+)",
+        },
+      },
+      {
+        name: "Generation Speed",
+        tooltip: "How quickly your images are generated.",
+        plans: {
+          "Starter Credits": "Standard",
+          "Credit Pack": "Priority",
+          "Unlimited Pro": "Fastest",
+          "Special Downloads": "Instant download",
+        },
+      },
+      {
+        name: "Commercial License",
+        tooltip: "Use generated images for commercial purposes.",
+        plans: {
+          "Starter Credits": true,
+          "Credit Pack": true,
+          "Unlimited Pro": true,
+          "Special Downloads": true,
+        },
+      },
+    ],
+  },
+  {
+    name: "Advanced Tools",
+    features: [
+      {
+        name: "Image Editing Tools",
+        tooltip: "Advanced editing capabilities for your generated art.",
+        plans: {
+          "Credit Pack": true,
+          "Unlimited Pro": true,
+        },
+      },
+      {
+        name: "API Access",
+        tooltip: "Programmatic access to generate images via API.",
+        plans: { "Unlimited Pro": true },
+      },
+      {
+        name: "Batch Generation",
+        tooltip: "Generate multiple images at once.",
+        plans: {
+          "Credit Pack": "Up to 5",
+          "Unlimited Pro": "Unlimited",
+        },
+      },
+      {
+        name: "Custom Models",
+        tooltip: "Train and use your own AI models.",
+        plans: { "Unlimited Pro": true },
+      },
+    ],
+  },
+  {
+    name: "Credits & Usage",
+    features: [
+      {
+        name: "Credit Rollover",
+        tooltip: "Unused credits carried over to the next billing cycle.",
+        plans: {
+          "Credit Pack": "Monthly: 50% rollover",
+        },
+      },
+      {
+        name: "Low Balance Alerts",
+        tooltip: "Get notified when your credit balance is running low.",
+        plans: {
+          "Credit Pack": true,
+        },
+      },
+      {
+        name: "Credit Ledger",
+        tooltip: "Full audit history of every credit added, used, or expired.",
+        plans: {
+          "Credit Pack": true,
+        },
+      },
+      {
+        name: "Monthly Generations",
+        tooltip: "Number of images you can generate per month.",
+        plans: {
+          "Starter Credits": "Pay as you go",
+          "Credit Pack": "25/month (monthly) or 10 (one-time)",
+          "Unlimited Pro": "Unlimited",
+          "Special Downloads": "Unlimited downloads",
+        },
+      },
+      {
+        name: "Image History",
+        tooltip: "How long your generated images are stored.",
+        plans: {
+          "Starter Credits": "30 days",
+          "Credit Pack": "1 year",
+          "Unlimited Pro": "Forever",
+          "Special Downloads": "Forever",
+        },
+      },
+    ],
+  },
+  {
+    name: "Support",
+    features: [
+      {
+        name: "Community Support",
+        plans: {
+          "Starter Credits": "Discord community",
+          "Credit Pack": "Priority Discord",
+          "Unlimited Pro": "Dedicated support",
+          "Special Downloads": "Email support",
+        },
+      },
+      {
+        name: "Response Time",
+        plans: {
+          "Starter Credits": "48 hours",
+          "Credit Pack": "24 hours",
+          "Unlimited Pro": "4 hours",
+          "Special Downloads": "24 hours",
+        },
+      },
+    ],
+  },
+];
+
+const isVariablePrice = (
+  price: FixedPrice | VariablePrice
+): price is VariablePrice => {
+  return (price as VariablePrice).monthly !== undefined;
+};
+
+export default function Pricing() {
+  const { data: session } = useSession();
+  const router = useRouter();
+  const [billingFrequency, setBillingFrequency] = React.useState<
+    "monthly" | "annually"
+  >("monthly");
+  const [isLoading, setIsLoading] = React.useState<string | null>(null);
+  const [showSuccess, setShowSuccess] = React.useState(false);
+  const [showError, setShowError] = React.useState(false);
+  const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
+  const [useOverlayCheckout, setUseOverlayCheckout] = React.useState(false);
+  // Inline checkout is required for Apple Pay branding (merchant name, button type, recurring)
+  // When false, uses overlay (modal) or redirect checkout
+  const [useInlineCheckout, setUseInlineCheckout] = React.useState(true);
+  // Billing modal no longer used; checkout session collects details
+  const [showAuthModal, setShowAuthModal] = React.useState(false);
+  const [pendingPlan, setPendingPlan] = React.useState<string | null>(null);
+  const [pendingCheckoutCallback, setPendingCheckoutCallback] =
+    React.useState<(() => Promise<void>) | null>(null);
+
+  const sessionRef = React.useRef(session);
+  React.useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  // Load checkout mode from localStorage
+  React.useEffect(() => {
+    const savedMode = localStorage.getItem("checkout_mode");
+    if (savedMode) {
+      if (savedMode === "redirect") {
+        setUseInlineCheckout(false);
+        setUseOverlayCheckout(false);
+      } else if (savedMode === "overlay") {
+        setUseInlineCheckout(false);
+        setUseOverlayCheckout(true);
+      } else if (savedMode === "inline") {
+        setUseInlineCheckout(true);
+      }
+    }
+  }, []);
+
+  // No-op: checkout collects billing/customer if not provided
+
+  // Initialize Dodo Payments SDK
+  // Apple Pay branding requires displayType: "inline" (overlay draws no Apple Pay button)
+  React.useEffect(() => {
+    DodoPayments.Initialize({
+      mode: "test", // Change to 'live' for production
+      // Apple Pay branding only applies to inline checkout
+      displayType: useInlineCheckout ? "inline" : "overlay",
+      onEvent: (event) => {
+        switch (event.event_type) {
+          case "checkout.opened":
+            break;
+          case "checkout.payment_page_opened":
+            break;
+          case "checkout.customer_details_submitted":
+            break;
+          case "checkout.closed":
+            setIsLoading(null);
+            break;
+          case "checkout.redirect":
+            // Handle successful payment — show popup then redirect
+            if (event.data?.type === "success") {
+              setShowSuccess(true);
+              setTimeout(() => {
+                setShowSuccess(false);
+              }, 5000);
+              setTimeout(() => {
+                if (sessionRef.current?.user?.email) {
+                  router.push("/dashboard");
+                } else {
+                  router.push("/guest-dashboard?status=succeeded");
+                }
+              }, 3000);
+            } else if (event.data?.type === "failure") {
+              setShowError(true);
+              setTimeout(() => setShowError(false), 5000);
+            }
+            break;
+          case "checkout.error":
+            console.error("Checkout error:", event.data?.message);
+            setShowError(true);
+            setIsLoading(null);
+            setTimeout(() => setShowError(false), 5000);
+            break;
+        }
+      },
+    });
+  }, [router, useInlineCheckout]);
+
+  function openCheckout(
+    checkoutUrl: string,
+    kind: ApplePayCheckoutKind,
+    frequency: ApplePayBillingFrequency = billingFrequency
+  ) {
+    const applePayOptions = getApplePayCheckoutOptions(kind, frequency);
+
+    if (useInlineCheckout) {
+      localStorage.setItem("pending_checkout_url", checkoutUrl);
+      const params = new URLSearchParams({
+        checkout_url: checkoutUrl,
+        apple_pay_kind: kind,
+        billing_frequency: frequency,
+      });
+      router.push(`/checkout?${params.toString()}`);
+      return;
+    }
+
+    if (useOverlayCheckout) {
+      DodoPayments.Checkout.open({
+        checkoutUrl,
+        options: applePayOptions,
+      });
+      return;
+    }
+
+    window.location.href = checkoutUrl;
+  }
+
+  // After returning from hosted checkout, verify payment using stored session id
+  React.useEffect(() => {
+    const params = new URLSearchParams(
+      typeof window !== "undefined" ? window.location.search : ""
+    );
+    const hasError = params.has("error");
+    if (hasError) {
+      setShowError(true);
+      setTimeout(() => setShowError(false), 5000);
+    }
+
+    // Check for Dodo return params (redirect checkout returns with these)
+    const status = params.get("status");
+    const subscriptionId = params.get("subscription_id");
+    const paymentId = params.get("payment_id");
+    const returnEmail = params.get("email");
+
+    const sessionId =
+      typeof window !== "undefined"
+        ? localStorage.getItem("pending_checkout_session_id")
+        : null;
+
+    const userEmail = session?.user?.email || returnEmail;
+
+    // Handle Dodo redirect return params for both guest and authenticated users
+    if (status && userEmail && (subscriptionId || paymentId || sessionId)) {
+      const body: Record<string, string> = { email: userEmail };
+      if (subscriptionId) body.subscriptionId = subscriptionId;
+      if (paymentId) body.paymentId = paymentId;
+      if (sessionId) body.sessionId = sessionId;
+
+      (async () => {
+        try {
+          const res = await fetch("/api/verify-payment", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          const data = await res.json();
+          if (res.ok && data?.success) {
+            localStorage.removeItem("pending_checkout_session_id");
+            if (session?.user?.email) {
+              router.push("/dashboard");
+            } else {
+              const guestParams = new URLSearchParams();
+              if (userEmail) guestParams.set("email", userEmail);
+              if (status) guestParams.set("status", status);
+              if (subscriptionId) guestParams.set("subscription_id", subscriptionId);
+              if (paymentId) guestParams.set("payment_id", paymentId);
+              router.push(`/guest-dashboard?${guestParams.toString()}`);
+            }
+          }
+        } catch {
+          // ignore
+        } finally {
+          localStorage.removeItem("pending_checkout_session_id");
+        }
+      })();
+    } else if (sessionId && session?.user?.email) {
+      // Fallback: verify using stored session ID for authenticated users
+      (async () => {
+        try {
+          const res = await fetch("/api/verify-payment", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: session.user!.email, sessionId }),
+          });
+          const data = await res.json();
+          if (res.ok && data?.success) {
+            router.push("/dashboard");
+          }
+        } catch {
+          // ignore
+        } finally {
+          localStorage.removeItem("pending_checkout_session_id");
+        }
+      })();
+    }
+  }, [router, session]);
+
+  const handleSpecialDownload = async (planName: string) => {
+    if (planName !== "Special Downloads") return;
+
+    if (!session?.user?.email) {
+      setPendingPlan(planName);
+      setPendingCheckoutCallback(() => proceedWithSpecialDownload);
+      setShowAuthModal(true);
+      return;
+    }
+
+    await proceedWithSpecialDownload();
+  };
+
+  const proceedWithSpecialDownload = async () => {
+    const planName = "Special Downloads";
+    setIsLoading(planName);
+
+    try {
+      const response = await fetch("/api/create-checkout-session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          product_cart: [
+            {
+              product_id: process.env.NEXT_PUBLIC_PRODUCT_ID_SPECIAL_DOWNLOAD,
+              quantity: 1,
+            },
+          ],
+          metadata: {
+            plan: "Special Downloads",
+            type: "premium_artwork",
+          },
+          confirm: false,
+          show_saved_payment_methods: false,
+          return_url: useInlineCheckout
+            ? `${typeof window !== "undefined" ? window.location.origin : ""}/checkout`
+            : undefined,
+          customization: {
+            theme: "system",
+            show_order_details: true,
+            show_on_demand_tag: true,
+          },
+          feature_flags: {
+            allow_currency_selection: true,
+            allow_discount_code: true,
+            allow_phone_number_collection: true,
+            allow_tax_id: true,
+            always_create_new_customer: true,
+          },
+        }),
+      });
+
+      const data = await response.json();
+
+      if (data.success && data.checkout_url) {
+        if (data.session_id) {
+          localStorage.setItem("pending_checkout_session_id", data.session_id);
+        }
+        openCheckout(data.checkout_url, "special-download");
+      } else {
+        const msg =
+          data.message ||
+          data.details?.message ||
+          data.error ||
+          "Failed to create checkout session";
+        setErrorMessage(`Special Download Error: ${msg}`);
+        setShowError(true);
+        setTimeout(() => setShowError(false), 5000);
+        setIsLoading(null);
+      }
+    } catch (error) {
+      console.error("Error creating special download checkout:", error);
+      setErrorMessage("An error occurred. Please try again.");
+      setShowError(true);
+      setTimeout(() => setShowError(false), 5000);
+      setIsLoading(null);
+    }
+  };
+
+  const handleSubscribe = async (planName: string) => {
+    if (planName !== "Unlimited Pro") return;
+
+    // Check if user is logged in
+    if (!session?.user?.email) {
+      setPendingPlan(planName);
+      setPendingCheckoutCallback(() => proceedWithSubscribe);
+      setShowAuthModal(true);
+      return;
+    }
+
+    await proceedWithSubscribe();
+  };
+
+  const proceedWithSubscribe = async () => {
+    const planName = "Unlimited Pro";
+    setIsLoading(planName);
+
+    try {
+      // Create unified checkout session for subscription
+      const response = await fetch("/api/create-checkout-session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          // Let Checkout collect customer & billing details
+          product_cart: [
+            {
+              product_id:
+                billingFrequency === "monthly"
+                  ? process.env.NEXT_PUBLIC_PRODUCT_ID_SUBSCRIPTION_MONTHLY
+                  : process.env.NEXT_PUBLIC_PRODUCT_ID_SUBSCRIPTION_ANNUAL,
+              quantity: 1,
+            },
+          ],
+          subscription_data: { trial_period_days: 14 },
+          metadata: {
+            plan: "Unlimited Pro",
+            billing_frequency: billingFrequency,
+          },
+          confirm: false,
+          show_saved_payment_methods: false,
+          // For inline checkout: set return_url to redirect to dedicated checkout page
+          // For overlay/redirect: leave undefined to use default behavior
+          return_url: useInlineCheckout
+            ? `${typeof window !== "undefined" ? window.location.origin : ""}/checkout`
+            : undefined,
+          customization: {
+            theme: "system",
+            show_order_details: true,
+            show_on_demand_tag: true,
+          },
+          feature_flags: {
+            allow_currency_selection: true,
+            allow_discount_code: true,
+            allow_phone_number_collection: true,
+            allow_tax_id: true,
+            always_create_new_customer: true,
+          },
+        }),
+      });
+
+      const data = await response.json();
+
+      if (data.success && data.checkout_url) {
+        if (data.session_id) {
+          localStorage.setItem("pending_checkout_session_id", data.session_id);
+        }
+        openCheckout(data.checkout_url, "subscription");
+      } else {
+        console.error("Checkout session (subscription) failed:", data);
+        const msg =
+          data.message ||
+          data.details?.message ||
+          data.error ||
+          "Failed to create subscription checkout session";
+        setErrorMessage(`Subscription Error: ${msg}`);
+        setShowError(true);
+        setTimeout(() => setShowError(false), 5000);
+        setIsLoading(null);
+      }
+    } catch (error) {
+      console.error("Error creating subscription checkout session:", error);
+      setErrorMessage("An error occurred. Please try again.");
+      setShowError(true);
+      setTimeout(() => setShowError(false), 5000);
+      setIsLoading(null);
+    }
+  };
+
+  const proceedWithStarterCredits = async () => {
+    const planName = "Starter Credits";
+    setIsLoading(planName);
+
+    try {
+      const response = await fetch("/api/create-checkout-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          product_cart: [
+            {
+              product_id: process.env.NEXT_PUBLIC_PRODUCT_ID_IMAGE_BUNDLE,
+              quantity: 1,
+            },
+          ],
+          metadata: {
+            plan: "Starter Credits",
+            credits: "10",
+          },
+          confirm: false,
+          show_saved_payment_methods: false,
+          return_url: useInlineCheckout
+            ? `${typeof window !== "undefined" ? window.location.origin : ""}/checkout`
+            : undefined,
+          customization: {
+            theme: "system",
+            show_order_details: true,
+            show_on_demand_tag: true,
+          },
+          feature_flags: {
+            allow_currency_selection: true,
+            allow_discount_code: true,
+            allow_phone_number_collection: true,
+            allow_tax_id: true,
+            always_create_new_customer: true,
+          },
+        }),
+      });
+
+      const data = await response.json();
+
+      if (data.success && data.checkout_url) {
+        if (data.session_id) {
+          localStorage.setItem("pending_checkout_session_id", data.session_id);
+        }
+        openCheckout(data.checkout_url, "prepaid-credits");
+      } else {
+        const msg = data.message || data.details?.message || data.error || "Failed to create checkout session";
+        setErrorMessage(`Starter Credits Error: ${msg}`);
+        setShowError(true);
+        setTimeout(() => setShowError(false), 5000);
+        setIsLoading(null);
+      }
+    } catch (error) {
+      console.error("Error creating starter credits checkout:", error);
+      setErrorMessage("An error occurred. Please try again.");
+      setShowError(true);
+      setTimeout(() => setShowError(false), 5000);
+      setIsLoading(null);
+    }
+  };
+
+  const handleStarterCredits = async (planName: string) => {
+    if (planName !== "Starter Credits") return;
+
+    if (!session?.user?.email) {
+      setPendingPlan(planName);
+      setPendingCheckoutCallback(() => proceedWithStarterCredits);
+      setShowAuthModal(true);
+      return;
+    }
+
+    await proceedWithStarterCredits();
+  };
+
+  const handleCreditBased = async (planName: string) => {
+    if (planName !== "Credit Pack") return;
+
+    if (!session?.user?.email) {
+      setPendingPlan(planName);
+      setPendingCheckoutCallback(() => proceedWithCreditBased);
+      setShowAuthModal(true);
+      return;
+    }
+
+    await proceedWithCreditBased();
+  };
+
+  const proceedWithCreditBased = async () => {
+    const planName = "Credit Pack";
+    setIsLoading(planName);
+
+    try {
+      const creditBasedProductId =
+        billingFrequency === "monthly"
+          ? process.env.NEXT_PUBLIC_PRODUCT_ID_CREDIT_BASED
+          : process.env.NEXT_PUBLIC_PRODUCT_ID_CREDIT_BASED_ANNUAL;
+
+      if (!creditBasedProductId) {
+        setErrorMessage(`Credit Pack ${billingFrequency} product ID is not configured.`);
+        setShowError(true);
+        setTimeout(() => setShowError(false), 5000);
+        setIsLoading(null);
+        return;
+      }
+
+      const response = await fetch("/api/create-checkout-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          product_cart: [
+            {
+              product_id: creditBasedProductId,
+              quantity: 1,
+            },
+          ],
+          metadata: {
+            plan: "Credit Pack",
+            billing_type: "credit_based",
+            billing_frequency: billingFrequency,
+          },
+          confirm: false,
+          show_saved_payment_methods: false,
+          return_url: useInlineCheckout
+            ? `${typeof window !== "undefined" ? window.location.origin : ""}/checkout`
+            : undefined,
+          customization: {
+            theme: "system",
+            show_order_details: true,
+            show_on_demand_tag: true,
+          },
+          feature_flags: {
+            allow_currency_selection: true,
+            allow_discount_code: true,
+            allow_phone_number_collection: true,
+            allow_tax_id: true,
+            always_create_new_customer: true,
+          },
+        }),
+      });
+
+      const data = await response.json();
+
+      if (data.success && data.checkout_url) {
+        if (data.session_id) {
+          localStorage.setItem("pending_checkout_session_id", data.session_id);
+        }
+        openCheckout(data.checkout_url, "credit-based");
+      } else {
+        const msg =
+          data.message ||
+          data.details?.message ||
+          data.error ||
+          "Failed to create checkout session";
+        setErrorMessage(`Credit-Based Error: ${msg}`);
+        setShowError(true);
+        setTimeout(() => setShowError(false), 5000);
+        setIsLoading(null);
+      }
+    } catch (error) {
+      console.error("Error creating credit-based checkout session:", error);
+      setErrorMessage("An error occurred. Please try again.");
+      setShowError(true);
+      setTimeout(() => setShowError(false), 5000);
+      setIsLoading(null);
+    }
+  };
+
+  // Billing submission handler removed; checkout collects data
+
+  const handleModalSignIn = () => {
+    setShowAuthModal(false);
+    router.push("/auth/signin?callbackUrl=/pricing");
+  };
+
+  const handleModalContinueAsGuest = async () => {
+    setShowAuthModal(false);
+    if (pendingCheckoutCallback) {
+      await pendingCheckoutCallback();
+    }
+    setPendingPlan(null);
+    setPendingCheckoutCallback(null);
+  };
+
+  const handleModalClose = () => {
+    setShowAuthModal(false);
+    setPendingPlan(null);
+    setPendingCheckoutCallback(null);
+  };
+
+  return (
+    <>
+      <DemoBottomPopup />
+      <div className="px-3 pt-20">
+        {/* Success Notification */}
+        {showSuccess && (
+          <div className="fixed top-4 right-4 z-50 rounded-xl border-2 border-green-200 bg-green-50 p-6 shadow-lg dark:border-green-800 dark:bg-green-950/90">
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-green-600 text-white dark:bg-green-400 dark:text-gray-900">
+                <svg
+                  className="h-5 w-5"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M5 13l4 4L19 7"
+                  />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <h3 className="text-lg font-semibold text-green-900 dark:text-green-100">
+                  Payment Successful!
+                </h3>
+                <p className="mt-1 text-sm text-green-800 dark:text-green-200">
+                  Thank you for your purchase. Redirecting to dashboard...
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Error Notification */}
+        {showError && (
+          <div className="fixed top-4 right-4 z-50 rounded-xl border-2 border-red-200 bg-red-50 p-6 shadow-lg dark:border-red-800 dark:bg-red-950/90">
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-red-600 text-white dark:bg-red-400 dark:text-gray-900">
+                <svg
+                  className="h-5 w-5"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M6 18L18 6M6 6l12 12"
+                  />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <h3 className="text-lg font-semibold text-red-900 dark:text-red-100">
+                  Payment Failed
+                </h3>
+                <p className="mt-1 text-sm text-red-800 dark:text-red-200">
+                  {errorMessage ||
+                    "There was an issue processing your payment. Please try again."}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Auth Choice Modal */}
+        <AuthChoiceModal
+          isOpen={showAuthModal}
+          onClose={handleModalClose}
+          onSignIn={handleModalSignIn}
+          onContinueAsGuest={handleModalContinueAsGuest}
+          planName={pendingPlan || undefined}
+        />
+
+        <section
+          aria-labelledby="pricing-title"
+          className="animate-slide-up-fade"
+          style={{
+            animationDuration: "600ms",
+            animationFillMode: "backwards",
+          }}
+        >
+          <Badge>Pricing</Badge>
+          <h1 className="mt-2 inline-block bg-gradient-to-br from-gray-900 to-gray-800 bg-clip-text py-2 text-4xl font-bold tracking-tighter text-transparent sm:text-6xl md:text-6xl dark:from-gray-50 dark:to-gray-300">
+            Choose your creative journey
+          </h1>
+          <p className="mt-6 max-w-2xl text-lg text-gray-700 dark:text-gray-400">
+            Flexible pricing for every type of creator. From pay-per-image to
+            unlimited generation, find the perfect plan for your artistic
+            vision.
+          </p>
+
+          {/* Demo Banner */}
+          <div className="mt-8 rounded-lg border border-lime-200 bg-lime-50 px-4 py-3 dark:border-lime-800 dark:bg-lime-950/30">
+            <div className="flex items-center gap-2">
+              <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-lime-600 text-white dark:bg-lime-400 dark:text-gray-900">
+                <svg
+                  className="h-3 w-3"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
+                </svg>
+              </div>
+              <p className="text-sm text-lime-800 dark:text-lime-200">
+                Dodo Payments Demo: <strong>Starter Credits</strong> (prepaid), <strong>Credit Pack</strong> (subscription), <strong>Unlimited Pro</strong> (unlimited), and <strong>Special Downloads</strong> (one-time art pack).
+              </p>
+            </div>
+          </div>
+        </section>
+        <section
+          id="pricing-overview"
+          className="mt-12 animate-slide-up-fade"
+          aria-labelledby="pricing-overview"
+          style={{
+            animationDuration: "600ms",
+            animationDelay: "200ms",
+            animationFillMode: "backwards",
+          }}
+        >
+          <div className="flex flex-row items-center justify-center gap-6 mb-6">
+            {/* Billing Frequency Toggle */}
+            <div className="flex items-center gap-3">
+              <Label
+                htmlFor="billing-switch"
+                className="text-sm font-medium text-gray-700 dark:text-gray-300"
+              >
+                Monthly
+              </Label>
+              <Switch
+                id="billing-switch"
+                checked={billingFrequency === "annually"}
+                onCheckedChange={() =>
+                  setBillingFrequency(
+                    billingFrequency === "monthly" ? "annually" : "monthly"
+                  )
+                }
+              />
+              <Label
+                htmlFor="billing-switch"
+                className="text-sm font-medium text-gray-700 dark:text-gray-300"
+              >
+                Yearly <span className="text-lime-600 font-semibold">(-20%)</span>
+              </Label>
+            </div>
+
+            {/* Checkout Mode Selector */}
+            <div className="flex items-center gap-4">
+              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Checkout Mode:</span>
+              <div className="flex items-center gap-2">
+                {[
+                  { value: "redirect", label: "Redirect" },
+                  { value: "overlay", label: "Overlay" },
+                  { value: "inline", label: "Inline" }
+                ].map((mode) => (
+                  <button
+                    key={mode.value}
+                    onClick={() => {
+                      if (mode.value === "redirect") {
+                        setUseInlineCheckout(false);
+                        setUseOverlayCheckout(false);
+                      } else if (mode.value === "overlay") {
+                        setUseInlineCheckout(false);
+                        setUseOverlayCheckout(true);
+                      } else if (mode.value === "inline") {
+                        setUseInlineCheckout(true);
+                        // overlay preference doesn't matter for inline
+                      }
+                      // Save to localStorage
+                      localStorage.setItem("checkout_mode", mode.value);
+                    }}
+                    className={cx(
+                      "px-3 py-1.5 text-xs font-medium rounded-full transition-all duration-200",
+                      (() => {
+                        const currentMode =
+                          useInlineCheckout ? "inline" :
+                          useOverlayCheckout ? "overlay" : "redirect";
+                        return currentMode === mode.value
+                          ? "bg-lime-600 text-white shadow-sm"
+                          : "bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-gray-700";
+                      })()
+                    )}
+                  >
+                    {mode.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-x-8 gap-y-8 lg:grid-cols-4">
+            {plans.map((plan, planIdx) => (
+              <div key={planIdx} className="mt-6">
+                {plan.billingType !== undefined ? (
+                  <div className="flex h-4 items-center">
+                    <div className="relative w-full">
+                      <div
+                        className="absolute inset-0 flex items-center"
+                        aria-hidden="true"
+                      >
+                        <div className="w-full border-t border-lime-600 dark:border-lime-400" />
+                      </div>
+                      <div className="relative flex justify-center">
+                        <span className="bg-white px-3 text-xs font-medium text-lime-600 dark:bg-gray-950 dark:text-lime-400">
+                          {plan.billingType === "prepaid-credits" && "Prepaid Credits"}
+                          {plan.billingType === "credit-based" && (
+                            <>
+                              Credit-Based{" "}
+                              <span className="ml-1 inline-flex items-center rounded-full bg-lime-600 px-1.5 py-0.5 text-[10px] font-bold uppercase leading-none text-white dark:bg-lime-400 dark:text-gray-900">
+                                NEW
+                              </span>
+                            </>
+                          )}
+                          {plan.billingType === "subscription" && "Subscription"}
+                          {plan.billingType === "special-download" && "One-Time"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex h-4 items-center">
+                    <div className="h-px w-full bg-gray-200 dark:bg-gray-800" />
+                  </div>
+                )}
+                <div className="mx-auto max-w-md">
+                  <h2 className="mt-6 text-sm font-semibold text-gray-900 dark:text-gray-50">
+                    {plan.name}
+                  </h2>
+                  <div className="mt-3 flex items-center gap-x-3">
+                    <span className="text-5xl font-semibold tabular-nums text-gray-900 dark:text-gray-50">
+                      {isVariablePrice(plan.price)
+                        ? billingFrequency === "monthly"
+                          ? plan.price.monthly
+                          : plan.price.annually
+                        : plan.price}
+                    </span>
+                    <div className="text-xs text-gray-600 dark:text-gray-400">
+                      {plan.billingType === "prepaid-credits" && <>for 10<br />credits</>}
+                      {plan.billingType === "credit-based" && <>per month<br /><span className="text-xs">{billingFrequency === "annually" ? "billed $96/yr" : "billed monthly"}</span></>}
+                      {plan.billingType === "subscription" && "per month"}
+                      {plan.billingType === "special-download" && <>for 12<br />artworks</>}
+                    </div>
+                  </div>
+                  <div className="mt-6 flex flex-col justify-between">
+                    <p className="min-h-[3rem] text-sm leading-6 text-gray-600 dark:text-gray-400">
+                      {plan.description}
+                    </p>
+                    <div className="mt-6">
+                      {plan.billingType === "prepaid-credits" ? (
+                        <Button
+                          variant="secondary"
+                          className="group w-full"
+                          onClick={() => handleStarterCredits(plan.name)}
+                          disabled={isLoading === plan.name}
+                        >
+                          {isLoading === plan.name ? "Processing..." : plan.buttonText}
+                          {isLoading !== plan.name && <ArrowAnimated />}
+                        </Button>
+                      ) : plan.billingType === "credit-based" ? (
+                        <Button
+                          className="group w-full"
+                          onClick={() => handleCreditBased(plan.name)}
+                          disabled={isLoading === plan.name}
+                        >
+                          {isLoading === plan.name ? "Processing..." : plan.buttonText}
+                          {isLoading !== plan.name && <ArrowAnimated />}
+                        </Button>
+                      ) : plan.billingType === "subscription" ? (
+                        <Button
+                          className="group w-full"
+                          onClick={() => handleSubscribe(plan.name)}
+                          disabled={isLoading === plan.name}
+                        >
+                          {isLoading === plan.name ? "Processing..." : plan.buttonText}
+                          {isLoading !== plan.name && <ArrowAnimated />}
+                        </Button>
+                      ) : plan.billingType === "special-download" ? (
+                        <Button
+                          variant="secondary"
+                          className="group w-full"
+                          onClick={() => handleSpecialDownload(plan.name)}
+                          disabled={isLoading === plan.name}
+                        >
+                          {isLoading === plan.name ? "Processing..." : plan.buttonText}
+                          {isLoading !== plan.name && <ArrowAnimated />}
+                        </Button>
+                      ) : (
+                        <Button asChild className="group">
+                          <Link href={plan.buttonLink}>
+                            {plan.buttonText}
+                            <ArrowAnimated />
+                          </Link>
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                  <ul
+                    role="list"
+                    className="mt-8 text-sm text-gray-700 dark:text-gray-400"
+                  >
+                    {plan.capacity.map((feature, index) => (
+                      <li
+                        key={feature}
+                        className="flex items-center gap-x-3 py-1.5"
+                      >
+                        {index === 0 && (
+                          <RiUserLine
+                            className="size-4 shrink-0 text-gray-500"
+                            aria-hidden="true"
+                          />
+                        )}
+                        {index === 1 && (
+                          <RiCloudLine
+                            className="size-4 shrink-0 text-gray-500"
+                            aria-hidden="true"
+                          />
+                        )}
+                        <span>{feature}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  <ul
+                    role="list"
+                    className="mt-4 text-sm text-gray-700 dark:text-gray-400"
+                  >
+                    {plan.features.map((feature) => (
+                      <li
+                        key={feature}
+                        className="flex items-center gap-x-3 py-1.5"
+                      >
+                        <RiCheckLine
+                          className="size-4 shrink-0 text-lime-600 dark:text-lime-400"
+                          aria-hidden="true"
+                        />
+                        <span>{feature}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section
+          id="testimonial"
+          className="mx-auto mt-20 max-w-xl sm:mt-32 lg:max-w-6xl"
+          aria-labelledby="testimonial"
+        >
+          <Testimonial />
+        </section>
+
+        {/* plan details (xs-lg)*/}
+        <section
+          id="pricing-details"
+          className="mt-20 sm:mt-36"
+          aria-labelledby="pricing-details"
+        >
+          <div className="mx-auto space-y-8 sm:max-w-md lg:hidden">
+            {plans.map((plan) => (
+              <div key={plan.name}>
+                <div className="rounded-xl bg-gray-400/5 p-6 ring-1 ring-inset ring-gray-200 dark:ring-gray-800">
+                  <h2
+                    id={plan.name}
+                    className="text-base font-semibold leading-6 text-gray-900 dark:text-gray-50"
+                  >
+                    {plan.name}
+                  </h2>
+                  <p className="text-sm font-normal text-gray-600 dark:text-gray-400">
+                    {isVariablePrice(plan.price)
+                      ? `${
+                          billingFrequency === "monthly"
+                            ? plan.price.monthly
+                            : plan.price.annually
+                        } / per month`
+                      : plan.price}
+                  </p>
+                </div>
+                <ul
+                  role="list"
+                  className="mt-10 space-y-10 text-sm leading-6 text-gray-900 dark:text-gray-50"
+                >
+                  {sections.map((section) => (
+                    <li key={section.name}>
+                      <h3 className="font-semibold">{section.name}</h3>
+                      <ul
+                        role="list"
+                        className="mt-2 divide-y divide-gray-200 dark:divide-gray-800"
+                      >
+                        {section.features.map((feature) =>
+                          feature.plans[plan.name] ? (
+                            <li
+                              key={feature.name}
+                              className="flex gap-x-3 py-2.5"
+                            >
+                              <RiCheckLine
+                                className="size-5 flex-none text-lime-600 dark:text-lime-400"
+                                aria-hidden="true"
+                              />
+                              <span>
+                                {feature.name}{" "}
+                                {typeof feature.plans[plan.name] ===
+                                "string" ? (
+                                  <span className="text-sm leading-6 text-gray-600 dark:text-gray-400">
+                                    ({feature.plans[plan.name]})
+                                  </span>
+                                ) : null}
+                              </span>
+                            </li>
+                          ) : null
+                        )}
+                      </ul>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* plan details (lg+) */}
+        <section className="mx-auto mt-20">
+          <div className="mt-20 hidden sm:mt-28 lg:block">
+            <div className="relative">
+              <div className="sticky top-0 z-20 h-28 w-full bg-white dark:bg-gray-950" />
+              <table className="w-full table-fixed border-separate border-spacing-0 text-left">
+                <caption className="sr-only">Pricing plan comparison</caption>
+                <colgroup>
+                  <col className="w-1/5" />
+                  <col className="w-1/5" />
+                  <col className="w-1/5" />
+                  <col className="w-1/5" />
+                  <col className="w-1/5" />
+                </colgroup>
+                <thead className="sticky top-28">
+                  <tr>
+                    <th
+                      scope="col"
+                      className="border-b border-gray-100 bg-white pb-8 dark:border-gray-800 dark:bg-gray-950"
+                    >
+                      <div className="font-semibold leading-7 text-gray-900 dark:text-gray-50">
+                        Compare plans
+                      </div>
+                      <div className="text-sm font-normal text-gray-600 dark:text-gray-400">
+                        Choose the best plan for your needs
+                      </div>
+                    </th>
+                    {plans.map((plan) => (
+                      <th
+                        key={plan.name}
+                        scope="col"
+                        className="border-b border-gray-100 bg-white px-6 pb-8 lg:px-8 dark:border-gray-800 dark:bg-gray-950"
+                      >
+                        <div
+                          className={cx(
+                            !plan.isStarter
+                              ? "text-lime-600 dark:text-lime-400"
+                              : "text-gray-900 dark:text-gray-50",
+                            "font-semibold leading-7"
+                          )}
+                        >
+                          {plan.name}
+                        </div>
+                        <div className="text-sm font-normal text-gray-600 dark:text-gray-400">
+                          {isVariablePrice(plan.price)
+                            ? `${
+                                billingFrequency === "monthly"
+                                  ? plan.price.monthly
+                                  : plan.price.annually
+                              } / per month`
+                            : plan.price}
+                        </div>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sections.map((section, sectionIdx) => (
+                    <Fragment key={section.name}>
+                      <tr>
+                        <th
+                          scope="colgroup"
+                          colSpan={5}
+                          className={cx(
+                            sectionIdx === 0 ? "pt-14" : "pt-10",
+                            "border-b border-gray-100 pb-4 text-base font-semibold leading-6 text-gray-900 dark:border-gray-800 dark:text-gray-50"
+                          )}
+                        >
+                          {section.name}
+                        </th>
+                      </tr>
+                      {section.features.map((feature) => (
+                        <tr
+                          key={feature.name}
+                          className="transition hover:bg-lime-50/30 dark:hover:bg-lime-800/5"
+                        >
+                          <th
+                            scope="row"
+                            className="flex items-center gap-2 border-b border-gray-100 py-4 text-sm font-normal leading-6 text-gray-900 dark:border-gray-800 dark:text-gray-50"
+                          >
+                            <span>{feature.name}</span>
+                            {feature.tooltip ? (
+                              <Tooltip side="right" content={feature.tooltip}>
+                                <RiInformationLine
+                                  className="size-4 shrink-0 text-gray-700 dark:text-gray-400"
+                                  aria-hidden="true"
+                                />
+                              </Tooltip>
+                            ) : null}
+                          </th>
+                          {plans.map((plan) => (
+                            <td
+                              key={plan.name}
+                              className="border-b border-gray-100 px-6 py-4 lg:px-8 dark:border-gray-800"
+                            >
+                              {typeof feature.plans[plan.name] === "string" ? (
+                                <div className="text-sm leading-6 text-gray-600 dark:text-gray-400">
+                                  {feature.plans[plan.name]}
+                                </div>
+                              ) : (
+                                <>
+                                  {feature.plans[plan.name] === true ? (
+                                    <RiCheckLine
+                                      className="h-5 w-5 text-lime-600 dark:text-lime-400"
+                                      aria-hidden="true"
+                                    />
+                                  ) : (
+                                    <RiSubtractLine
+                                      className="h-5 w-5 text-gray-400 dark:text-gray-600"
+                                      aria-hidden="true"
+                                    />
+                                  )}
+
+                                  <span className="sr-only">
+                                    {feature.plans[plan.name] === true
+                                      ? "Included"
+                                      : "Not included"}{" "}
+                                    in {plan.name}
+                                  </span>
+                                </>
+                              )}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </Fragment>
+                  ))}
+                  <tr>
+                    <th
+                      scope="row"
+                      className="pt-6 text-sm font-normal leading-6 text-gray-900 dark:text-gray-50"
+                    >
+                      <span className="sr-only">Link to activate plan</span>
+                    </th>
+                    {plans.map((plan) => (
+                      <td key={plan.name} className="px-6 pt-6 lg:px-8">
+                        {plan.billingType === "prepaid-credits" ? (
+                          <Button
+                            variant="light"
+                            onClick={() => handleStarterCredits(plan.name)}
+                            disabled={isLoading === plan.name}
+                            className="group bg-transparent px-0 text-base hover:bg-transparent dark:bg-transparent hover:dark:bg-transparent"
+                          >
+                            {isLoading === plan.name ? "Processing..." : plan.buttonText}
+                            {isLoading !== plan.name && <ArrowAnimated />}
+                          </Button>
+                        ) : plan.billingType === "credit-based" ? (
+                          <Button
+                            variant="light"
+                            onClick={() => handleCreditBased(plan.name)}
+                            disabled={isLoading === plan.name}
+                            className="group bg-transparent px-0 text-base text-lime-600 hover:bg-transparent dark:bg-transparent dark:text-lime-400 hover:dark:bg-transparent"
+                          >
+                            {isLoading === plan.name ? "Processing..." : plan.buttonText}
+                            {isLoading !== plan.name && <ArrowAnimated />}
+                          </Button>
+                        ) : plan.billingType === "subscription" ? (
+                          <Button
+                            variant="light"
+                            onClick={() => handleSubscribe(plan.name)}
+                            disabled={isLoading === plan.name}
+                            className="group bg-transparent px-0 text-base text-lime-600 hover:bg-transparent dark:bg-transparent dark:text-lime-400 hover:dark:bg-transparent"
+                          >
+                            {isLoading === plan.name ? "Processing..." : plan.buttonText}
+                            {isLoading !== plan.name && <ArrowAnimated />}
+                          </Button>
+                        ) : plan.billingType === "special-download" ? (
+                          <Button
+                            variant="light"
+                            onClick={() => handleSpecialDownload(plan.name)}
+                            disabled={isLoading === plan.name}
+                            className="group bg-transparent px-0 text-base hover:bg-transparent dark:bg-transparent hover:dark:bg-transparent"
+                          >
+                            {isLoading === plan.name ? "Processing..." : plan.buttonText}
+                            {isLoading !== plan.name && <ArrowAnimated />}
+                          </Button>
+                        ) : (
+                          <Button
+                            variant="light"
+                            asChild
+                            className="group bg-transparent px-0 text-base text-lime-600 hover:bg-transparent dark:bg-transparent dark:text-lime-400 hover:dark:bg-transparent"
+                          >
+                            <Link href={plan.buttonLink}>
+                              {plan.buttonText}
+                              <ArrowAnimated />
+                            </Link>
+                          </Button>
+                        )}
+                      </td>
+                    ))}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+        <Faqs />
+      </div>
+      {/* Billing modal removed; checkout handles data collection */}
+    </>
+  );
+}

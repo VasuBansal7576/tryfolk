@@ -1,0 +1,336 @@
+"""Real SDK orchestration and independent owned-target verification."""
+
+import asyncio
+import json
+import os
+import signal
+from pathlib import Path
+import httpx
+from .codex_bridge import clean_env
+from .process import SDKProcess, ROOT
+from .verification import Payment, Entitlement, verify
+from .worker import Cancelled
+from .browser_policy import BrowserPolicy
+from .decisions import validated_action
+
+
+class Runtime:
+    def __init__(self, service):
+        self.service = service
+        self.evidence = Path(os.environ.get("TRYFOLK_EVIDENCE_ROOT", "runtime/evidence"))
+        self.evidence.mkdir(parents=True, exist_ok=True)
+        self.secret = os.environ.get("TARGET_FIXTURE_SECRET", "")
+        self.headers = {"Authorization": "Bearer " + self.secret}
+        from .telemetry import Telemetry
+
+        self.telemetry = Telemetry()
+
+    def cancelled(self, run_id):
+        with self.service.store.transaction() as db:
+            return self.service.store.load(db, "runs", run_id)["phase"] == "cancelled"
+
+    async def check_revision(self, run):
+        if run["provider"] == "dodo":
+            from .dodo import DodoTarget
+
+            manifest = (await DodoTarget(run["preview_url"]).registration())["manifest"]
+            if manifest["target_revision"] != run["revision"]:
+                raise RuntimeError("Dodo preview revision changed since registration.")
+            if any(
+                run.get(key) and run[key] != manifest[field]
+                for key, field in (("source_commit", "source_commit"), ("source_digest", "source_sha256"))
+            ):
+                raise RuntimeError("Dodo preview source head/digest differs from this exact run.")
+            if run.get("target_mode") and manifest["mode"] != run["target_mode"]:
+                raise RuntimeError("Dodo baseline mode changed; repair must keep equivalent conditions.")
+            return
+        async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
+            response = await client.get(run["preview_url"] + "/health")
+            response.raise_for_status()
+            health = response.json()
+            if health["revision"] != run["revision"] or health["fault"] != run["fault"]:
+                raise RuntimeError(
+                    "Registered preview revision/fault changed; evidence acceptance invalidated."
+                )
+            if health["provider"] != run["provider"]:
+                raise RuntimeError("Preview provider identity mismatch.")
+            expected_digest = (
+                run.get("source_digest") or (run.get("repair") or {}).get("source_digest")
+                if run["pass"] == "after"
+                else run["revision"]
+            )
+            if health.get("source_digest") != expected_digest:
+                raise RuntimeError("Preview source digest differs from the registered exact revision.")
+
+    async def discover(self, run):
+        self.active_run_id = run["id"]
+        await self.check_revision(run)
+        env = clean_env() | {
+            "PYTHONPATH": str(ROOT / "src"),
+            "ANONYMIZED_TELEMETRY": "false",
+            "BROWSER_USE_TELEMETRY": "false",
+            "TRYFOLK_EVIDENCE_ROOT": str(self.evidence.resolve()),
+        }
+        process = await asyncio.create_subprocess_exec(
+            str(ROOT / "integrations/browser-use/.venv/bin/python"),
+            str(ROOT / "integrations/browser-use/adapter.py"),
+            cwd=ROOT / "runtime",
+            env=env,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
+        task = asyncio.create_task(
+            process.communicate(
+                json.dumps(
+                    {"url": run["app_url"], "revision": run["revision"], "provider": run["provider"]}
+                ).encode()
+            )
+        )
+        deadline = asyncio.get_running_loop().time() + 180
+        try:
+            while not task.done():
+                if self.cancelled(run["id"]):
+                    raise Cancelled()
+                if asyncio.get_running_loop().time() > deadline:
+                    raise RuntimeError("Discovery time allowance exhausted.")
+                await asyncio.sleep(0.25)
+            stdout, _ = await task
+        finally:
+            if process.returncode is None:
+                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    await asyncio.wait_for(process.wait(), 10)
+                except TimeoutError:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    await process.wait()
+        (self.evidence / f"{run['id']}-discovery.log").write_bytes(stdout)
+        if process.returncode:
+            raise RuntimeError("Browser Use discovery failed; see discovery evidence log.")
+        for line in reversed(stdout.decode().splitlines()):
+            try:
+                value = json.loads(line)
+                if "observed" in value:
+                    value["provider"] = run["provider"]
+                    return value
+            except ValueError:
+                continue
+        raise RuntimeError("Browser Use produced no observed AppBrief.")
+
+    async def generate(self, brief, count):
+        persona = SDKProcess("tinytroupe", lambda: self.cancelled(self.active_run_id))
+        try:
+            value = await persona.request(
+                {"op": "generate", "brief": brief, "count": count}, timeout=180 * count
+            )
+            return value["population"]
+        finally:
+            await persona.close()
+
+    async def provision(self, run, persona):
+        await self.check_revision(run)
+        if run["provider"] == "dodo":
+            from .dodo import DodoTarget
+
+            return await DodoTarget(run["preview_url"]).provision(run, persona)
+        async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
+            response = await client.post(
+                run["preview_url"] + "/fixtures/accounts",
+                json={"run_id": run["id"], "persona_id": persona["id"], "conditions": persona["conditions"]},
+                headers=self.headers,
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def verification(self, run, fixture, capability=None):
+        if run["provider"] == "dodo":
+            from .dodo import DodoTarget
+
+            return await DodoTarget(run["preview_url"]).verification(run, fixture, capability)
+        # Provider truth is read from a distinct process/database. Entitlement GET cannot fulfill.
+        async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
+            response = await client.get(
+                "http://127.0.0.1:3200/payments/" + fixture["checkout_id"], headers=self.headers
+            )
+            if response.status_code == 404:
+                payment = None
+            else:
+                response.raise_for_status()
+                value = response.json()
+                payment = Payment(
+                    id=value["payment_id"],
+                    provider=value["provider"],
+                    status=value["status"],
+                    account_id=value["account_id"],
+                    checkout_id=value["checkout_id"],
+                    product_id=value["product_id"],
+                    amount=value["amount"],
+                    currency=value["currency"],
+                    evidence_url="http://127.0.0.1:3200/payments/" + fixture["checkout_id"],
+                )
+            response = await client.get(
+                run["preview_url"] + "/entitlements/" + fixture["account_id"], headers=self.headers
+            )
+            response.raise_for_status()
+            entitlement = Entitlement.model_validate(response.json())
+        return verify(
+            payment,
+            entitlement,
+            **{k: fixture[k] for k in ("account_id", "checkout_id", "product_id", "amount", "currency")},
+            settled=True,
+            capability=capability,
+        )
+
+    async def journey(self, run, persona, cancelled, emit):
+        from .payment_privacy import redact_payment
+
+        original_emit = emit
+
+        async def emit(kind, data, persona_id):
+            await original_emit(kind, redact_payment(data), persona_id)
+
+        fixture = await self.provision(run, persona)
+
+        async def frame_verify(context):
+            from .dodo import DodoTarget
+
+            return await DodoTarget(run["preview_url"]).frame_context(context, run, fixture)
+
+        browser = SDKProcess(
+            "stagehand", cancelled, frame_verify=frame_verify if run["provider"] == "dodo" else None
+        )
+        mind = SDKProcess("tinytroupe", cancelled)
+        actions_executed = []
+        capability = None
+        policy = BrowserPolicy(run["preview_url"], run["provider"])
+        try:
+            initial_memory = await mind.request({"op": "init", "persona": persona})
+            await emit("persona_initialized", initial_memory, persona["id"])
+            await browser.request(
+                {
+                    "op": "goto",
+                    "url": fixture["login_url"]
+                    if run["provider"] == "dodo"
+                    else run["preview_url"] + fixture["session_url"],
+                    "origin": run["preview_url"],
+                    "provider": run["provider"],
+                    "card_capability": run["provider"] == "dodo",
+                }
+            )
+            for step in range(24 if run["provider"] == "dodo" else 6):
+                if cancelled():
+                    raise Cancelled()
+                await self.check_revision(run)
+                observation = await browser.request({"op": "observe"})
+                policy.check_url(observation["url"])
+                observed_actions = observation.pop("actions")
+                actions = [
+                    {"id": f"{step}:{index}", "description": a["description"]}
+                    for index, a in enumerate(observed_actions)
+                ]
+                observation["actions"] = actions
+                shot = self.evidence / f"{run['id']}-{persona['id']}-{step}.png"
+                await browser.request({"op": "screenshot", "path": str(shot.resolve())})
+                await emit("observation", {**observation, "screenshot": str(shot)}, persona["id"])
+                decision = await mind.request({"op": "decide", "observation": redact_payment(observation)})
+                await emit("decision", decision, persona["id"])
+                intent = decision["intent"]
+                if intent["type"] in ("FINISH", "ABANDON"):
+                    outcome = await self.verification(run, fixture, capability)
+                    if intent["type"] == "ABANDON" and outcome["outcome"] != "failed":
+                        outcome.update(outcome="abandoned", classification="persona_abandoned")
+                    return {
+                        **outcome,
+                        "account_id": fixture["account_id"],
+                        "actions": actions_executed,
+                        "revision": run["revision"],
+                        "conditions": persona["conditions"],
+                    }
+                action = validated_action(
+                    intent,
+                    [{"id": choice["id"], "action": observed_actions[i]} for i, choice in enumerate(actions)],
+                    policy=policy,
+                )
+                policy.validate(action, observation["url"])
+                result = await browser.request({"op": "act", "action": action})
+                if not result.get("success", result.get("data", {}).get("success", True)):
+                    raise RuntimeError("Stagehand reported browser action failure; no payment assumption.")
+                actions_executed.append(redact_payment(action))
+                await emit("browser_action", {"action": action, "result": result}, persona["id"])
+                await mind.request({"op": "feedback", "result": redact_payment(result)})
+                if action.get("_tryfolk", {}).get("capability"):
+                    capability = result.get("capability", {}).get("available")
+                    await emit("capability", result.get("capability", {"available": None}), persona["id"])
+                    # Capability evidence is distinct from the provider receipt and
+                    # account grant. It cannot create or infer payment success.
+                    return {
+                        **await self.verification(run, fixture, capability),
+                        "account_id": fixture["account_id"],
+                        "actions": actions_executed,
+                        "revision": run["revision"],
+                        "conditions": persona["conditions"],
+                        "capability_evidence": result.get("capability"),
+                    }
+                # Customer decides next step from fresh UI; provider truth is never fed to mind.
+                if "capability" in action["description"].lower():
+                    fresh = await browser.request({"op": "observe"})
+                    shot = self.evidence / f"{run['id']}-{persona['id']}-{step}-capability.png"
+                    await browser.request({"op": "screenshot", "path": str(shot.resolve())})
+                    await emit(
+                        "observation",
+                        {**fresh, "screenshot": str(shot), "capability_observation": True},
+                        persona["id"],
+                    )
+                    capability = "Purchased capability available" in fresh["text"]
+                    return {
+                        **await self.verification(run, fixture, capability),
+                        "account_id": fixture["account_id"],
+                        "actions": actions_executed,
+                        "revision": run["revision"],
+                        "conditions": persona["conditions"],
+                        "capability_mutation": "Consumes one credit if access available.",
+                    }
+            return {
+                **await self.verification(run, fixture, capability),
+                "account_id": fixture["account_id"],
+                "actions": actions_executed,
+                "step_limit": True,
+            }
+        finally:
+            if not cancelled() and mind.process and mind.process.returncode is None:
+                snapshot = await mind.request({"op": "snapshot"})
+                await emit("persona_memory", snapshot, persona["id"])
+            await browser.close()
+            await mind.close()
+
+    async def repair(self, run, emit):
+        from .repair import repair_target
+
+        await repair_target(self, run, emit)
+
+    async def recover_repair(self, run, emit):
+        from .repair import recover_target
+
+        await recover_target(self, run, emit)
+
+    async def known_replay(self, run, population, emit):
+        if run["provider"] == "dodo":
+            from .dodo_replay import replay
+
+            return await replay(self, run, population, emit)
+        from .repair import replay_known_failure
+        from .controls import check
+
+        await replay_known_failure(self, run, population, emit)
+        controls = await check(self, run)
+        await emit(
+            "held_out_checks",
+            {
+                "cases": controls,
+                "method": "deterministic fixture HTTP controls, no persona cognition or Dodo transaction",
+                "not_in_population_denominator": True,
+            },
+        )
+        if not all(c["passed"] for c in controls):
+            raise RuntimeError("Separate held-out fixture control failed; adaptive retest stopped.")

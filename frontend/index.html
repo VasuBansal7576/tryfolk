@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#fcfaf6" />
+    <title>TryFolk</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <button class="brand" data-action="home" aria-label="TryFolk home">TryFolk</button>
+      <div id="context"></div>
+      <nav class="header-actions" aria-label="Main navigation">
+        <button class="text-button" data-action="setup">App connection</button>
+        <button class="text-button" data-action="history">Runs</button>
+      </nav>
+    </header>
+    <main id="main"></main>
+    <dialog id="dialog" aria-labelledby="dialog-heading"></dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

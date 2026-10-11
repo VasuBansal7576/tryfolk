@@ -1,0 +1,59 @@
+"""Public response-coverage contract with external CDP I/O fixtures."""
+
+from types import SimpleNamespace
+import pytest
+from tryfolk.response_boundary import ResponseBoundary
+
+
+@pytest.mark.parametrize("oopif", [False, True])
+async def test_in_process_frames_use_owned_page_session_and_oopif_uses_its_distinct_target(oopif):
+    primary, child = object(), object()
+    sessions, attached = [], []
+
+    class Session:
+        def __init__(self, identity, kind):
+            self.identity, self.kind, self.commands = identity, kind, []
+
+        async def send(self, method, args=None):
+            self.commands.append((method, args))
+            if method == "Target.getTargetInfo":
+                return {"targetInfo": {"targetId": self.identity, "type": self.kind}}
+            return {}
+
+        def on(self, name, fn):
+            pass
+
+        async def detach(self):
+            pass
+
+    class Context:
+        async def new_cdp_session(self, document):
+            attached.append(document)
+            if document is child and not oopif:
+                raise RuntimeError(
+                    "This frame does not have a separate CDP session, it is a part of the parent frame's session"
+                )
+            session = Session(
+                "child" if document is child else "primary", "iframe" if document is child else "page"
+            )
+            sessions.append(session)
+            return session
+
+    guard = SimpleNamespace(primary_page=primary, events=[])
+    boundary = ResponseBoundary(Context(), guard)
+    assert await boundary.cover(primary)
+    assert await boundary.cover(child)
+    assert len([s for s in sessions if any(c[0] == "Fetch.enable" for c in s.commands)]) == (
+        2 if oopif else 1
+    )
+    assert any(e["target_type"] == "iframe" for e in guard.events) is oopif
+
+
+async def test_unknown_child_session_error_never_falls_back_or_claims_coverage():
+    class Context:
+        async def new_cdp_session(self, document):
+            raise RuntimeError("External target unavailable")
+
+    boundary = ResponseBoundary(Context(), SimpleNamespace(primary_page=object(), events=[]))
+    with pytest.raises(RuntimeError, match="unavailable"):
+        await boundary.cover(object())

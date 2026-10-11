@@ -1,0 +1,35 @@
+[project]
+name = "tryfolk"
+version = "0.1.0"
+description = "Saved synthetic customers, independently verified checkout outcomes and matched retests"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "fastapi==0.118.0",
+    "uvicorn==0.37.0",
+    "httpx==0.28.1",
+    "pydantic==2.11.9",
+    "neatlogs==1.4.25",
+    "mcp==1.17.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==8.4.2",
+    "pytest-asyncio==1.2.0",
+    "pyyaml==6.0.3",
+    "ruff==0.13.3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 110
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tryfolk"]

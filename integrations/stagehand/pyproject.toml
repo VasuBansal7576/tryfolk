@@ -1,0 +1,5 @@
+[project]
+name = "tryfolk-browser"
+version = "0.1.0"
+requires-python = ">=3.12,<3.14"
+dependencies = ["stagehand==4.2.0", "playwright==1.63.0", "httpx==0.28.1"]
