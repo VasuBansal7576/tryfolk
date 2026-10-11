@@ -1,4 +1,6 @@
 from copy import deepcopy
+import asyncio
+from contextvars import ContextVar
 import pytest
 from tryfolk.dodo import correlate
 from tryfolk.dodo import DodoTarget, OWNERSHIP
@@ -209,6 +211,111 @@ async def test_verification_retains_actual_http_envelopes_and_complete_order_bod
     receipt["state"] = "succeeded"
     assert not correlate(order, receipt, entitlement)["measured"]
     assert correlate(order, receipt, entitlement)["outcome"] == "blocked"
+
+
+@pytest.mark.parametrize("settled", [False, True])
+async def test_legacy_response_observer_can_verify_without_internal_transport_keywords(records, monkeypatch, settled):
+    """Invented offline responses through the preserved healthy21/22 observer pattern."""
+    order, receipt, entitlement = deepcopy(records)
+    entitlement.update(has_access=True, order_has_grant=True, grant_count=1)
+    if not settled:
+        receipt["state"] = "pending"
+        receipt["payment"]["status"] = receipt["checkout"]["payment_status"] = "requires_payment_method"
+    bodies = {"/api/target/orders": {"orders": [order]}, "/api/target/receipts": receipt,
+              "/api/target/entitlements": entitlement}
+    calls = []
+
+    def respond(request):
+        assert request.method == "GET"
+        calls.append(request.url.path)
+        return httpx.Response(200, json=bodies[request.url.path])
+
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **opts: client(**opts, transport=httpx.MockTransport(respond)))
+
+    class ResponseObserver(DodoTarget):
+        def __init__(self, origin):
+            super().__init__(origin)
+            self.capture = ContextVar("offline_response_observer", default=None)
+
+        async def request(self, method, path, **kwargs):
+            capture = self.capture.get()
+            if not (capture and capture[0] is asyncio.current_task() and method == "GET" and path in bodies):
+                return await super().request(method, path, **kwargs)
+            async with httpx.AsyncClient(trust_env=False, follow_redirects=False, timeout=15) as observed:
+                response = await observed.request(method, self.origin + path, headers=self.headers, **kwargs)
+                response.raise_for_status()
+                body = response.json()
+                capture[1][path] = {"http_status": response.status_code, "body": deepcopy(body)}
+                return body
+
+        async def verification(self, run, fixture, capability=None):
+            self.responses = {}
+            token = self.capture.set((asyncio.current_task(), self.responses))
+            try:
+                return await super().verification(run, fixture, capability)
+            finally:
+                self.capture.reset(token)
+
+    target = ResponseObserver("http://127.0.0.1:3338")
+    result = await target.verification({"id": "r", "revision": "rev"}, {key: order[key] for key in OWNERSHIP})
+    assert result["outcome"] == ("completed" if settled else "pending")
+    assert calls == list(bodies)
+    assert all(value["http_status"] == 200 for value in target.responses.values())
+    # A legacy body observer does not produce the new production envelopes.
+    # Preserve that evidence gap instead of inventing request metadata.
+    assert result["oracle_http"] == {"orders_after": {}, "provider_receipt": {}, "app_entitlement": {}}
+
+
+async def test_delegating_observer_keeps_concurrent_account_response_evidence_separate(records, monkeypatch):
+    """Invented responses; interleaved reads never become another account's evidence."""
+    bodies = {}
+    fixtures = []
+    for label in ("first", "second"):
+        order, receipt, entitlement = deepcopy(records)
+        ownership = {key: label + "_" + key for key in (*OWNERSHIP, "order_id", "expected_product_id")}
+        order.update(ownership)
+        receipt["ownership"] = entitlement["ownership"] = ownership
+        receipt["payment"]["metadata"] = {**ownership, "product_id": ownership["expected_product_id"]}
+        receipt["payment"]["product_cart"] = [{"product_id": ownership["expected_product_id"], "quantity": 1}]
+        entitlement.update(has_access=True, order_has_grant=True, grant_count=1)
+        bodies[ownership["account_id"]] = {"orders": [order]}
+        bodies[ownership["order_id"]] = {"receipt": receipt, "entitlement": entitlement}
+        fixtures.append({key: order[key] for key in OWNERSHIP})
+
+    async def respond(request):
+        assert request.method == "GET"
+        await asyncio.sleep(0)
+        if request.url.path == "/api/target/orders":
+            body = bodies[request.url.params["account_id"]]
+        else:
+            kind = "receipt" if request.url.path == "/api/target/receipts" else "entitlement"
+            body = bodies[request.url.params["order_id"]][kind]
+        return httpx.Response(200, json=body)
+
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **opts: client(**opts, transport=httpx.MockTransport(respond)))
+
+    class DelegatingObserver(DodoTarget):
+        async def request(self, method, path, **kwargs):
+            return await super().request(method, path, **kwargs)
+
+    target = DelegatingObserver("http://127.0.0.1:3338")
+    results = await asyncio.gather(*(target.verification(
+        {"id": fixture["run_id"], "revision": fixture["target_revision"]}, fixture
+    ) for fixture in fixtures))
+    for result, fixture in zip(results, fixtures):
+        assert result["outcome"] == "completed"
+        for key, envelope in result["oracle_http"].items():
+            assert envelope["http_status"] == 200 and envelope["method"] == "GET"
+            assert envelope["redirects_followed"] == 0
+            body = envelope["body"]
+            observed_account = body["orders"][0]["account_id"] if key == "orders_after" else body["ownership"]["account_id"]
+            assert observed_account == fixture["account_id"]
+
+    first_result_orders = deepcopy(results[0]["oracle_http"]["orders_after"])
+    await target.request("GET", "/api/target/orders", params={"account_id": fixtures[1]["account_id"]})
+    assert results[0]["oracle_http"]["orders_after"] == first_result_orders
 
 
 async def test_private_contact_callback_uses_owned_source_contract_and_fresh_identity(monkeypatch, tmp_path):

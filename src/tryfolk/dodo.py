@@ -6,6 +6,7 @@ The browser checkout path remains credential-gated until genuine sandbox validat
 import os
 import asyncio
 import json
+from contextvars import ContextVar
 from pathlib import Path
 import re
 from urllib.parse import urlsplit
@@ -112,8 +113,12 @@ class DodoTarget:
             raise ValueError("Dodo target must be an explicitly owned exact loopback preview.")
         self.origin = origin.rstrip("/")
         self.headers = {"Authorization": "Bearer " + os.environ.get("TARGET_CONTROL_TOKEN", "")}
+        self._verification_http = ContextVar("tryfolk_dodo_verification_http", default=None)
 
     async def request(self, method, path, *, _trace=None, _envelope=None, **kwargs):
+        capture = self._verification_http.get()
+        if _envelope is None and capture and capture[:3] == (asyncio.current_task(), method, path):
+            _envelope = capture[3]
         item = None
         if _trace is not None:
             item = {"stage": {"/api/target/readiness": "readiness", "/api/target/orders": "orders",
@@ -138,6 +143,20 @@ class DodoTarget:
                     error, (httpx.HTTPStatusError, json.JSONDecodeError)) else "transport_error" \
                     if isinstance(error, httpx.RequestError) else "unrecognized"
             raise
+
+    async def _observed_request(self, method, path, envelope, **kwargs):
+        """Capture production responses without adding transport kwargs to request overrides.
+
+        Observers which delegate to request retain actual response envelopes.
+        Legacy observers which perform their own HTTP reads leave the envelope
+        unavailable; the scenario evidence reader must keep that gap blocked.
+        Task and endpoint binding exclude inherited concurrent native callbacks.
+        """
+        token = self._verification_http.set((asyncio.current_task(), method, path, envelope))
+        try:
+            return await self.request(method, path, **kwargs)
+        finally:
+            self._verification_http.reset(token)
 
     async def registration(self, *, _trace=None):
         readiness = await self.request("GET", "/api/target/readiness", _trace=_trace)
@@ -182,8 +201,8 @@ class DodoTarget:
     async def verification(self, run, fixture, capability=None):
         oracle_http = {key: {} for key in ("orders_after", "provider_receipt", "app_entitlement")}
         orders = (
-            await self.request("GET", "/api/target/orders", params={"account_id": fixture["account_id"]},
-                _envelope=oracle_http["orders_after"])
+            await self._observed_request("GET", "/api/target/orders", oracle_http["orders_after"],
+                params={"account_id": fixture["account_id"]})
         )["orders"]
         if len(orders) != 1:
             return {
@@ -198,14 +217,14 @@ class DodoTarget:
         order = orders[0]
         if any(order.get(key) != fixture[key] for key in OWNERSHIP):
             raise ValueError("Dodo order ownership differs from this fresh persona fixture.")
-        raw_receipt = await self.request("GET", "/api/target/receipts", params={"order_id": order["order_id"]},
-            _envelope=oracle_http["provider_receipt"])
+        raw_receipt = await self._observed_request("GET", "/api/target/receipts", oracle_http["provider_receipt"],
+            params={"order_id": order["order_id"]})
         receipt = {**raw_receipt, "evidence_url": self.origin + "/api/target/evidence?evidence_id=" + raw_receipt["evidence_id"]}
-        entitlement = await self.request(
+        entitlement = await self._observed_request(
             "GET",
             "/api/target/entitlements",
+            oracle_http["app_entitlement"],
             params={"account_id": fixture["account_id"], "order_id": order["order_id"]},
-            _envelope=oracle_http["app_entitlement"],
         )
         return {**correlate(order, receipt, entitlement, capability),
                 "oracle_http": oracle_http,
