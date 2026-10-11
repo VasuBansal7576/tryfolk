@@ -17,6 +17,9 @@ class Target:
     mode: str | None = None
     execution_ready: bool = False
     target_provenance: dict | None = None
+    scenario_capabilities: dict | None = None
+    scenario_conditions: dict | None = None
+    scenario_fixture_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,9 @@ class Settings:
     overhead_microusd: int = 50_000
     cfo_plan_path: Path | None = None
     targets: tuple[Target, ...] = ()
+    scenario_catalog_path: Path | None = None
+    seed_bank_path: Path | None = None
+    seed_bank_min_records: int = 2000
     gates: tuple[dict, ...] = field(
         default_factory=lambda: (
             {
@@ -74,6 +80,12 @@ class Settings:
             budget_microusd=int(os.environ.get("TRYFOLK_BUDGET_MICROUSD", "1000000")),
             owner_token=os.environ.get("TRYFOLK_OWNER_TOKEN"),
             targets=targets,
+            scenario_catalog_path=Path(os.environ["TRYFOLK_SCENARIO_CATALOG"])
+            if os.environ.get("TRYFOLK_SCENARIO_CATALOG")
+            else None,
+            seed_bank_path=Path(os.environ["TRYFOLK_SEED_BANK"])
+            if os.environ.get("TRYFOLK_SEED_BANK")
+            else None,
             cfo_plan_path=Path(os.environ["TRYFOLK_CFO_PLAN"])
             if os.environ.get("TRYFOLK_CFO_PLAN")
             else None,

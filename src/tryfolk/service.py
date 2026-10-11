@@ -10,6 +10,16 @@ import re
 from .config import Settings
 from .store import Store
 from .budget import allowance
+from .scenarios import (
+    Catalog,
+    read_data,
+    read_bank,
+    catalog_view,
+    select_plan,
+    unavailable,
+    validate_population,
+    coverage,
+)
 
 
 def now():
@@ -56,9 +66,59 @@ class Service:
             raise DomainError(422, "cfo_export_invalid", str(error)) from error
         return max(0, limit - sum(ledger.values()))
 
-    def quote(self, url, count):
+    def scenarios(self, url):
         target = self.target(url)
-        gates = list(self.settings.gates)
+        if not self.settings.scenario_catalog_path:
+            raise DomainError(
+                409,
+                "scenario_catalog_missing",
+                "Import the owned scenario catalog and register supported target conditions.",
+            )
+        try:
+            return catalog_view(read_data(self.settings.scenario_catalog_path, Catalog), target)
+        except (ValueError, TypeError, OSError) as error:
+            raise DomainError(422, "scenario_data_invalid", str(error)) from error
+
+    def scenario_plan(self, target, count, scenario_ids):
+        if not self.settings.scenario_catalog_path:
+            if scenario_ids is not None:
+                raise DomainError(
+                    422, "scenario_catalog_missing", "Manual scenario selection requires the owned catalog."
+                )
+            return None, []
+        try:
+            catalog = read_data(self.settings.scenario_catalog_path, Catalog)
+            bank = (
+                read_bank(self.settings.seed_bank_path, self.settings.seed_bank_min_records)
+                if self.settings.seed_bank_path
+                else None
+            )
+            plan = select_plan(catalog, bank, target, count, scenario_ids)
+        except (ValueError, TypeError, OSError) as error:
+            raise DomainError(422, "scenario_data_invalid", str(error)) from error
+        gates = []
+        if len(plan["assignments"]) != count:
+            gates.append(
+                {
+                    "code": "scenario_support_missing",
+                    "message": "No runnable customer scenario matches the registered target capabilities and conditions.",
+                    "action": "Inspect GET /scenarios; register genuine supported fixture capabilities before a fresh quote.",
+                }
+            )
+        if bank is None:
+            gates.append(
+                {
+                    "code": "seed_bank_missing",
+                    "message": "Licensed quality-checked persona seed bank not imported.",
+                    "action": "Import the normalized licensed seed bank locally, then obtain a fresh quote.",
+                }
+            )
+        return plan, gates
+
+    def quote(self, url, count, scenario_ids=None):
+        target = self.target(url)
+        scenario_plan, scenario_gates = self.scenario_plan(target, count, scenario_ids)
+        gates = list(self.settings.gates) + scenario_gates
         gates.extend(target.setup_gates)
         if count > self.settings.max_personas:
             gates.append(
@@ -95,6 +155,7 @@ class Service:
             available = min(lifetime_available, costs["quote_limit"])
             q = {
                 "id": identifier(),
+                **({"scenario_plan": scenario_plan} if scenario_plan else {}),
                 "app_url": url,
                 "persona_count": count,
                 "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
@@ -178,6 +239,16 @@ class Service:
                 raise DomainError(
                     409, "revision_changed", "Target changed since quote; request a fresh quote."
                 )
+            if q.get("scenario_plan") and any(
+                unavailable(a["scenario_snapshot"], target)
+                or a["condition_fixture_snapshot"] != target.scenario_conditions
+                for a in q["scenario_plan"]["assignments"]
+            ):
+                raise DomainError(
+                    409,
+                    "scenario_support_changed",
+                    "Registered scenario capabilities or conditions changed since quote; obtain a fresh quote.",
+                )
             run_id, pop_id, token = identifier(), identifier(), secrets.token_urlsafe(32)
             run = {
                 "id": run_id,
@@ -203,6 +274,7 @@ class Service:
                 "after_reserve_microusd": q.get("after_reserve_microusd", q["after_microusd"]),
                 "after_reserve_includes_known_replay": q.get("after_reserve_includes_known_replay", False),
                 "budget_contract": q,
+                **({"scenario_plan": q["scenario_plan"]} if q.get("scenario_plan") else {}),
                 "outcomes": {},
                 "repair": None,
                 "comparison": None,
@@ -292,6 +364,11 @@ class Service:
                 "cost_basis": "estimate; measured cash tracked separately",
             },
             "personas": persons,
+            **(
+                {"scenario_coverage": coverage(run["scenario_plan"], persons, outcomes, events)}
+                if run.get("scenario_plan")
+                else {}
+            ),
             "events": events,
         }
 
@@ -600,6 +677,10 @@ class Service:
                     "population_or_reservation",
                     "Exactly the original N and its unused retest reservation are required.",
                 )
+            try:
+                validate_population(population, before.get("scenario_plan"))
+            except ValueError as error:
+                raise DomainError(409, "population_integrity", str(error)) from error
             after_id, access = identifier(), secrets.token_urlsafe(32)
             after = {
                 **before,

@@ -118,11 +118,16 @@ class Worker:
             await emit("discovery", brief)
             self.phase(run_id, "generating")
             self.debit(run_id, self.estimate(run, "generation_microusd", 10_000))
+            if run.get("scenario_plan"):
+                brief = {**brief, "generation_plan": run["scenario_plan"]}
             population = await self.io.generate(brief, run["persona_count"])
             if len(population) != run["persona_count"] or len({p["id"] for p in population}) != len(
                 population
             ):
                 raise RuntimeError("Generation must supply exactly the requested N distinct saved personas.")
+            from .scenarios import freeze_population
+
+            population = freeze_population(population, run.get("scenario_plan"))
             with self.store.transaction() as db:
                 db.execute(
                     "UPDATE populations SET payload=? WHERE id=?",
@@ -133,6 +138,9 @@ class Worker:
                 population = self.store.load(db, "populations", run["population_id"])
             if len(population) != run["persona_count"]:
                 raise RuntimeError("Saved population incomplete; replay cannot shrink N.")
+            from .scenarios import validate_population
+
+            validate_population(population, run.get("scenario_plan"))
             if hasattr(self.io, "known_replay"):
                 if not run.get("known_replay_allowance_consumed"):
                     self.debit(run_id, self.estimate(run, "known_replay_microusd", 10_000))
@@ -147,9 +155,12 @@ class Worker:
         for persona in population:
             if self.cancelled(run_id):
                 raise Cancelled()
-            self.debit(run_id, self.estimate(
-                run, f"{run['pass']}_per_persona_microusd", self.service.settings.per_persona_microusd
-            ))
+            self.debit(
+                run_id,
+                self.estimate(
+                    run, f"{run['pass']}_per_persona_microusd", self.service.settings.per_persona_microusd
+                ),
+            )
             result = await self.io.journey(run, persona, lambda: self.cancelled(run_id), emit)
             if self.cancelled(run_id):
                 raise Cancelled()

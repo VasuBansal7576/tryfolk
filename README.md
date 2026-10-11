@@ -132,6 +132,40 @@ separate verification and are not established by a local JSON import.
 
 The runtime does not push, publish, deploy, initiate charges or trials, submit or send messages.
 
+## Scenario and seed selection
+
+The local `GET /scenarios?app_url=<registered-owned-origin>` API reads the
+[data-only catalog](dodo-target/scenarios/payment-catalog.json). Its 24 hypothetical
+inputs remain separate from observed results. The two currently runnable cases still
+require explicitly registered target/provider capabilities and the approved condition
+fixture; catalog presence clears no execution gate.
+
+For a separately authorized local launch, set `TRYFOLK_SCENARIO_CATALOG` to the catalog
+and `TRYFOLK_SEED_BANK` to a reviewed normalized `tryfolk.persona-seeds.v1` JSON bank.
+The importer requires at least 2,000 eligible adult, commercially licensed, quality-checked
+records, with source revisions, attribution and stable IDs. It reads at most 32 MiB and
+10,000 records without executing downloaded code or calling a model. A missing bank
+blocks execution with a setup gate; the runtime never substitutes fabricated seed data.
+The private target registry declares `scenario_capabilities`, `scenario_conditions`
+and `scenario_fixture_ids` independently of persona narratives.
+
+Quotes select supported cases by declared risk and stable case ID, then choose distinct
+context-relevant seeds by explicit arts/skills/interests and stable hashes. Demographics
+cannot supply payment conditions or predict payment risk. Optional `scenario_ids` must
+contain exactly N supported customer journeys. Selection saves plain reasons and omitted
+case gates; a large bank or repeated personality variants never expands case coverage.
+
+The accepted quote retains case/seed/condition snapshots and the full both-pass budget.
+TinyTroupe adapts each accepted seed through its existing factory generation path,
+without an extra adaptation cycle. Actual profile, initial TinyPerson snapshot and
+semantic memory are saved once before the first journey. Replay validates their hashes
+and identities before restoring the same original N with fresh accounts and cookies.
+Catalog or bank updates cannot regenerate an accepted population. Assigned scenarios
+remain `not_exercised` until scenario-specific fixture/evidence binding is implemented;
+actual journey payment, entitlement, capability and verification events are reported
+separately. New adaptation code has fixture validation; genuine model/browser execution
+requires separate authorization and evidence.
+
 ## Checks
 
 ```sh

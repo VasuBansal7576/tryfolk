@@ -14,8 +14,10 @@ from .connection_api import connection_router
 
 
 class QuoteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     app_url: str
     persona_count: int = Field(ge=1, le=1000, strict=True)
+    scenario_ids: list[str] | None = Field(default=None, max_length=1000)
 
 
 class RunRequest(BaseModel):
@@ -179,9 +181,13 @@ def create_app(settings=None):
             "cfo_plan_status": "imported" if service.settings.cfo_plan_path else "missing",
         }
 
+    @app.get("/scenarios")
+    def scenarios(app_url: str):
+        return service.scenarios(app_url)
+
     @app.post("/quotes")
     def quote(body: QuoteRequest):
-        return service.quote(body.app_url, body.persona_count)
+        return service.quote(body.app_url, body.persona_count, body.scenario_ids)
 
     @app.post("/runs", status_code=201)
     def create_run(body: RunRequest, idempotency_key: str = Header(min_length=1, max_length=200)):

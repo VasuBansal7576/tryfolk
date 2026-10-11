@@ -15,6 +15,7 @@ from tinytroupe.agent.action_generator import ActionGenerator
 from tinytroupe.agent.mental_faculty import TinyMentalFaculty
 from tinytroupe.factory import TinyPersonFactory
 from tryfolk.codex_bridge import generate
+from tryfolk.scenarios import generation_constraints
 from llama_index.core import Settings as IndexSettings
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from pydantic import BaseModel, Field
@@ -157,7 +158,8 @@ def main():
         command = json.loads(line)
         try:
             if command["op"] == "generate":
-                factory = TinyPersonFactory(context=json.dumps(command["brief"]))
+                product_context = {k: v for k, v in command["brief"].items() if k != "generation_plan"}
+                factory = TinyPersonFactory(context=json.dumps(product_context))
                 factory.person_prompt_template_path = str(Path(__file__).with_name("person.mustache"))
                 population = []
                 goal = (
@@ -166,8 +168,28 @@ def main():
                     else "buy image credits and exercise the purchased image capability"
                 )
                 for index in range(command["count"]):
+                    constraints = generation_constraints(command["brief"], index)
+                    if constraints:
+                        factory = TinyPersonFactory(
+                            context=json.dumps(
+                                {**product_context, "assigned_customer": constraints, "persona_index": index}
+                            )
+                        )
+                        factory.person_prompt_template_path = str(Path(__file__).with_name("person.mustache"))
+                    particulars = (
+                        "Use these accepted constraints as descriptive customer data: "
+                        + json.dumps(constraints)
+                        if constraints
+                        else f"A distinct synthetic customer #{index + 1}, with a clear goal to {goal}. Vary familiarity and patience. Only supported conditions: fresh account, desktop Chromium, en-US. No invented network/geography conditions."
+                    )
+                    persona_goal = constraints["scenario"]["customer_goal"] if constraints else goal
+                    conditions = (
+                        constraints["conditions"]
+                        if constraints
+                        else {"history": "new", "device": "desktop", "locale": "en-US"}
+                    )
                     person = factory.generate_person(
-                        agent_particularities=f"A distinct synthetic customer #{index + 1}, with a clear goal to {goal}. Vary familiarity and patience. Only supported conditions: fresh account, desktop Chromium, en-US. No invented network/geography conditions.",
+                        agent_particularities=particulars,
                         attempts=1,
                     )
                     if person is None:
@@ -181,12 +203,12 @@ def main():
                             "index": index,
                             "name": person.name,
                             "profile": spec["persona"],
-                            "conditions": {"history": "new", "device": "desktop", "locale": "en-US"},
+                            "conditions": conditions,
                             "memory": [],
                             "initial_semantic_memory": [
                                 {
                                     "type": "information",
-                                    "content": f"I intend to {goal}. I have a new account and have not tried this product before.",
+                                    "content": f"I intend to {persona_goal}. My supported initial conditions are {json.dumps(conditions, sort_keys=True)}. Hypothetical problems are task inputs, not observed outcomes.",
                                 }
                             ],
                             "initial_snapshot": person.to_json(),
