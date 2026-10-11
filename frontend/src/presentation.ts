@@ -63,7 +63,7 @@ export function evidence(value: Record<string, unknown>): string {
     const url = safeUrl(item);
     if (url && /screenshot|snapshot|image/i.test(key)) return `<figure class="actual-snapshot"><a href="${escape(url)}" target="_blank" rel="noopener noreferrer"><img src="${escape(url)}" alt="Recorded browser evidence" loading="lazy" referrerpolicy="no-referrer"></a><figcaption>${escape(humanize(key))} · ${link(url, 'Open full-size screenshot')}</figcaption></figure>`;
     if (url && /url|link|trace/i.test(key)) return `<p class="evidence-link">${link(item, humanize(key))}</p>`;
-    if (item !== null && typeof item === 'object') return `<details class="record"><summary>${escape(humanize(key))}</summary><pre>${json(item)}</pre></details>`;
+    if (item !== null && typeof item === 'object') return `<details class="record" data-record="evidence-${escape(key)}"><summary>${escape(humanize(key))}</summary><pre>${json(item)}</pre></details>`;
     return `<div class="evidence-row"><strong>${escape(humanize(key))}</strong><span>${escape(item)}</span></div>`;
   }).join('');
 }
@@ -75,7 +75,7 @@ export function eventSummary(event: RunEvent): string {
   return '';
 }
 export function eventList(events: RunEvent[]): string {
-  return events.length ? `<ol class="timeline">${events.map(event => `<li><strong>${escape(humanize(event.kind))}</strong><p>${escape(eventSummary(event))}</p><small>${escape(timestamp(event.created_at))}</small><details class="record"><summary>Recorded details</summary>${evidence(event.data)}</details>${link(event.trace_url, 'Open full trace')}</li>`).join('')}</ol>` : '<p class="empty">No steps have been recorded yet. A queued customer has not started a browser session.</p>';
+  return events.length ? `<ol class="timeline">${events.map(event => `<li data-focus-scope="event-${number(event.id)}"><strong>${escape(humanize(event.kind))}</strong><p>${escape(eventSummary(event))}</p><small>${escape(timestamp(event.created_at))}</small><details class="record" data-record="event-details"><summary>Recorded details</summary>${evidence(event.data)}</details>${link(event.trace_url, 'Open full trace')}</li>`).join('')}</ol>` : '<p class="empty">No steps have been recorded yet. A queued customer has not started a browser session.</p>';
 }
 export const outcomeRows: { key: keyof Counts; label: string }[] = [
   { key: 'completed', label: 'Passed' }, { key: 'failed', label: 'Failed' },

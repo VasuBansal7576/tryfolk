@@ -54,6 +54,80 @@ export const quoteBudgetSchema = z.object({
     native_ledger_snapshot: ledgerSnapshotSchema, basis: z.string(),
   }).nullable(),
 });
+export const scenarioSchema = z.object({
+  id: z.string(), area: z.string(), title: z.string(), customer_context: z.record(z.string(), z.unknown()),
+  hypothetical_problem: z.string(), customer_goal: z.string(), expected_behavior: z.array(z.string()),
+  check_kind: z.enum(['customer_journey', 'merchant_event', 'provider_control']),
+  availability: z.enum(['runnable', 'requires_fixture', 'provider_owned', 'unsupported_by_target']),
+  exercise_status: z.literal('not_exercised'), expected_outcome: z.string(),
+  required_capabilities: z.unknown(), provider_support: z.unknown().optional(), source_refs: z.unknown(),
+  evidence_requirements: z.unknown(), verification_boundary: z.unknown(),
+  risk_priority: count.optional(), selection_ready: z.boolean().optional(), selection_gate: z.string().nullable().optional(),
+}).passthrough();
+const seedRecordSchema = z.object({
+  id: z.string(), profile: z.record(z.string(), z.unknown()), source_record_id: z.string(),
+  supported_context: z.record(z.string(), z.array(z.string())),
+  eligibility: z.object({ adult: z.boolean(), commercial_use: z.boolean(), quality_passed: z.boolean() }),
+}).passthrough();
+export const seedBindingSchema = z.object({
+  id: z.string(), bank_version: z.string(), bank_sha256: z.string(), record_sha256: z.string(),
+  record_snapshot: seedRecordSchema,
+  source: z.object({ dataset: z.string(), url: z.string(), revision: z.string(), license: z.literal('CC-BY-4.0'), attribution: z.string() }).passthrough(),
+});
+const scenarioAssignmentSchema = z.object({
+  persona_index: count, catalog_version: z.string(), catalog_sha256: z.string(),
+  scenario_id: z.string(), scenario_sha256: z.string(), scenario_snapshot: scenarioSchema,
+  condition_fixture_snapshot: z.record(z.string(), z.string()).optional(), condition_fixture_sha256: z.string().optional(),
+  condition_fixture_verified: z.literal(false).optional(), seed: seedBindingSchema.optional(),
+});
+const draftSelectionRationaleSchema = z.object({
+  mode: z.enum(['automatic_capability_risk', 'manual']), policy_version: z.string(), selected_scenario_ids: z.array(z.string()),
+  why_selected: z.array(z.object({ scenario_id: z.string(), risk_basis: z.string(), capability_basis: z.array(z.string()), required_fixture_ready: z.boolean(), relevant_customer_context: z.string(), assignment_count: count })),
+  omitted_cases: z.array(z.object({ scenario_id: z.string(), reason: z.enum(['budget_limited_N', 'requires_fixture', 'provider_owned', 'unsupported_by_target', 'merchant_event_not_persona']), required_capabilities: z.unknown() })),
+  requested_personas: count, reserved_both_passes_microusd: money,
+  personality_variation_adds_case_coverage: z.literal(false), whole_catalog_coverage_claimed: z.literal(false),
+});
+const implementedSelectionRationaleSchema = z.object({
+  mode: z.enum(['manual', 'automatic_capability_risk']), policy_version: z.string(), selected_case_ids: z.array(z.string()),
+  omitted_cases: z.array(z.object({ scenario_id: z.string(), reason: z.string() })),
+  why_selected: z.array(z.object({ scenario_id: z.string(), risk_priority: count,
+    capability_basis: z.object({ target: z.array(z.string()), provider: z.array(z.string()), conditions: z.record(z.string(), z.string()) }),
+    context: z.record(z.string(), z.unknown()), assignment_count: count })),
+  library_seed_count: count, personality_variation_is_case_coverage: z.literal(false), whole_catalog_coverage_claimed: z.literal(false),
+});
+export const selectionRationaleSchema = z.union([implementedSelectionRationaleSchema, draftSelectionRationaleSchema]);
+export const scenarioPlanSchema = z.object({
+  catalog_version: z.string(), catalog_sha256: z.string(), assignments: z.array(scenarioAssignmentSchema),
+  requested_personas: count, does_not_imply_exercised_coverage: z.literal(true),
+  catalog_case_count: count.optional(), selection_rationale: selectionRationaleSchema.optional(),
+});
+export const savedScenarioSchema = scenarioAssignmentSchema.extend({
+  profile_sha256: z.string(), initial_memory_sha256: z.string(), condition_fixture_sha256: z.string(),
+  saved_persona_sha256: z.string().optional(),
+  profile_relevance_rationale: z.union([z.string(), z.object({
+    basis: z.literal('constrained_TinyTroupe_generation'), customer_goal: z.string(),
+    customer_context: z.record(z.string(), z.unknown()), seed_id: z.string(), measured_relevance: z.literal(false),
+  })]).optional(),
+});
+const draftScenarioResultSchema = z.object({
+  scenario_id: z.string(), classification: z.enum(['not_exercised', 'exercised_fixture', 'exercised_provider', 'expected_provider_decline', 'app_defect', 'provider_owned', 'blocked_inconclusive']),
+  evidence_event_ids: z.array(z.number().int()), finding_ids: z.array(z.string()), measured: z.boolean(), provider: z.string().nullable(),
+  payment_verified: z.boolean().nullable(), entitlement_verified: z.boolean().nullable(),
+  capability_checked: z.boolean(), capability_available: z.boolean().nullable(), condition_fixture_verified: z.boolean(),
+});
+const implementedScenarioResultSchema = z.object({
+  classification: z.literal('not_exercised'), condition_fixture_verified: z.literal(false),
+  journey_outcome: z.string().nullable(), journey_classification: z.string().nullable(), measured: z.boolean(),
+  payment_verified: z.boolean(), entitlement_verified: z.boolean(), capability_checked: z.boolean(), capability_available: z.boolean().nullable(),
+  evidence_event_ids: z.array(z.number().int()), exercise_gate: z.string(),
+});
+export const scenarioResultSchema = z.union([implementedScenarioResultSchema, draftScenarioResultSchema]);
+export const scenarioCoverageSchema = z.object({
+  catalog_case_count: count, requested_personas: count, assigned_case_ids: z.array(z.string()), exercised_case_ids: z.array(z.string()),
+  cases: z.array(z.object({ persona_id: z.string(), assigned_scenario: savedScenarioSchema.nullable(), observed_scenario_result: scenarioResultSchema.nullable() })),
+  counting_basis: z.literal('actual_saved_persona_journeys'), whole_catalog_coverage_claimed: z.literal(false),
+});
+export const scenarioCatalogSchema = z.object({ catalog_version: z.string(), catalog_sha256: z.string(), scenarios: z.array(scenarioSchema), catalog_case_count: count.optional(), does_not_imply_exercised_coverage: z.literal(true).optional() });
 const quoteBaseSchema = z.object({
   id: z.string(), app_url: z.string(), persona_count: count, expires_at: z.string(),
   affordable: z.boolean(), ready: z.boolean(), before_microusd: money, after_microusd: money,
@@ -64,6 +138,7 @@ const quoteBaseSchema = z.object({
   target_provenance: targetProvenanceSchema.nullable().optional(),
   provenance: provenanceSchema.optional(), estimate_basis: z.string().optional(),
   cfo_plan: cfoPlanSchema.nullable().optional(),
+  scenario_plan: scenarioPlanSchema.nullable().optional(),
 });
 export const quoteV2Schema = quoteBaseSchema.extend(quoteBudgetSchema.shape);
 // The additive budget is complete or absent. Old contracts never acquire new zero-valued fields.
@@ -81,6 +156,8 @@ export const countsSchema = z.object({
 export const personaSchema = z.object({
   id: z.string(), index: count, name: z.string(), profile: z.record(z.string(), z.unknown()),
   conditions: z.record(z.string(), z.unknown()), memory: z.array(z.unknown()),
+  initial_semantic_memory: z.array(z.unknown()).optional(), initial_snapshot: z.unknown().optional(),
+  assigned_scenario: savedScenarioSchema.nullable().optional(),
 });
 export const eventSchema = z.object({
   id: z.number().int(), persona_id: z.string().nullable(), kind: z.string(), created_at: z.string(),
@@ -118,6 +195,7 @@ export const runSchema = z.object({
     estimated_consumed_microusd: money.optional(), measured_cash_microusd: money.optional(), cash_basis: z.string().optional(),
   }),
   provenance: provenanceSchema.optional(), budget_contract: quoteSchema.optional(),
+  scenario_plan: scenarioPlanSchema.nullable().optional(), scenario_coverage: scenarioCoverageSchema.optional(),
   after_reserve_microusd: money.optional(), after_reserve_includes_known_replay: z.boolean().optional(),
   gates: z.array(gateSchema), personas: z.array(personaSchema), events: z.array(eventSchema),
   repair: repairSchema.nullable(), comparison: comparisonSchema.nullable(),
@@ -160,3 +238,7 @@ export type Provenance = z.infer<typeof provenanceSchema>;
 export type TargetProvenance = z.infer<typeof targetProvenanceSchema>;
 export type Connection = z.infer<typeof connectionSchema>;
 export type Connections = z.infer<typeof connectionsSchema>;
+export type Scenario = z.infer<typeof scenarioSchema>;
+export type SavedScenario = z.infer<typeof savedScenarioSchema>;
+export type ScenarioResult = z.infer<typeof scenarioResultSchema>;
+export type ScenarioCatalog = z.infer<typeof scenarioCatalogSchema>;

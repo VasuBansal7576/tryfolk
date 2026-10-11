@@ -12,9 +12,15 @@ import { readinessFacts, renderConnections } from './setup';
 import { applyRegistration, connectionSnapshot, registrationAvailable, registrationMessage, sourceVerified } from './connections';
 import type { ConnectionState } from './connections';
 import { readRunEvidence } from './run-read';
+import { renderPersonaDetail, renderSeedProvenance, selectedPersona } from './persona-detail';
+import type { PersonaSelection } from './persona-detail';
+import { renderScenarioCoverage, renderSelectionRationale } from './scenario-coverage';
+import type { CatalogState } from './scenario-coverage';
+import { captureRefreshState, restoreRefreshState } from './refresh-state';
+import type { RefreshState } from './refresh-state';
 
 type View = { kind: 'start' } | { kind: 'setup' } | { kind: 'quote'; quote: Quote } | { kind: 'run'; id: string };
-type Modal = { kind: 'people'; query: string; page: number } | { kind: 'person'; id: string } | { kind: 'finding'; id: string } | { kind: 'trace' } | { kind: 'history' } | { kind: 'cancel' } | { kind: 'repair'; findingId: string } | { kind: 'replay' } | { kind: 'pending' } | { kind: 'screenshot'; eventId: number } | { kind: 'about' };
+type Modal = { kind: 'people'; query: string; page: number } | { kind: 'person'; selection: PersonaSelection } | { kind: 'person-trace'; selection: PersonaSelection } | { kind: 'finding'; id: string } | { kind: 'trace' } | { kind: 'history' } | { kind: 'cancel' } | { kind: 'repair'; findingId: string } | { kind: 'replay' } | { kind: 'pending' } | { kind: 'screenshot'; eventId: number } | { kind: 'about' };
 const main = document.querySelector('#main');
 const context = document.querySelector('#context');
 const dialog = document.querySelector('#dialog');
@@ -24,6 +30,8 @@ const elements = { main, context, dialog, toast };
 let view: View = { kind: 'start' };
 let setupReturn: Exclude<View, { kind: 'setup' }> | null = null;
 let modal: Modal | null = null;
+let modalReturnFocus: HTMLElement | null = null;
+let modalReturnState: RefreshState | null = null;
 let readiness: Readiness | null = null;
 let readinessError = '';
 let connections: ConnectionState = { kind: 'guest', message: 'Authorize the owner to inspect approved app and source connections.' };
@@ -40,6 +48,8 @@ let busy = false;
 let pollError = '';
 let pollTimer: ReturnType<typeof setTimeout> | undefined;
 let pollEpoch = 0;
+let catalogEpoch = -1;
+let catalogState: CatalogState = { kind: 'loading' };
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 let owner = false;
 let ownerSupported = false;
@@ -76,7 +86,15 @@ function notify(message: string): void {
   toastTimer = setTimeout(() => { elements.toast.hidden = true; }, 5000);
 }
 function stopPolling(): void { clearTimeout(pollTimer); pollEpoch += 1; }
-function closeModal(): void { elements.dialog.close(); modal = null; }
+function restoreModalFocus(): void {
+  const previous = modalReturnFocus;
+  const saved = modalReturnState;
+  modalReturnFocus = null;
+  modalReturnState = null;
+  if (previous?.isConnected) { previous.focus({ preventScroll: true }); return; }
+  if (saved) restoreRefreshState(elements.main, { ...saved, opened: [] });
+}
+function closeModal(): void { modal = null; if (elements.dialog.open) elements.dialog.close(); restoreModalFocus(); }
 function go(next: View): void {
   if (next.kind === 'setup' && view.kind !== 'setup') setupReturn = view;
   stopPolling(); closeModal(); error = ''; pollError = ''; view = next;
@@ -102,10 +120,10 @@ function currentReplayBlocker(current: Run): string | null {
   return replayBlocker(current, savedRuns.some(item => item.pass === 'after' && item.parentRunId === current.id));
 }
 function render(): void {
-  const focused = document.activeElement;
+  const sameRun = view.kind === 'run' && elements.main.dataset.runId === view.id;
+  const savedView = captureRefreshState(elements.main);
+  if (!sameRun) savedView.opened = [];
   const ownerInput = elements.main.querySelector('#owner-secret');
-  const focusId = focused instanceof HTMLElement && elements.main.contains(focused) ? focused.id : '';
-  const focusAction = focused instanceof HTMLElement && elements.main.contains(focused) ? focused.dataset.action : undefined;
   elements.context.innerHTML = view.kind === 'run' && run ? `<div class="context"><span>${escape(host(run.app_url))}</span><span>${number(run.persona_count)} people</span></div>` : '';
   switch (view.kind) {
     case 'start': renderStart(); break;
@@ -114,11 +132,11 @@ function render(): void {
     case 'run': renderRun(); break;
   }
   elements.main.insertAdjacentHTML('afterbegin', pendingBanner());
+  elements.main.dataset.runId = view.kind === 'run' ? view.id : '';
   // Retain an unfinished password only in its input node across unrelated setup refreshes.
   const replacement = elements.main.querySelector('#owner-secret');
   if (ownerInput instanceof HTMLInputElement && replacement instanceof HTMLInputElement && !owner) replacement.replaceWith(ownerInput);
-  const restored = focusId ? document.getElementById(focusId) : focusAction ? Array.from(elements.main.querySelectorAll('[data-action]')).find(element => element instanceof HTMLElement && element.dataset.action === focusAction) : null;
-  if (restored instanceof HTMLElement) restored.focus({ preventScroll: true });
+  restoreRefreshState(elements.main, savedView);
 }
 function renderStart(): void {
   elements.main.innerHTML = `<section class="world landing"><img class="world-art" src="/assets/arrival.png" alt=""><div class="landing-content"><h1>Before the<br>world gets here.</h1><form class="start-form" id="start-form"><label class="url-field"><span class="sr-only">App URL</span><input id="url" name="url" type="url" inputmode="url" value="${escape(appUrl)}" placeholder="https://your-app.example" autocomplete="url" required></label><label class="count-field"><span class="sr-only">Number of personas</span><input id="count" name="count" type="number" min="1" max="1000" step="1" value="${escape(personaCount)}" required><span>people</span></label><button class="primary" type="submit" ${busy ? 'disabled' : ''}>${busy ? 'Getting budget…' : 'Review budget'}</button></form>${banner(error)}<p class="start-note">Initial test + the same saved customers after a fix. Review both passes upfront.</p><div class="landing-links">${readinessFacts(readiness, readinessError).canSelectApp ? '<button class="text-button" data-action="demo">Use test app URL</button>' : ''}<button class="text-button" data-action="about">How it works</button><span>Local test · No charges</span></div>${readiness ? `<p class="allowance">Current execution ceiling: ${number(readiness.max_personas)} people. Requests are never reduced silently.</p>` : readinessError ? `<p class="allowance status-bad">Connection status is unavailable. <button class="text-button" data-action="setup">Review app connection</button></p>` : '<p class="allowance">Checking the local test connection…</p>'}</div></section>`;
@@ -126,7 +144,7 @@ function renderStart(): void {
 function renderQuote(quote: Quote): void {
   const expired = Date.parse(quote.expires_at) <= Date.now();
   const nativePage = readiness?.integrations.cfo?.evidence || null;
-  elements.main.innerHTML = `<section class="page quote-page"><button class="back" data-action="home">Back to your URL and count</button><h1>One crowd.<br>Both runs covered.</h1><p class="lead">${escape(host(quote.app_url))} · ${number(quote.persona_count)} requested customers</p>${providerNotice({ provider: quote.provider, provenance: quote.provenance, targetProvenance: quote.target_provenance, estimate: quote.cost_basis === 'estimate' && quote.cfo_plan_status === 'missing' })}<div class="quote-layout"><div>${quoteBudget(quote)}<p class="same-population">All ${number(quote.persona_count)} requested customers will be saved during the initial pass. The after pass reuses those exact profiles and starting conditions.</p>${banner(error)}${expired ? banner('This quote expired. Refresh the budget before starting.') : ''}<div class="actions"><button class="primary" data-action="confirm-quote" ${busy || expired || !quote.affordable ? 'disabled' : ''}>${busy ? 'Saving run…' : !quote.ready ? 'Confirm budget & save blocked run' : 'Confirm budget & start'}</button><button class="text-button" data-action="requote" ${busy ? 'disabled' : ''}>Refresh budget</button></div>${!quote.affordable ? `<p class="small status-bad">${escape(affordabilityMessage(quote))}</p>` : ''}<p class="small muted quote-expiry">Quote expires ${escape(timestamp(quote.expires_at))}.</p>${forecastSource(quote, nativePage)}</div><aside class="quote-aside"><img src="/assets/aditi.png" alt="" class="quote-person"><h2>${quote.ready ? 'Ready to try it.' : 'Setup comes first.'}</h2>${!quote.ready ? '<p>Saving this run records the blockers. Browser execution will not start while setup is incomplete.</p>' : '<p>Customers and their steps will appear after they are generated and executed.</p>'}${gates(quote.gates)}<button class="text-button" data-action="setup">Review app connection</button></aside></div></section>`;
+  elements.main.innerHTML = `<section class="page quote-page"><button class="back" data-action="home">Back to your URL and count</button><h1>One crowd.<br>Both runs covered.</h1><p class="lead">${escape(host(quote.app_url))} · ${number(quote.persona_count)} requested customers</p>${providerNotice({ provider: quote.provider, provenance: quote.provenance, targetProvenance: quote.target_provenance, estimate: quote.cost_basis === 'estimate' && quote.cfo_plan_status === 'missing' })}<div class="quote-layout"><div>${quoteBudget(quote)}<p class="same-population">All ${number(quote.persona_count)} requested customers will be saved during the initial pass. The after pass reuses those exact profiles and starting conditions.</p>${quote.scenario_plan ? renderSelectionRationale(quote.scenario_plan) : ''}${quote.scenario_plan ? `<details class="record"><summary>Planned hypothetical cases · ${number(quote.scenario_plan.assignments.length)} assignments</summary><p class="small muted">These are test inputs, not generated customers or observed failures. They are saved with this quote for both passes.</p>${quote.scenario_plan.assignments.map(item => `<article class="persona-section"><h3>Customer #${number(item.persona_index + 1)} · ${escape(item.scenario_snapshot.title)}</h3><p>${escape(item.scenario_snapshot.hypothetical_problem)}</p>${evidence({ expected_behavior: item.scenario_snapshot.expected_behavior, availability: item.scenario_snapshot.availability, accepted_condition_fixture: item.condition_fixture_snapshot })}${item.seed ? `<details class="record" data-record="quote-seed-${escape(String(item.persona_index))}"><summary>Accepted synthetic seed source · not a generated customer</summary>${renderSeedProvenance(item.seed)}</details>` : ''}</article>`).join('')}</details>` : ''}${banner(error)}${expired ? banner('This quote expired. Refresh the budget before starting.') : ''}<div class="actions"><button class="primary" data-action="confirm-quote" ${busy || expired || !quote.affordable ? 'disabled' : ''}>${busy ? 'Saving run…' : !quote.ready ? 'Confirm budget & save blocked run' : 'Confirm budget & start'}</button><button class="text-button" data-action="requote" ${busy ? 'disabled' : ''}>Refresh budget</button></div>${!quote.affordable ? `<p class="small status-bad">${escape(affordabilityMessage(quote))}</p>` : ''}<p class="small muted quote-expiry">Quote expires ${escape(timestamp(quote.expires_at))}.</p>${forecastSource(quote, nativePage)}</div><aside class="quote-aside"><img src="/assets/aditi.png" alt="" class="quote-person"><h2>${quote.ready ? 'Ready to try it.' : 'Setup comes first.'}</h2>${!quote.ready ? '<p>Saving this run records the blockers. Browser execution will not start while setup is incomplete.</p>' : '<p>Customers and their steps will appear after they are generated and executed.</p>'}${gates(quote.gates)}<button class="text-button" data-action="setup">Review app connection</button></aside></div></section>`;
 }
 function renderSetup(): void {
   const facts = readinessFacts(readiness, readinessError);
@@ -167,7 +185,7 @@ function renderRun(): void {
   const storyText = thought || (storyEvent ? eventSummary(storyEvent) || humanize(storyEvent.kind) : typeof goal === 'string' ? goal : 'This customer has no recorded browser steps yet.');
   const crowd = current.persona_count > 100 ? 'dense' : 'crowd';
   const active = isActive(current);
-  elements.main.innerHTML = `<section class="world run-world"><img class="world-art" src="/assets/${crowd}.png" alt=""><div class="run-heading"><h1>${current.pass === 'after' ? 'The same people. A new try.' : 'Your first customers.'}</h1><p class="run-status">${escape(phaseCopy(current))}</p><p class="run-count">${number(current.counts.executed)} / ${number(current.persona_count)} executed · ${number(current.counts.generated)} saved · ${escape(humanize(current.phase))}</p></div><div class="session">${snapshot ? `<button class="snapshot-button" data-action="screenshot" data-id="${snapshot.event.id}" aria-label="Inspect full recorded screenshot"><img src="${escape(snapshot.url)}" alt="Full recorded browser screenshot" referrerpolicy="no-referrer"></button>` : `<div class="empty-snapshot"><span>${escape(host(current.app_url))}</span><h2>${selected ? 'No screenshot saved for this customer.' : current.counts.executed ? 'No browser screenshot saved.' : 'Waiting for browser evidence.'}</h2><p>Only recorded screenshots appear here.</p></div>`}<div class="session-caption"><span>${snapshot ? `Recorded for ${escape(selected?.name || 'this run')} · event ${snapshot.event.id}` : 'No screenshot available'}</span>${snapshot ? `<button data-action="screenshot" data-id="${snapshot.event.id}">Inspect full screenshot</button>` : ''}<button data-action="trace">Inspect activity</button></div></div><div class="customer-moment"><img class="person-art" src="/assets/aditi.png" alt=""><div class="moment-copy">${selected ? `<p class="story-excerpt-label">Recorded story excerpt</p><p class="moment-quote">${escape(storyText)}</p><p class="moment-name">${escape(selected.name)} · ${escape(customerOutcome(selected, current))}</p><button class="secondary" data-action="person" data-id="${escape(selected.id)}">Read full story</button>` : '<p class="moment-quote">Your crowd is<br>not here yet.</p><p class="moment-name">No customer profiles have been generated.</p>'}</div></div><div class="run-bottom"><button class="primary" data-action="people">All ${number(current.persona_count)} customers</button><p class="crowd-note">Representative artwork. ${number(current.personas.length)} saved profiles are individually inspectable.</p>${canCancel(current) ? '<button class="text-button" data-action="cancel">End this run</button>' : '<button class="text-button" data-action="home">Start another run</button>'}</div></section><section class="page run-details">${providerNotice({ provider: current.provider, provenance: current.provenance, targetProvenance: current.target_provenance, estimate: current.budget.cost_basis.includes("estimate") })}${banner(error)}${banner(pollError, '<button class="secondary" data-action="retry-run">Reconnect</button>')}${gates(current.gates)}<div class="section-head"><h2>${active ? 'Recorded outcomes so far' : 'What happened'}</h2><p>Every outcome uses the original ${number(current.persona_count)} customers as its denominator.</p></div>${outcomes(current.counts, current.persona_count)}<p class="small muted incomplete-note">${number(current.counts.queued)} queued · ${number(current.counts.requested - current.counts.generated)} not generated. Pending and blocked customers are not passes. Abandonment is a synthetic customer's decision, not real customer churn.</p><section class="findings-section"><h2>Findings</h2>${banner(findingsError, '<button class="text-button" data-action="retry-findings">Retry findings</button>')}${findings.length ? findings.map(finding => `<button class="finding-row" data-action="finding" data-id="${escape(finding.id)}"><span><strong>${escape(finding.summary)}</strong><small>${escape(humanize(finding.classification))} · ${escape(finding.scope)}</small></span><span>${findingEvidenceLabel(finding)} →</span></button>`).join('') : !findingsError ? `<p class="empty">${current.counts.executed ? 'No findings have been recorded. This alone does not establish that every journey passed.' : 'No executed journeys, so no measured findings yet.'}</p>` : ''}</section>${renderRepair(current)}${renderComparison(current)}${renderBudget(current)}<details class="provenance"><summary>Run and population provenance</summary><div class="evidence-row"><strong>Run</strong><span>${escape(current.id)} · ${current.pass === 'before' ? 'Initial pass' : 'After pass'}</span></div><div class="evidence-row"><strong>Saved population</strong><span>${escape(current.population_id)}</span></div><div class="evidence-row"><strong>Target revision</strong><span>${escape(current.revision)}</span></div><div class="evidence-row"><strong>Recorded source commit</strong><span>${escape(current.source_commit || 'Not reported for this saved run')}</span></div><div class="evidence-row"><strong>Recorded source digest</strong><span>${escape(current.source_digest || 'Not reported for this saved run')}</span></div><div class="evidence-row"><strong>Recorded target mode</strong><span>${escape(current.target_mode || 'Not reported for this saved run')}</span></div><div class="evidence-row"><strong>Fault configuration</strong><span>${escape(current.fault)}</span></div><div class="evidence-row"><strong>Last recorded update</strong><span>${escape(timestamp(current.updated_at))}</span></div>${link(current.preview_url, 'Registered target preview')}<p class="same-population">Retesting uses all ${number(current.persona_count)} of these saved personas and their supported starting conditions. Separate diagnostic attempts never change this denominator.</p></details><div class="actions"><button class="secondary" data-action="trace">Execution trace</button><button class="text-button" data-action="download">Download recorded report</button><button class="text-button" data-action="refresh-run">Refresh results</button></div></section>`;
+  elements.main.innerHTML = `<section class="world run-world"><img class="world-art" src="/assets/${crowd}.png" alt=""><div class="run-heading"><h1>${current.pass === 'after' ? 'The same people. A new try.' : 'Your first customers.'}</h1><p class="run-status">${escape(phaseCopy(current))}</p><p class="run-count">${number(current.counts.executed)} / ${number(current.persona_count)} executed · ${number(current.counts.generated)} saved · ${escape(humanize(current.phase))}</p></div><div class="session">${snapshot ? `<button class="snapshot-button" data-action="screenshot" data-id="${snapshot.event.id}" aria-label="Inspect full recorded screenshot"><img src="${escape(snapshot.url)}" alt="Full recorded browser screenshot" referrerpolicy="no-referrer"></button>` : `<div class="empty-snapshot"><span>${escape(host(current.app_url))}</span><h2>${selected ? 'No screenshot saved for this customer.' : current.counts.executed ? 'No browser screenshot saved.' : 'Waiting for browser evidence.'}</h2><p>Only recorded screenshots appear here.</p></div>`}<div class="session-caption"><span>${snapshot ? `Recorded for ${escape(selected?.name || 'this run')} · event ${snapshot.event.id}` : 'No screenshot available'}</span>${snapshot ? `<button data-action="screenshot" data-id="${snapshot.event.id}">Inspect full screenshot</button>` : ''}<button data-action="trace">Inspect activity</button></div></div><div class="customer-moment"><img class="person-art" src="/assets/aditi.png" alt=""><div class="moment-copy">${selected ? `<p class="story-excerpt-label">Recorded story excerpt</p><p class="moment-quote">${escape(storyText)}</p><p class="moment-name">${escape(selected.name)} · ${escape(customerOutcome(selected, current))}</p><button class="secondary" data-action="person" data-id="${escape(selected.id)}">Read full story</button>` : '<p class="moment-quote">Your crowd is<br>not here yet.</p><p class="moment-name">No customer profiles have been generated.</p>'}</div></div><div class="run-bottom"><button class="primary" data-action="people">All ${number(current.persona_count)} customers</button><p class="crowd-note">Representative artwork. ${number(current.personas.length)} saved profiles are individually inspectable.</p>${canCancel(current) ? '<button class="text-button" data-action="cancel">End this run</button>' : '<button class="text-button" data-action="home">Start another run</button>'}</div></section><section class="page run-details">${providerNotice({ provider: current.provider, provenance: current.provenance, targetProvenance: current.target_provenance, estimate: current.budget.cost_basis.includes("estimate") })}${banner(error)}${banner(pollError, '<button class="secondary" data-action="retry-run">Reconnect</button>')}${gates(current.gates)}<div class="section-head"><h2>${active ? 'Recorded outcomes so far' : 'What happened'}</h2><p>Every outcome uses the original ${number(current.persona_count)} customers as its denominator.</p></div>${outcomes(current.counts, current.persona_count)}<p class="small muted incomplete-note">${number(current.counts.queued)} queued · ${number(current.counts.requested - current.counts.generated)} not generated. Pending and blocked customers are not passes. Abandonment is a synthetic customer's decision, not real customer churn.</p><section class="findings-section"><h2>Findings</h2>${banner(findingsError, '<button class="text-button" data-action="retry-findings">Retry findings</button>')}${findings.length ? findings.map(finding => `<button class="finding-row" data-action="finding" data-id="${escape(finding.id)}"><span><strong>${escape(finding.summary)}</strong><small>${escape(humanize(finding.classification))} · ${escape(finding.scope)}</small></span><span>${findingEvidenceLabel(finding)} →</span></button>`).join('') : !findingsError ? `<p class="empty">${current.counts.executed ? 'No findings have been recorded. This alone does not establish that every journey passed.' : 'No executed journeys, so no measured findings yet.'}</p>` : ''}</section>${renderScenarioCoverage(current, catalogState)}${renderRepair(current)}${renderComparison(current)}${renderBudget(current)}<details class="provenance"><summary>Run and population provenance</summary><div class="evidence-row"><strong>Run</strong><span>${escape(current.id)} · ${current.pass === 'before' ? 'Initial pass' : 'After pass'}</span></div><div class="evidence-row"><strong>Saved population</strong><span>${escape(current.population_id)}</span></div><div class="evidence-row"><strong>Target revision</strong><span>${escape(current.revision)}</span></div><div class="evidence-row"><strong>Recorded source commit</strong><span>${escape(current.source_commit || 'Not reported for this saved run')}</span></div><div class="evidence-row"><strong>Recorded source digest</strong><span>${escape(current.source_digest || 'Not reported for this saved run')}</span></div><div class="evidence-row"><strong>Recorded target mode</strong><span>${escape(current.target_mode || 'Not reported for this saved run')}</span></div><div class="evidence-row"><strong>Fault configuration</strong><span>${escape(current.fault)}</span></div><div class="evidence-row"><strong>Last recorded update</strong><span>${escape(timestamp(current.updated_at))}</span></div>${link(current.preview_url, 'Registered target preview')}<p class="same-population">Retesting uses all ${number(current.persona_count)} of these saved personas and their supported starting conditions. Separate diagnostic attempts never change this denominator.</p></details><div class="actions"><button class="secondary" data-action="trace">Execution trace</button><button class="text-button" data-action="download">Download recorded report</button><button class="text-button" data-action="refresh-run">Refresh results</button></div></section>`;
 }
 function renderBudget(current: Run): string {
   const allowanceUsed = current.budget.estimated_consumed_microusd ?? current.budget.spent_microusd;
@@ -197,10 +215,28 @@ function renderHeldOut(current: Run): string {
   if (!checks) return '<p class="small muted">No separate diagnostic checks are reported in this saved record.</p>';
   return `<details class="held-out record"><summary>Separate diagnostic checks · ${number(checks.passed)} passed / ${number(checks.total)} recorded assertions</summary><p class="small muted">${number(checks.failed)} failed. These deterministic controls use separate fresh accounts. They never enter the ${number(current.persona_count)}-customer denominator and do not establish adaptive customer outcomes.</p>${checks.cases.length ? checks.cases.map(item => `<article class="diagnostic-case"><h3>${escape(humanize(item.case))} · ${item.passed ? 'Passed' : 'Failed'}</h3><p class="small muted">${item.measured ? 'Measured diagnostic evidence' : 'Local fixture control · provider not measured'} · ${escape(item.provider)}</p><p class="small muted">Revision ${escape(item.revision)} · separate account ${escape(item.account_id)}</p>${link(item.preview_url, 'Diagnostic preview')}${evidence(item.evidence)}</article>`).join('') : '<p class="empty">No individual diagnostic evidence was included.</p>'}</details>`;
 }
-function openModal(next: Modal): void { error = ''; modal = next; renderModal(); if (!elements.dialog.open) elements.dialog.showModal(); }
+function openModal(next: Modal): void {
+  if (!elements.dialog.open && document.activeElement instanceof HTMLElement) {
+    modalReturnFocus = document.activeElement;
+    modalReturnState = captureRefreshState(elements.main);
+  }
+  // Deliberate drawer navigation starts a new inspection. Only a refresh of the
+  // same open drawer retains its control/disclosure state.
+  elements.dialog.replaceChildren();
+  error = ''; modal = next; renderModal();
+  if (!elements.dialog.open) elements.dialog.showModal();
+  const heading = elements.dialog.querySelector('#dialog-heading');
+  if (heading instanceof HTMLElement) heading.focus({ preventScroll: true });
+}
 function modalFrame(title: string, body: string, side = false): void {
+  const savedView = captureRefreshState(elements.dialog);
+  const scroll = elements.dialog.querySelector('.dialog-body')?.scrollTop ?? 0;
   elements.dialog.className = side ? 'sidepanel' : '';
-  elements.dialog.innerHTML = `<div class="dialog-header"><h2 id="dialog-heading">${escape(title)}</h2><button class="text-button" data-action="close">Close</button></div><div class="dialog-body">${banner(error)}${body}</div>`;
+  elements.dialog.innerHTML = `<div class="dialog-header"><h2 id="dialog-heading" tabindex="-1">${escape(title)}</h2><button class="text-button" data-action="close">Close</button></div><div class="dialog-body">${banner(error)}${body}</div>`;
+  const restored = restoreRefreshState(elements.dialog, savedView);
+  if (savedView.focus && !restored) elements.dialog.querySelector<HTMLElement>('#dialog-heading')?.focus({ preventScroll: true });
+  const updatedBody = elements.dialog.querySelector('.dialog-body');
+  if (updatedBody instanceof HTMLElement) updatedBody.scrollTop = scroll;
 }
 function renderModal(): void {
   const state = modal;
@@ -232,9 +268,14 @@ function renderModal(): void {
     case 'history': modalFrame('Runs in this tab', `<p class="small muted">Run access is saved for reloads in this browser tab. A closed or cleared session may remove access.</p>${savedRuns.length ? savedRuns.map(item => `<button class="run-entry" data-action="open-run" data-id="${escape(item.id)}"><strong>${escape(host(item.appUrl))}</strong><span>${number(item.count)} customers · ${item.pass === 'before' ? 'Initial pass' : 'After pass'}</span><span>${escape(item.id)}</span></button>`).join('') : '<p class="empty">Your first crowd is waiting. Start by reviewing a budget.</p>'}`, true); break;
     case 'people': if (current) renderPeople(state, current); break;
     case 'person': {
-      const person = current?.personas.find(item => item.id === state.id);
+      const person = selectedPersona({ run: current, viewRunId: view.kind === 'run' ? view.id : null, epoch: pollEpoch, selection: state.selection });
       if (!current || !person) { modalFrame('Customer unavailable', '<p>This profile has not been generated or is no longer in the current run.</p>'); break; }
-      modalFrame(person.name, `<p class="sample-label">Saved customer #${number(person.index + 1)} · ${escape(customerOutcome(person, current))}</p><div class="person-summary"><img src="/assets/aditi.png" alt=""><div><h2>${escape(person.name)}</h2><p>Illustration is representative. This profile and its steps are saved run records.</p></div></div><details class="record"><summary>Profile and goal</summary>${evidence(person.profile)}</details><details class="record"><summary>Assigned starting conditions</summary>${evidence(person.conditions)}</details><p class="small muted">Assigned conditions are not proof they were exercised. Recorded browser steps and verification below show what happened.</p>${eventList(current.events.filter(event => event.persona_id === person.id))}<div class="actions"><button class="secondary" data-action="people">All customers</button><button class="text-button" data-action="person" data-id="${escape(person.id)}">Refresh story</button></div>`); break;
+      modalFrame(person.name, renderPersonaDetail(current, person), true); break;
+    }
+    case 'person-trace': {
+      const person = selectedPersona({ run: current, viewRunId: view.kind === 'run' ? view.id : null, epoch: pollEpoch, selection: state.selection });
+      if (!current || !person) { modalFrame('Customer trace unavailable', '<p>The selected run changed. Open a customer from the current saved run.</p>'); break; }
+      modalFrame(`${person.name} · recorded trace`, `<p class="sample-label">${escape(current.id)} · ${escape(person.id)}</p><button class="secondary" data-action="person" data-id="${escape(person.id)}">Back to customer details</button>${eventList(current.events.filter(event => event.persona_id === person.id))}`, true); break;
     }
     case 'finding': {
       const finding = findings.find(item => item.id === state.id);
@@ -356,6 +397,7 @@ async function submitSavedRequest(): Promise<void> {
 }
 async function openRun(entry: SavedRun, initial?: Run): Promise<void> {
   stopPolling(); closeModal(); error = ''; pollError = ''; findings = []; findingsError = '';
+  catalogState = { kind: 'loading' };
   view = { kind: 'run', id: entry.id };
   location.hash = `run=${encodeURIComponent(entry.id)}`;
   render();
@@ -365,6 +407,18 @@ async function refreshFindings(id: string, token: string): Promise<void> {
   const epoch = pollEpoch;
   try { const result = await api.findings(id, token); if (epoch === pollEpoch && view.kind === 'run' && view.id === id) { findings = result.findings; findingsError = ''; } }
   catch (value) { if (epoch === pollEpoch && view.kind === 'run' && view.id === id) findingsError = errorMessage(value); }
+}
+async function refreshScenarioCatalog(current: Run, epoch: number): Promise<void> {
+  catalogEpoch = epoch;
+  try {
+    const catalog = await api.scenarios(current.app_url);
+    if (epoch !== pollEpoch || view.kind !== 'run' || view.id !== current.id) return;
+    catalogState = { kind: 'ready', catalog };
+  } catch (value) {
+    if (epoch !== pollEpoch || view.kind !== 'run' || view.id !== current.id) return;
+    catalogState = { kind: 'unavailable', message: value instanceof ApiError && value.status === 404 ? 'This service does not expose the scenario catalog. Historical profiles and observations remain available.' : `Scenario catalog unavailable: ${errorMessage(value)}` };
+  }
+  render();
 }
 async function pollRun(epoch: number, initial?: Run): Promise<void> {
   if (view.kind !== 'run' || epoch !== pollEpoch) return;
@@ -384,7 +438,8 @@ async function pollRun(epoch: number, initial?: Run): Promise<void> {
     const previousError = findingsError;
     if (nextFindings.kind === 'ready') { findings = nextFindings.findings; findingsError = ''; }
     else findingsError = errorMessage(nextFindings.error);
-    if (changed || previousFindings !== JSON.stringify(findings) || previousError !== findingsError) render();
+    if (changed || previousFindings !== JSON.stringify(findings) || previousError !== findingsError) { render(); if (modal?.kind === 'person' || modal?.kind === 'person-trace') renderModal(); }
+    if (catalogEpoch !== epoch) void refreshScenarioCatalog(next, epoch);
     if (isActive(next) || next.repair?.status === 'queued' || next.repair?.status === 'running') pollTimer = setTimeout(() => void pollRun(epoch), 1000);
   } catch (value) {
     if (epoch !== pollEpoch) return;
@@ -451,7 +506,10 @@ async function action(name: string, id: string): Promise<void> {
     case 'retry-findings': { if (run) { const entry = savedRuns.find(item => item.id === run?.id); if (entry) { await refreshFindings(entry.id, entry.token); render(); } } break; }
     case 'people': openModal({ kind: 'people', query: '', page: 0 }); break;
     case 'people-prev': case 'people-next': if (modal?.kind === 'people') { modal.page += name === 'people-prev' ? -1 : 1; renderModal(); } break;
-    case 'person': openModal({ kind: 'person', id }); break;
+    case 'person': case 'person-trace': {
+      if (view.kind !== 'run' || !run || run.id !== view.id || !run.personas.some(person => person.id === id)) break;
+      openModal({ kind: name, selection: { runId: run.id, populationId: run.population_id, epoch: pollEpoch, personaId: id } }); break;
+    }
     case 'screenshot': openModal({ kind: 'screenshot', eventId: Number(id) }); break;
     case 'finding': openModal({ kind: 'finding', id }); break;
     case 'trace': openModal({ kind: 'trace' }); break;
@@ -543,7 +601,18 @@ document.addEventListener('input', event => {
     const input = elements.dialog.querySelector('#person-search'); if (input instanceof HTMLInputElement) { input.focus(); if (start !== null) input.setSelectionRange(start, start); }
   }
 });
-elements.dialog.addEventListener('close', () => { modal = null; });
+elements.dialog.addEventListener('close', () => { if (!elements.dialog.open) { modal = null; restoreModalFocus(); } });
+elements.dialog.addEventListener('keydown', event => {
+  if (event.key !== 'Tab' || !elements.dialog.open) return;
+  const focusable = Array.from(elements.dialog.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex="0"]')).filter(element => element.getClientRects().length > 0);
+  const first = focusable[0], last = focusable.at(-1);
+  if (!first || !last) return;
+  if (event.shiftKey && (document.activeElement === first || document.activeElement?.id === 'dialog-heading')) {
+    event.preventDefault(); last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault(); first.focus();
+  }
+});
 window.addEventListener('pagehide', stopPolling);
 render();
 void refreshReadiness();
