@@ -174,6 +174,13 @@ async def _public_resource(url, content_types):
             return b"".join(chunks), headers
 
 
+class NativePayAdmissionError(ValueError):
+    def __init__(self, checks):
+        self.checks = dict(checks)
+        self.first_failed_predicate = next(name for name, passed in checks.items() if not passed)
+        super().__init__("Native Pay admission failed: " + self.first_failed_predicate)
+
+
 class ResourceGuard:
     def __init__(self, *, frame_verify=None):
         self.policy = None
@@ -253,14 +260,28 @@ class ResourceGuard:
 
     def owned_checkout(self, identity):
         record = self._owned_checkouts.get(identity.get("checkout_session_id"), {})
-        if not (
-            identity.get("approved") is True and identity.get("provider_environment") == "test_mode"
-            and identity.get("payment_correlated") is True and identity.get("customer_correlated") is True
-            and record.get("order_id") == identity.get("order_id")
-            and record.get("ownership") == identity.get("ownership")
-        ):
+        if not all(self.owned_checkout_checks(identity).values()):
             return {}
         return record
+
+    def owned_checkout_checks(self, identity):
+        record = self._owned_checkouts.get(identity.get("checkout_session_id"), {})
+        return {
+            "independent_identity_approved": identity.get("approved") is True,
+            "independent_Test_environment": identity.get("provider_environment") == "test_mode",
+            "independent_payment_correlated": identity.get("payment_correlated") is True,
+            "independent_customer_correlated": identity.get("customer_correlated") is True,
+            "owned_checkout_creation_available": bool(record),
+            "independent_owned_order_bound": bool(record) and record.get("order_id") == identity.get("order_id"),
+            "independent_owned_ownership_bound": bool(record) and record.get("ownership") == identity.get("ownership"),
+        }
+
+    def require_arm_admission(self, checks):
+        if not all(checks.values()):
+            error = NativePayAdmissionError(checks)
+            self.events.append({"decision": "deny_native_pay_arm", "arm_admission_checks": dict(checks),
+                                "first_failed_predicate": error.first_failed_predicate})
+            raise error
 
     async def bind_api(self, request, headers, frame):
         if self.card_attempt and urlsplit(request.url).path in (
@@ -305,14 +326,18 @@ class ResourceGuard:
 
     async def arm_native_pay(self, completed_fields, completed_cards):
         required = {"country", "address", "city", "state", "postal", "card_number", "card_cvc"}
-        if not self.card_enabled or not required <= completed_fields or not (
-            "card_expiry" in completed_fields or {"card_month", "card_year"} <= completed_fields
-        ):
-            raise ValueError("Native Pay requires the explicit card capability and completed official synthetic fields.")
+        checks = {
+            "ordinary_Test_card_capability_explicit": self.card_enabled is True,
+            "required_synthetic_fields_completed": required <= completed_fields,
+            "synthetic_expiry_completed": "card_expiry" in completed_fields
+            or {"card_month", "card_year"} <= completed_fields,
+            "primary_page_present": self.primary_page is not None,
+        }
+        self.require_arm_admission(checks)
         frames = [frame for frame in self.primary_page.frames if frame.parent_frame == self.primary_page.main_frame
                   and self.frame_context(frame.url, frame.parent_frame.url)]
-        if len(frames) != 1 or self.card_attempt:
-            raise ValueError("Native Pay must identify exactly one current child and cannot repeat.")
+        checks.update(single_current_direct_child=len(frames) == 1, native_card_attempt_absent=self.card_attempt is None)
+        self.require_arm_admission(checks)
         frame = frames[0]
         observed_url = frame.url
         context = self.frame_context(observed_url, frame.parent_frame.url)
@@ -322,23 +347,26 @@ class ResourceGuard:
         identity = await self.frame_verify(frame_config(observed_url))
         owned = self.owned_checkout(identity)
         current_state = await frame.evaluate(READ_CONTEXT)
-        if (
-            frame.url != observed_url or frame.parent_frame != self.primary_page.main_frame
-            or current_state["generation"] != state["generation"]
-            or self.frame_context(frame.url, frame.parent_frame.url) != context
-            or not native.get("config_bound") or native.get("generation") != state["generation"]
-            or identity.get("approved") is not True or identity.get("payment_id") != context["payment_id"]
-            or identity.get("provider_environment") != "test_mode" or identity.get("payment_correlated") is not True
-            or identity.get("checkout_session_id") != context.get("checkout_session_id")
-            or not owned or frame.parent_frame.url != owned.get("url")
-            or any(completed_cards.get(field) != (context["config_id"], state["generation"])
-                   for field in required if field.startswith("card_"))
-            or not (completed_cards.get("card_expiry") == (context["config_id"], state["generation"])
-                    or all(completed_cards.get(field) == (context["config_id"], state["generation"])
-                           for field in ("card_month", "card_year")))
-            or not all(self.native_setup_facts(context["config_id"], state["generation"])[key] for key in ("bootstrap_account_methods_200", "bootstrap_customer_methods_200", "normal_type_observed"))
-        ):
-            raise ValueError("Native Pay lacks current private configuration, successful bootstrap and independent identity.")
+        setup = self.native_setup_facts(context["config_id"], state["generation"])
+        checks.update({
+            "same_current_frame": frame.url == observed_url,
+            "same_direct_parent": frame.parent_frame == self.primary_page.main_frame,
+            "same_current_generation": current_state["generation"] == state["generation"],
+            "same_verified_frame_context": self.frame_context(frame.url, frame.parent_frame.url) == context,
+            "native_configuration_bound": native.get("config_bound") is True,
+            "native_generation_current": native.get("generation") == state["generation"],
+            **self.owned_checkout_checks(identity),
+            "independent_current_payment_bound": identity.get("payment_id") == context["payment_id"],
+            "independent_current_checkout_bound": identity.get("checkout_session_id") == context.get("checkout_session_id"),
+            "owned_checkout_parent_exact": bool(owned) and frame.parent_frame.url == owned.get("url"),
+            **{field + "_completion_current": completed_cards.get(field) == (context["config_id"], state["generation"])
+               for field in sorted(required) if field.startswith("card_")},
+            "card_expiry_completion_current": completed_cards.get("card_expiry") == (context["config_id"], state["generation"])
+            or all(completed_cards.get(field) == (context["config_id"], state["generation"])
+                   for field in ("card_month", "card_year")),
+            **{key: setup[key] for key in ("bootstrap_account_methods_200", "bootstrap_customer_methods_200", "normal_type_observed")},
+        })
+        self.require_arm_admission(checks)
         billing = {"line1": "123 Test Street", "city": "New York", "state": "New York", "zip": "10001", "country": "US"}
         if contact.get("provider_name_observed"):
             billing.update(first_name="Tryfolk", last_name="Synthetic Customer")
@@ -351,7 +379,7 @@ class ResourceGuard:
         self.card_attempt.arm_native_pay(observed_url, state["generation"], normal_bootstrap=self.native_setup_facts(context["config_id"], state["generation"])["normal_type_observed"])
         self.events.append({"decision": "native_pay_armed", "config_id": context["config_id"],
                             "independent_identity_rechecked": True, "frame_generation_bound": True,
-                            "owned_checkout_parent_verified": True})
+                            "owned_checkout_parent_verified": True, "arm_admission_checks": dict(checks)})
 
     async def payment_response(self, response, facts):
         try:
