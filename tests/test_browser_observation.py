@@ -108,3 +108,111 @@ async def test_disabled_and_processing_buttons_are_observed_but_never_selected()
     result = await observe_fresh(Page(), BrowserPolicy("http://127.0.0.1:3300", "dodo"), infer, control)
     assert result["actions"] == []
     assert "processing" in result["unsupported_controls"][0]["reason"]
+
+
+async def test_phase_document_guard_runs_on_existing_reads_and_never_retries_identity_changes():
+    page = Page()
+    original = dict(page.document)
+    calls, documents = [], []
+
+    def guard(document):
+        documents.append(dict(document))
+        if document['url'] != original['url'] or document['generation'] != original['generation']:
+            raise ValueError('Phase document identity changed')
+
+    async def infer():
+        calls.append('infer')
+        page.document['generation'] += 1
+        return [{"selector": "#confirm", "method": "click"}]
+
+    async def metadata(selector):
+        raise AssertionError('Changed generation must fail before metadata or an action')
+
+    with pytest.raises(ValueError, match='Phase document identity changed'):
+        await observe_fresh(page, BrowserPolicy('http://127.0.0.1:3300', 'dodo'), infer,
+                            metadata, document_guard=guard)
+    assert calls == ['infer']
+    assert len(documents) == 2
+
+
+async def test_phase_guard_allows_control_only_transition_but_exposes_only_reacquired_action():
+    page = Page()
+    page.document['control_signature'] = 'initial'
+    baseline = dict(page.document)
+    calls, looked_up = [], []
+
+    def guard(document):
+        assert document['url'] == baseline['url']
+        assert document['generation'] == baseline['generation']
+
+    async def infer():
+        calls.append('infer')
+        if len(calls) == 1:
+            page.document['control_signature'] = 'confirmation appeared'
+            return [{"selector": "#stale", "method": "click"}]
+        return [{"selector": "#current", "method": "click"}]
+
+    async def metadata(selector):
+        looked_up.append(selector)
+        return {"present": True, "visible": True, "disabled": False, "tag": "BUTTON"}
+
+    result = await observe_fresh(page, BrowserPolicy('http://127.0.0.1:3300', 'dodo'), infer,
+                                metadata, timeout=1, max_attempts=3, document_guard=guard)
+    assert len(calls) == 2
+    assert looked_up == ['#current']
+    assert [action['selector'] for action in result['actions']] == ['#current']
+    assert result['freshness']['discarded'] == [{"attempt": 1, "reason": "document_changed_during_inference"}]
+
+
+@pytest.mark.parametrize('change', ['url', 'generation'])
+async def test_phase_identity_change_during_metadata_is_hard_failure_with_original_exception(change):
+    page = Page()
+    baseline = dict(page.document)
+    failure = ValueError('Original phase guard failure')
+    calls = []
+
+    def guard(document):
+        if document[change] != baseline[change]:
+            raise failure
+
+    async def infer():
+        calls.append('infer')
+        return [{"selector": "#confirm", "method": "click"}]
+
+    async def metadata(selector):
+        page.document[change] = 'https://test.checkout.dodopayments.com/different' if change == 'url' else 2
+        return {"present": True, "visible": True, "disabled": False, "tag": "BUTTON"}
+
+    with pytest.raises(ValueError) as caught:
+        await observe_fresh(page, BrowserPolicy('http://127.0.0.1:3300', 'dodo'), infer,
+                            metadata, document_guard=guard)
+    assert caught.value is failure
+    assert calls == ['infer']
+
+
+async def test_guard_observes_existing_documents_without_adding_browser_reads_or_changing_actions():
+    policy = BrowserPolicy('http://127.0.0.1:3300', 'dodo')
+    guarded_documents = []
+
+    class RecordingPage(Page):
+        def __init__(self):
+            super().__init__()
+            self.reads = []
+
+        async def evaluate(self, expression):
+            self.reads.append(expression)
+            return await super().evaluate(expression)
+
+    async def infer():
+        return [{"selector": "#confirm", "method": "click"}]
+
+    async def metadata(selector):
+        return {"present": True, "visible": True, "disabled": False, "tag": "BUTTON"}
+
+    unguarded, guarded = RecordingPage(), RecordingPage()
+    before = await observe_fresh(unguarded, policy, infer, metadata)
+    after = await observe_fresh(guarded, policy, infer, metadata,
+                               document_guard=lambda document: guarded_documents.append(dict(document)))
+    assert before == after
+    assert unguarded.reads == guarded.reads
+    assert guarded_documents

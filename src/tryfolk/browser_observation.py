@@ -8,7 +8,9 @@ def same_document(before, after):
     return all(before.get(k) == after.get(k) for k in ("url", "generation", "control_signature"))
 
 
-async def observe_fresh(page, policy, infer, control_state, *, timeout=170, max_attempts=3):
+async def observe_fresh(
+    page, policy, infer, control_state, *, timeout=170, max_attempts=3, document_guard=None,
+):
     deadline = asyncio.get_running_loop().time() + timeout
     discarded = []
 
@@ -24,6 +26,8 @@ async def observe_fresh(page, policy, infer, control_state, *, timeout=170, max_
     async def document():
         state = await read(lambda: page.evaluate(DOCUMENT_STATE))
         policy.check_url(state["url"])
+        if document_guard is not None:
+            document_guard(state)
         return state
 
     for attempt in range(1, max_attempts + 1):
