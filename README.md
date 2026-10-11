@@ -91,6 +91,16 @@ customization. Missing links, unknown source, unrelated checkouts and stale gene
 gated. Confirmation rechecks the frozen parent, payment, checkout and ownership before any
 native request is forwarded. Local routing fixtures do not prove provider settlement or access.
 
+An accepted native confirmation or bounded poll is tied to its exact CDP network ID,
+target, frame, loader and original request bytes. The response boundary reads a bounded
+UTF-8 JSON object before releasing the unchanged response to Chromium. Only its finite
+top-level `status` can supply the navigation hint. Entries-only request bodies are supported;
+inconsistent byte representations, changed ownership/documents, replayed responses and
+unknown schemas are denied. Independent identity uses the existing post-confirm receipt
+phase. Passive body reads cannot publish or erase this hint. Provider payment, matching
+account entitlement and browser download remain separate required checks; the local
+response-publication counterfactual is not genuine Dodo payment or full native SDK proof.
+
 Guard events retain separate boolean `parent_equality_facts` for complete links, origin,
 path, raw query, query pairs/order and document generations. These facts explain a denied
 parent without exposing provider routes or query values. They never enter the admission

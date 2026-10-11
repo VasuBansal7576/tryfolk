@@ -24,6 +24,7 @@ from .native_card import NativeCardAttempt, approved_redirect, binding
 from .native_card_observation import READ_CONTEXT, READ_CONTACT, browser_information
 from .browser_settlement import DOCUMENT_STATE
 from .checkout_navigation import CheckoutNavigation, NORMALIZER_SOURCE_SHA256, RETURN_SOURCE_SHA256, STATUS_SOURCE_SHA256, WALLET_SOURCE_SHA256, READ_NORMALIZATION_STATE
+from .native_response import NativeResponseCapture
 
 PUBLIC_SCRIPTS = (
     "https://sdk-v2.custom.hs.dodopayments.com/1.1.0/sdk.js",
@@ -231,7 +232,7 @@ class ResourceGuard:
         self.parent_reader = None
         self.protocol_reader = None
         self.native_protocol_readers = {}
-        self.select_native_protocol = self.return_protocol_reader = None
+        self.select_native_protocol = self.return_protocol_reader = self.response_protocol_reader = None
         self._native_protocol_target = self._native_protocol_url = None
         self._armed_protocol = self._confirmed_protocol = None
         self._confirmed_generation = self._confirmed_return = self._confirmed_normalization = None
@@ -252,6 +253,56 @@ class ResourceGuard:
         self._armed_payment_link = self._armed_parent_generation = None
         self._payment_response_task = None
         self._payment_response_pending = None
+        self.native_responses = NativeResponseCapture(BROWSER_API, self.verify_native_response, self.record_native_response)
+
+    def record_native_response(self, event):
+        self.events.append(event)
+        del self.events[:-200]
+        if self._payment_response_pending and not self._payment_response_pending.done():
+            self._payment_response_pending.set_result(None)
+
+    async def register_native_response(self, request, facts):
+        registered = bool(self._confirmed_protocol) and await self.native_responses.admit(
+            request, facts, self._confirmed_protocol, self.card_attempt, self.primary_response_target
+        )
+        if registered:
+            self._payment_response_pending = asyncio.get_running_loop().create_future()
+        return registered
+
+    async def verify_native_response(self, request, facts):
+        """Fresh server identity and continuously covered documents; no renderer read."""
+        capability, navigation = self.card_attempt, self.checkout_navigation
+        checks = {
+            "accepted_confirm_and_bounded_return_phase": bool(capability) and capability.return_phase_open(),
+            "confirmed_source_bound": self._confirmed_return_source_bound is True and bool(navigation)
+            and navigation.return_source_generation == self._confirmed_generation,
+            "confirmed_normalization_unchanged": bool(navigation)
+            and navigation._armed_normalization == self._confirmed_normalization,
+            "accepted_native_return_unchanged": bool(capability) and capability.return_url == self._confirmed_return,
+            "response_protocol_coverage_available": self.response_protocol_reader is not None,
+        }
+        if not all(checks.values()):
+            return checks
+        before = await self.response_protocol_reader()
+        live = self.combined_protocol_frames(before["main"]["frameTree"], before.get("native"))
+        checks["exact_confirmed_main_and_native_documents"] = live == self._confirmed_protocol
+        frame = request.frame
+        checks["same_current_direct_native_child"] = frame.url == capability.raw \
+            and frame.parent_frame == self.primary_page.main_frame and frame.parent_frame.url == capability.parent_url
+        if not all(checks.values()):
+            return checks
+        identity = await self.frame_verify({**frame_config(capability.raw), "operation": "poll"})
+        checks.update(self.owned_checkout_checks(identity))
+        checks.update({
+            "same_owned_payment": identity.get("payment_id") == capability.context["payment_id"],
+            "same_owned_checkout_session": identity.get("checkout_session_id") == capability.checkout_session_id,
+            "same_owned_payment_link": identity.get("payment_link") == self._armed_payment_link,
+        })
+        after = await self.response_protocol_reader()
+        checks["documents_unchanged_during_independent_identity_read"] = after == before
+        checks["native_child_unchanged_during_identity_read"] = frame.url == capability.raw \
+            and frame.parent_frame == self.primary_page.main_frame and frame.parent_frame.url == capability.parent_url
+        return checks
 
     def bind_owned_checkout_request(self, request):
         """Retain the single actual browser fetch, without forwarding it."""
@@ -763,25 +814,15 @@ class ResourceGuard:
                             "normalization_checks": normalization_checks})
 
     async def payment_response(self, response, facts):
-        try:
-            async with asyncio.timeout(5):
-                raw = await response.body()
-            if len(raw) > 200_000:
-                raise ValueError("Oversized native payment response")
-            import json
-            body = json.loads(raw)
-            if not isinstance(body, dict):
-                raise ValueError("Unknown native payment response")
-            if facts.get("operation") in ("confirm", "poll") and self.card_attempt:
-                error = body.get("error") if isinstance(body.get("error"), dict) else {}
-                self.card_attempt.observe_response(body.get("status"), response.status,
-                                                   operation=facts["operation"], error_code=error.get("code"))
-        except Exception:
-            if facts.get("operation") in ("confirm", "poll") and self.card_attempt:
-                self.card_attempt.observe_response(None, response.status, operation=facts["operation"])
-        finally:
-            if self._payment_response_pending and not self._payment_response_pending.done():
-                self._payment_response_pending.set_result(None)
+        # The actual admitted request is captured while its native response is
+        # paused, before renderer delivery. A passive body reader cannot publish
+        # or erase that status, including when it times out after navigation.
+        if facts.get("native_response_registered"):
+            return
+        # No legacy body-status fallback. Completion without an exact registered
+        # before-delivery capture leaves the navigation hint unavailable.
+        if self._payment_response_pending and not self._payment_response_pending.done():
+            self._payment_response_pending.set_result(None)
 
     def bootstrap_response(self, response):
         facts = self._bootstrap_requests.pop(id(response.request), None)
@@ -1110,11 +1151,12 @@ class ResourceGuard:
                                 facts["fresh_binding_failure"] = fresh_facts.get("first_failed_predicate")
                             consumed = fresh_facts["config_bound"] and self.card_attempt.consume(facts["operation"])
                             preflight_bound = binding(facts, "single_confirm_or_bounded_poll_consumed", consumed)
+                            if preflight_bound:
+                                preflight_bound = binding(facts, "exact_native_response_request_registered",
+                                                          await self.register_native_response(request, facts))
                             if not preflight_bound:
                                 facts["request_limit_exhausted"] = True
                         if preflight_bound:
-                            if facts.get("operation") in ("confirm", "poll") and request.method != "OPTIONS":
-                                self._payment_response_pending = asyncio.get_running_loop().create_future()
                             if startup:
                                 self._startup_configs.add(observed["config_id"])
                             if facts.get("operation") == "bootstrap":
@@ -1378,6 +1420,8 @@ class ResourceGuard:
         Extra pages/frames are denied at their initial document request.
         """
         request_id = event["requestId"]
+        if await self.native_responses.capture(session, event, **target):
+            return
         status = event.get("responseStatusCode", 0)
         headers = event.get("responseHeaders", [])
         locations = [h["value"] for h in headers if h["name"].lower() == "location"]

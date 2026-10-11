@@ -486,7 +486,7 @@ async def test_result_event_before_python_response_body_waits_for_existing_obser
     assert guard._payment_response_task.done() and guard.card_attempt.closed
 
 
-async def test_result_before_python_response_event_registration_waits_for_admitted_request(monkeypatch):
+async def test_unregistered_passive_response_does_not_grant_result_navigation(monkeypatch):
     import asyncio
 
     guard, page, child, state, identity, request = await return_fixture(monkeypatch)
@@ -503,9 +503,10 @@ async def test_result_before_python_response_event_registration_waits_for_admitt
         await guard.payment_response(SimpleNamespace(body=body, status=200), {"operation": "confirm"})
 
     task = asyncio.create_task(response_event())
-    assert (await guard.bind_return_navigation(request))[0]
+    admitted, facts = await guard.bind_return_navigation(request)
+    assert not admitted and facts["first_failed_predicate"] == "accepted_native_response_status"
     await task
-    assert guard.card_attempt.closed
+    assert guard.card_attempt.response_status is None
 
 
 @pytest.mark.parametrize(

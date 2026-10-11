@@ -87,3 +87,37 @@ async def test_response_boundary_binds_live_primary_frame_tree_without_runtime_e
     tree["frame"]["loaderId"] = "new_document"
     assert (await guard.protocol_reader())["frame"]["loaderId"] == "new_document"
     assert not any(method.startswith("Runtime.") for method in calls)
+
+
+async def test_response_attestation_tracks_native_child_without_renderer_commands_or_detach_fallback():
+    primary, calls, handlers = object(), [], {}
+    root = {"id": "primary", "loaderId": "parent", "url": "http://127.0.0.1:3300/"}
+    child = {"id": "child", "loaderId": "native", "url": "https://fixture.invalid/", "parentId": "primary"}
+
+    class Session:
+        async def send(self, method, args=None):
+            calls.append(method)
+            if method == "Target.getTargetInfo":
+                return {"targetInfo": {"targetId": "primary", "type": "page", "url": root["url"]}}
+            if method == "Page.getFrameTree":
+                return {"frameTree": {"frame": root, "childFrames": [{"frame": child}]}}
+            return {}
+
+        def on(self, name, callback):
+            handlers[name] = callback
+
+    class Context:
+        async def new_cdp_session(self, _):
+            return Session()
+
+    guard = SimpleNamespace(primary_page=primary, events=[], _native_protocol_target=None)
+    boundary = ResponseBoundary(Context(), guard)
+    assert await boundary.cover(primary)
+    await guard.protocol_reader()
+    calls.clear()
+    current = await guard.response_protocol_reader()
+    assert current["main"]["frameTree"]["childFrames"][0]["frame"] == child
+    assert all(method == "Target.getTargetInfo" for method in calls)
+    handlers["Page.frameDetached"]({"frameId": "child"})
+    current = await guard.response_protocol_reader()
+    assert current["main"]["frameTree"]["childFrames"] == []

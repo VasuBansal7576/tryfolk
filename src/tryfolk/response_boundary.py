@@ -1,6 +1,7 @@
 """Response interception on actual page and OOPIF targets, before private GET."""
 
 import asyncio
+import copy
 from .secure_frame import BROWSER_API
 from .native_preflight import NativePreflightGate
 from .protocol_identity import FrameIdentityCoverage
@@ -14,6 +15,7 @@ class ResponseBoundary:
         self.frame_targets = {}
         guard.select_native_protocol = self.select_native_protocol
         guard.return_protocol_reader = self.return_protocol_reader
+        guard.response_protocol_reader = self.response_protocol_reader
         if not hasattr(guard, "native_protocol_readers"):
             guard.native_protocol_readers = {}
         self.lock = asyncio.Lock()
@@ -44,6 +46,28 @@ class ResponseBoundary:
         after = await primary.attest(request.url, request.method)
         if before != after:
             raise ValueError("Primary protocol identity changed across native attestation.")
+        return {"main": before, "native": native}
+
+    async def response_protocol_reader(self):
+        """Live browser Target fences and exact continuous document events only."""
+        primary = self.coverages.get(self.guard.primary_response_target)
+        if not primary:
+            raise ValueError("Primary protocol coverage is unavailable.")
+        revision, frames = primary.revision, copy.deepcopy(primary.frames)
+        before = await primary.attest()
+        native = None
+        if self.guard._native_protocol_target:
+            coverage = self.coverages.get(self.guard._native_protocol_target)
+            if not coverage:
+                raise ValueError("Selected native protocol coverage is unavailable.")
+            native = await coverage.attest()
+        after = await primary.attest()
+        if before != after or revision != primary.revision or frames != primary.frames:
+            raise ValueError("Protocol documents changed across response attestation.")
+        root_id = before["frameTree"]["frame"]["id"]
+        before["frameTree"]["childFrames"] = [
+            {"frame": frame} for frame in frames.values() if frame.get("parentId") == root_id
+        ]
         return {"main": before, "native": native}
 
     async def cover(self, document):
@@ -91,6 +115,8 @@ class ResponseBoundary:
                 )
 
             async def network(event):
+                if hasattr(self.guard, "native_responses"):
+                    self.guard.native_responses.observe_network(event, target_id=target_id, target_type=target_type)
                 await self.preflights.observe(session, event, target_id=target_id, target_type=target_type)
 
             session.on("Fetch.requestPaused", response)

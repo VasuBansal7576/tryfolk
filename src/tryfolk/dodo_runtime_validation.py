@@ -31,6 +31,7 @@ ADAPTER_FILES = (
     "src/tryfolk/response_boundary.py",
     "src/tryfolk/protocol_identity.py",
     "src/tryfolk/native_preflight.py",
+    "src/tryfolk/native_response.py",
     "src/tryfolk/native_card.py",
     "src/tryfolk/native_card_observation.py",
     "src/tryfolk/native_read_observation.py",
