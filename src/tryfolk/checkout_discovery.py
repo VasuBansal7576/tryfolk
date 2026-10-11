@@ -1,6 +1,6 @@
 """Read-only diagnostic candidate discovery with closed, value-free evidence.
 
-This preserves the capture driver's priorities and eligibility rules. It cannot
+This preserves the capture driver's priorities and approved controls. It cannot
 execute actions, verify native readiness, retry reads or extend a deadline.
 """
 
@@ -81,7 +81,7 @@ class CandidateDiscovery:
 
 async def discover_checkout_candidates(
     snapshot, read_control, policy, url, *, filled, completed_cards, clicked,
-    phase, pay_actions=0,
+    phase, pay_actions=0, executed_fields=frozenset(),
 ):
     if phase not in PHASES:
         raise ValueError("Unknown diagnostic checkout phase")
@@ -142,10 +142,15 @@ async def discover_checkout_candidates(
                     )
             except ValueError:
                 pass
+            if field in result.filled and not current_completion:
+                result.current_completion_conflicts.add(field)
+                reject("prior_completion_currently_unverified")
+                if field in executed_fields:
+                    raise ExecutedFieldChanged(field, result)
+                result.filled.discard(field)
+                result.completed_cards.pop(field, None)
             if field in result.filled:
-                if not current_completion:
-                    result.current_completion_conflicts.add(field)
-                reject("completed_field" if current_completion else "prior_completion_currently_unverified")
+                reject("completed_field")
                 continue
             priority, eligible = PRIORITIES[field], field
         elif kind in ("login", "purchase"):
@@ -185,3 +190,12 @@ async def discover_checkout_candidates(
         result.candidates.append((priority, action))
         result.eligible_counts[eligible] += 1
     return result
+
+
+class ExecutedFieldChanged(ValueError):
+    """A changed previously executed control stops rather than repeating a fill."""
+
+    def __init__(self, field, discovery):
+        self.field = field
+        self.discovery = discovery
+        super().__init__("Previously executed checkout field no longer verifies")

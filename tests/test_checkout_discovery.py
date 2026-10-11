@@ -177,7 +177,7 @@ async def test_default_india_offers_approved_us_selection_before_manual_address(
     assert facts["rejection_counts"]["disabled_control"] == 2
 
 
-async def test_prior_country_completion_conflicting_with_current_india_has_explicit_reason():
+async def test_stale_observed_country_completion_offers_current_approved_selection():
     async def read(selector):
         return {
             "present": True, "visible": True, "tag": "SELECT", "label": "Country",
@@ -194,6 +194,28 @@ async def test_prior_country_completion_conflicting_with_current_india_has_expli
     assert facts["rejection_counts"]["prior_completion_currently_unverified"] == 1
     assert facts["observed_fields"]["country"] is True
     assert facts["current_completion_conflicts"]["country"] is True
-    # Diagnostics preserve the retained algorithm; this is a disclosed stale
-    # bookkeeping fixture, not a reason to execute an already executed action.
-    assert discovery.candidates == []
+    assert facts["committed_completion"]["country"] is False
+    assert [(priority, action["_tryfolk"]["field"]) for priority, action in discovery.candidates] == [(2, "country")]
+    assert discovery.candidates[0][1]["arguments"] == ["US"]
+
+
+async def test_changed_executed_country_stops_without_repeating_the_action():
+    import pytest
+    from tryfolk.checkout_discovery import ExecutedFieldChanged
+
+    async def read(selector):
+        return {
+            "present": True, "visible": True, "tag": "SELECT", "label": "Country",
+            "value": "IN", "options": ["IN", "US"], "destination": URL,
+        }
+
+    with pytest.raises(ExecutedFieldChanged) as stopped:
+        await discover_checkout_candidates(
+            {"xpath_map": {"0": "/html[1]/body[1]/select[1]"}}, read,
+            BrowserPolicy("http://127.0.0.1:3300", "dodo"), URL,
+            filled={"country", "address"}, executed_fields={"country"},
+            completed_cards={}, clicked={"manual"}, phase="primary_billing",
+        )
+    assert stopped.value.field == "country"
+    assert stopped.value.discovery.evidence(document_stable=False)["current_completion_conflicts"]["country"] is True
+    assert stopped.value.discovery.candidates == []
