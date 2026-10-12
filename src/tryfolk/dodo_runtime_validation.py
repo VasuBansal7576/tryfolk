@@ -45,6 +45,12 @@ ADAPTER_FILES = (
     "src/tryfolk/scenario_evidence.py",
     "src/tryfolk/scenarios.py",
     "src/tryfolk/verification.py",
+    "src/tryfolk/bulk_personas.py",
+    "src/tryfolk/bulk_policy.py",
+    "src/tryfolk/runtime.py",
+    "src/tryfolk/worker.py",
+    "integrations/tinytroupe/adapter.py",
+    "integrations/tinytroupe/bulk_adapter.py",
 )
 
 
