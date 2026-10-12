@@ -36,6 +36,9 @@ def main():
             value["inspection_evidence_sha256"], value["native_ledger_snapshot"]["evidence_sha256"],
             *(p["evidence_sha256"] for p in value["assumption_provenance"].values()),
         }
+        if value.get("operator_allocation"):
+            required_hashes.update(value["operator_allocation"][k] for k in
+                                   ("evidence_sha256", "native_forecast_sha256"))
         if not required_hashes <= supplied_hashes:
             raise ValueError("Inspected evidence files must match all forecast and native ledger evidence hashes.")
     except (OSError, ValueError, TypeError) as error:

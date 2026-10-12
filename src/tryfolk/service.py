@@ -188,6 +188,8 @@ class Service:
                 "basis": "estimated execution allowance",
                 "funded_credit_microusd": None,
                 "incremental_cash_authorized": False,
+                **({"allocation": costs["plan"]["operator_allocation"]}
+                   if costs["plan"] and costs["plan"].get("operator_allocation") else {}),
             },
             "execution_allowances": costs["caps"],
             "available_microusd": available,

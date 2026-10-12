@@ -75,7 +75,61 @@ def validate_plan(value):
             or sum(ledger[k] for k in balances) != assumptions["lifetime_budget_microusd"]
         ):
             raise ValueError("Native ledger snapshot must reconcile consumed + held + available to lifetime cap.")
+    if "operator_allocation" in value:
+        validate_operator_allocation(value)
     return value
+
+
+def validate_operator_allocation(plan):
+    """A separately authorized allocation never rewrites native CFO history or rates."""
+    allocation = plan["operator_allocation"]
+    keys = {
+        "basis", "reference", "authorized_at", "evidence_sha256", "native_forecast_sha256",
+        "native_forecast_source_url", "native_forecast_inspected_at", "native_forecast_completed",
+        "native_pair_overhead_microusd", "cohorts", "additional_microusd",
+        "lifetime_budget_microusd", "quote_budget_microusd", "funded_credit_microusd",
+        "incremental_cash_authorized",
+    }
+    if (
+        plan.get("schema_version") != 2 or not isinstance(allocation, dict) or set(allocation) != keys
+        or allocation["basis"] != "operator_derived_scheduler_estimate_not_ari_approval_or_funded_credit"
+        or not isinstance(allocation["reference"], str) or not allocation["reference"].strip()
+        or not timestamp(allocation["authorized_at"]) or not timestamp(allocation["native_forecast_inspected_at"])
+        or not digest(allocation["evidence_sha256"]) or not digest(allocation["native_forecast_sha256"])
+        or allocation["native_forecast_source_url"] != plan["source_url"]
+        or allocation["native_forecast_completed"] is not True
+        or allocation["incremental_cash_authorized"] is not False
+        or allocation["funded_credit_microusd"] is not None
+    ):
+        raise ValueError("Operator allocation requires separate authorization and inspected native forecast evidence; no cash or funded credit.")
+    values = plan["assumptions"]
+    overhead = sum(max(floor, values[k]) for k, floor in SCHEDULER_CAPS.items())
+    if type(allocation["native_pair_overhead_microusd"]) is not int or allocation["native_pair_overhead_microusd"] != overhead:
+        raise ValueError("Operator allocation must retain the exact native pair overhead and stricter scheduler floors.")
+    cohorts = allocation["cohorts"]
+    if not isinstance(cohorts, list) or not 1 <= len(cohorts) <= 1000:
+        raise ValueError("Operator allocation requires complete bounded before/after cohort forecasts.")
+    counts, reserves = set(), []
+    for cohort in cohorts:
+        if (
+            not isinstance(cohort, dict) or set(cohort) != {"persona_count", "reserved_microusd"}
+            or type(cohort["persona_count"]) is not int or not 1 <= cohort["persona_count"] <= 1000
+            or cohort["persona_count"] in counts or type(cohort["reserved_microusd"]) is not int
+        ):
+            raise ValueError("Each operator forecast needs a distinct unchanged integer N and both-pass reservation.")
+        counts.add(cohort["persona_count"])
+        subtotal = cohort["persona_count"] * sum(values[k] for k in PERSONA_FIELDS) + overhead
+        reserve = subtotal + contingency(subtotal, values["contingency_basis_points"])
+        if cohort["reserved_microusd"] != reserve:
+            raise ValueError("Operator forecast cannot discount native rates, overhead or whole-pair contingency.")
+        reserves.append(reserve)
+    expected = {
+        "additional_microusd": sum(reserves),
+        "lifetime_budget_microusd": values["lifetime_budget_microusd"] + sum(reserves),
+        "quote_budget_microusd": max(reserves),
+    }
+    if any(type(allocation[k]) is not int or allocation[k] != v for k, v in expected.items()):
+        raise ValueError("Operator lifetime ceiling must add complete new forecasts to preserved historical ceiling; per-quote ceiling is separate.")
 
 
 def load_plan(path: Path | None):
@@ -92,6 +146,7 @@ def allowance(settings, count):
     plan = load_plan(settings.cfo_plan_path)
     v2 = bool(plan and plan.get("schema_version") == 2)
     values = plan["assumptions"] if plan else {}
+    allocation = plan.get("operator_allocation") if plan else None
     before = count * max(settings.per_persona_microusd, values.get("before_per_persona_microusd", 0))
     after = count * max(settings.per_persona_microusd, values.get("after_per_persona_microusd", 0))
     caps = {
@@ -109,8 +164,9 @@ def allowance(settings, count):
     after_base = after + caps["known_replay_microusd"] if v2 else after
     after_extra = contingency(after_base, bps)
     legacy_limit = min(settings.budget_microusd, values.get("event_budget_microusd", settings.budget_microusd))
-    lifetime_limit = min(settings.budget_microusd, values["lifetime_budget_microusd"]) if v2 else legacy_limit
-    quote_limit = min(settings.budget_microusd, values["quote_budget_microusd"]) if v2 else legacy_limit
+    ceilings = allocation or values
+    lifetime_limit = min(settings.budget_microusd, ceilings["lifetime_budget_microusd"]) if v2 else legacy_limit
+    quote_limit = min(settings.budget_microusd, ceilings["quote_budget_microusd"]) if v2 else legacy_limit
     comparison = None
     if v2:
         native_subtotal = count * (
@@ -123,6 +179,7 @@ def allowance(settings, count):
             "native_overhead_caps": {k: values[k] for k in OVERHEAD_FIELDS},
             "native_ledger_snapshot": plan["native_ledger_snapshot"],
             "basis": "Inspected forecast, compared with current scheduler ledger; native available is not a lifetime cap.",
+            **({"operator_allocation": allocation} if allocation else {}),
         }
     return {
         "before": before, "after": after, "overhead": overhead, "subtotal": subtotal,
@@ -133,7 +190,8 @@ def allowance(settings, count):
         "caps": {**caps, "before_per_persona_microusd": before // count if count else settings.per_persona_microusd,
                  "after_per_persona_microusd": after // count if count else settings.per_persona_microusd},
         "status": "imported" if plan else "missing",
-        "basis": "CFO plan forecast compared with stricter scheduler ceilings" if plan else
+        "basis": "CFO plan rates with separately authorized operator-derived allocation; native history retained" if allocation else
+                 "CFO plan forecast compared with stricter scheduler ceilings" if plan else
                  "non-CFO local estimate; zero incremental API billing",
         "plan": plan, "forecast_comparison": comparison,
     }

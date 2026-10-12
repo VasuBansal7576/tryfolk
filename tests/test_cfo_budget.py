@@ -314,3 +314,60 @@ def test_operator_forecast_ceiling_is_disclosed_and_cannot_bypass_inspected_cfo_
     assert issued["affordable"] is False
     assert start(client, issued, "operator-is-not-cfo-approval").status_code == 402
     assert quote(client, 1)["ledger"] == {"estimated_consumed_microusd": 0, "held_microusd": 0}
+
+
+def allocated_plan():
+    plan = finalized_plan(quote_budget_microusd=450_000)
+    plan["operator_allocation"] = {
+        "basis": "operator_derived_scheduler_estimate_not_ari_approval_or_funded_credit",
+        "reference": "Unit fixture owner allocation, no cash or model execution",
+        "authorized_at": "2026-10-12T11:21:00+00:00", "evidence_sha256": "c" * 64,
+        "native_forecast_sha256": "d" * 64, "native_forecast_source_url": plan["source_url"],
+        "native_forecast_inspected_at": "2026-10-12T11:21:00+00:00",
+        "native_forecast_completed": True, "native_pair_overhead_microusd": 60_000,
+        "cohorts": [{"persona_count": n, "reserved_microusd": amount} for n, amount in
+                    ((100, 4_872_000), (500, 24_072_000), (1000, 48_072_000))],
+        "additional_microusd": 77_016_000, "lifetime_budget_microusd": 78_016_000,
+        "quote_budget_microusd": 48_072_000, "funded_credit_microusd": None,
+        "incremental_cash_authorized": False,
+    }
+    return plan
+
+
+def test_explicit_owner_allocation_retains_native_history_and_both_pass_prices(tmp_path):
+    base = client_at(tmp_path / "runs.sqlite", budget=78_016_000)
+    base = TestClient(create_app(replace(base.app.state.service.settings, max_personas=1000)))
+    plan = allocated_plan()
+    client = client_with_plan(base, tmp_path / "plan.json", plan)
+    for n, reserve in ((100, 4_872_000), (500, 24_072_000), (1000, 48_072_000)):
+        issued = quote(client, n)
+        assert issued["persona_count"] == n and issued["reserved_microusd"] == reserve
+        assert issued["before_microusd"] == issued["after_microusd"] == n * 20_000
+        assert issued["lifetime_limit_microusd"] == 78_016_000
+        assert issued["quote_limit_microusd"] == 48_072_000 and issued["affordable"] is True
+        assert issued["cfo_plan"]["native_ledger_snapshot"] == plan["native_ledger_snapshot"]
+        assert issued["cfo_plan"]["assumptions"]["lifetime_budget_microusd"] == 1_000_000
+        assert issued["operator_forecast"]["allocation"] == plan["operator_allocation"]
+        assert "operator-derived" in issued["estimate_basis"]
+    accepted = start(client, quote(client, 100), "fixture-bulk-reserve").json()
+    status = client.get(f"/runs/{accepted['id']}", headers=auth(accepted)).json()
+    assert status["budget"]["reserved_microusd"] == 4_872_000
+    assert status["after_reserve_microusd"] == 2_412_000
+
+
+@pytest.mark.parametrize("field,value", [
+    ("additional_microusd", 77_000_000), ("lifetime_budget_microusd", 77_566_000),
+    ("quote_budget_microusd", 78_016_000), ("native_forecast_completed", False),
+    ("native_pair_overhead_microusd", 50_000), ("incremental_cash_authorized", True),
+    ("funded_credit_microusd", 77_016_000), ("native_forecast_source_url", "https://example.invalid"),
+    ("native_forecast_sha256", "invalid"), ("cohorts", [{"persona_count": True, "reserved_microusd": 120_000}]),
+])
+def test_invalid_operator_allocation_cannot_open_budget_or_create_jobs(tmp_path, field, value):
+    base = client_at(tmp_path / "runs.sqlite", budget=78_016_000)
+    plan = allocated_plan()
+    plan["operator_allocation"][field] = value
+    client = client_with_plan(base, tmp_path / "plan.json", plan)
+    response = client.post("/quotes", json={"app_url": "http://127.0.0.1:3100", "persona_count": 1})
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "cfo_export_invalid"
+    assert quote(base, 1)["ledger"] == {"estimated_consumed_microusd": 0, "held_microusd": 0}
