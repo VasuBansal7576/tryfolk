@@ -296,3 +296,21 @@ def test_replay_rejects_a_caller_supplied_population_count(tmp_path):
     )
     assert response.status_code == 422
     assert response.json()["detail"][0]["loc"] == ["body", "persona_count"]
+
+
+def test_operator_forecast_ceiling_is_disclosed_and_cannot_bypass_inspected_cfo_cap(tmp_path):
+    base = client_at(tmp_path / "runs.sqlite", budget=77_016_000)
+    base = TestClient(create_app(replace(base.app.state.service.settings, max_personas=1000)))
+    client = client_with_plan(base, tmp_path / "plan.json", finalized_plan())
+    issued = quote(client, 100)
+    assert issued["operator_forecast"] == {
+        "ceiling_microusd": 77_016_000, "basis": "estimated execution allowance",
+        "funded_credit_microusd": None, "incremental_cash_authorized": False,
+    }
+    assert issued["persona_count"] == 100
+    assert issued["before_microusd"] == issued["after_microusd"] == 2_000_000
+    assert issued["reserved_microusd"] == 4_872_000
+    assert issued["lifetime_limit_microusd"] == issued["quote_limit_microusd"] == 1_000_000
+    assert issued["affordable"] is False
+    assert start(client, issued, "operator-is-not-cfo-approval").status_code == 402
+    assert quote(client, 1)["ledger"] == {"estimated_consumed_microusd": 0, "held_microusd": 0}

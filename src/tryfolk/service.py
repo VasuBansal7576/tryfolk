@@ -183,6 +183,12 @@ class Service:
             "lifetime_available_microusd": lifetime_available,
             "ledger": self.ledger(db),
             "forecast_comparison": costs["forecast_comparison"],
+            "operator_forecast": {
+                "ceiling_microusd": self.settings.budget_microusd,
+                "basis": "estimated execution allowance",
+                "funded_credit_microusd": None,
+                "incremental_cash_authorized": False,
+            },
             "execution_allowances": costs["caps"],
             "available_microusd": available,
             "currency": "USD",
