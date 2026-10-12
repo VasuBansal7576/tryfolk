@@ -239,7 +239,7 @@ async def test_manual_effect_current_field_failure_retains_closed_diagnostics_wi
                 "ready_state": "complete", "busy": False, "document_stable": True}
     manual = policy.bind(
         {"method": "click", "selector": "xpath=/html[1]/body[1]/button[1]", "arguments": []},
-        {"present": True, "visible": True, "tag": "BUTTON", "label": "Enter address manually",
+        {"present": True, "visible": True, "tag": "BUTTON", "label": "Enter address manually", "center_hit_self": True,
          "destination": URL}, URL,
     )
     repeats = []
@@ -312,7 +312,7 @@ async def test_manual_mode_after_address_search_requires_the_real_billing_addres
                 "ready_state": "complete", "busy": False, "document_stable": True}
     manual = policy.bind(
         {"method": "click", "selector": "xpath=/html[1]/body[1]/button[1]", "arguments": []},
-        {"present": True, "visible": True, "tag": "BUTTON", "label": "Enter address manually",
+        {"present": True, "visible": True, "tag": "BUTTON", "label": "Enter address manually", "center_hit_self": True,
          "destination": URL}, URL,
     )
 
@@ -369,7 +369,7 @@ async def test_current_open_manual_form_resolves_with_residual_affordances_witho
         }
     for index, label in enumerate(labels, start=1):
         controls[f"xpath=/html[1]/body[1]/button[{index}]"] = {
-            "present": True, "visible": True, "tag": "BUTTON", "label": label,
+            "present": True, "visible": True, "tag": "BUTTON", "label": label, "center_hit_self": True,
             "destination": URL,
         }
 

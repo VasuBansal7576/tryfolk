@@ -162,6 +162,8 @@ class BrowserPolicy:
                 and control.get("tag") == "BUTTON"
                 and re.fullmatch(r"enter (?:address )?manually", str(control.get("label") or "").strip(), re.I)
             ):
+                if control.get("center_hit_self") is not True:
+                    raise ValueError("Manual control must be freshly hittable in the current document.")
                 metadata["diagnostic_manual"] = True
                 metadata["manual_variant"] = (
                     "enter_manually" if str(control["label"]).strip().lower() == "enter manually"

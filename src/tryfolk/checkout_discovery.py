@@ -32,6 +32,7 @@ POLICY_REJECTIONS = {
     "Browser left the exact registered app or approved Dodo test checkout origin.": "policy_origin_unapproved",
     "Action is not bound to the current observed document.": "policy_document_binding",
     "Action left the exact observed secure card frame contract.": "policy_action_frame",
+    "Manual control must be freshly hittable in the current document.": "manual_control_not_hittable",
     "Browser action contains an unapproved value or method.": "policy_action_value",
 }
 REJECTIONS = (
@@ -47,6 +48,44 @@ REJECTIONS = (
 
 def completion_flags(fields):
     return {field: field in fields for field in PRIORITIES}
+
+
+async def include_snapshot_manual_choices(proposed, snapshot, read_control, policy, url):
+    """Supplement inference only with freshly bound SDK-observed manual buttons.
+
+    The existing observation deadline and final document check cover these
+    passive reads. A popup footer supersedes its covered outer opener; this
+    function never acts, retries or supplies a fabricated XPath.
+    """
+    choices, outer_selectors, popup_inner = [], set(), []
+    for path in dict.fromkeys(snapshot.get("xpath_map", {}).values()):
+        if "/iframe[" in path or not re.search(r"/button\[\d+\]$", path):
+            continue
+        selector = "xpath=" + path
+        control = await read_control(selector)
+        label = str(control.get("label") or "").strip()
+        if control.get("tag") != "BUTTON" or not re.fullmatch(r"enter (?:address )?manually", label, re.I):
+            continue
+        if label.lower() == "enter address manually":
+            outer_selectors.add(selector)
+        try:
+            action = policy.bind({"selector": selector, "method": "click", "arguments": [],
+                                  "description": "Fresh SDK-observed manual address choice"}, control, url)
+        except ValueError:
+            continue
+        if not action["_tryfolk"].get("diagnostic_manual"):
+            continue
+        choices.append(action)
+        if action["_tryfolk"]["manual_variant"] == "enter_manually" and control.get("popup_ancestor") is True:
+            popup_inner.append(selector)
+    selected, seen = [], set()
+    for action in [*proposed, *choices]:
+        selector = action.get("selector")
+        if selector in seen or (len(popup_inner) == 1 and selector in outer_selectors):
+            continue
+        seen.add(selector)
+        selected.append(action)
+    return selected
 
 
 @dataclass

@@ -30,7 +30,7 @@ from tryfolk.checkout_timing import CheckoutTiming
 from tryfolk.browser_events import EventCapture
 from tryfolk.payment_privacy import redact_payment
 from tryfolk.native_read_observation import NativeControlReads
-from tryfolk.checkout_discovery import discover_checkout_candidates
+from tryfolk.checkout_discovery import discover_checkout_candidates, include_snapshot_manual_choices
 from tryfolk.manual_address import ManualAddressGate, read_current_manual_controls, resolve_manual_address, wait_for_billing_initialization
 from tryfolk.pre_submission import adapter_safety
 
@@ -47,7 +47,9 @@ def private_evidence(label, data):
 CONTROL_STATE = """(selector) => {
  const el = selector.startsWith('xpath=') ? document.evaluate(selector.slice(6), document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue : document.querySelector(selector);
  if (!el) return {present:false,reason:'missing_control'};
- return {present:true,visible:!!el.getClientRects().length && getComputedStyle(el).visibility!=='hidden',disabled:!!el.disabled || el.getAttribute('aria-disabled')==='true',tag:el.tagName,type:el.type,autocomplete:el.autocomplete,role:el.getAttribute('role'),aria_autocomplete:el.getAttribute('aria-autocomplete'),label:[...(el.labels || [])].map(x=>x.innerText).join(' ') || el.innerText || el.getAttribute('aria-label'),in_main:!!el.closest('main'),placeholder:el.placeholder,name:el.name,id:el.id,value:el.value,required:el.required,options:el.options ? [...el.options].map(x=>x.value):[],download:el.download,destination:el.href || el.formAction || el.form?.action || location.href,frame_url:location.href,frame_generation:performance.timeOrigin};
+ const r=el.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
+ const centerHit=r.width>0&&r.height>0&&!!hit&&(hit===el||el.contains(hit));
+ return {present:true,center_hit_self:centerHit,popup_ancestor:!!el.closest('[data-radix-popper-content-wrapper],[role=dialog],[role=menu],[role=listbox]'),visible:!!el.getClientRects().length && getComputedStyle(el).visibility!=='hidden',disabled:!!el.disabled || el.getAttribute('aria-disabled')==='true',tag:el.tagName,type:el.type,autocomplete:el.autocomplete,role:el.getAttribute('role'),aria_autocomplete:el.getAttribute('aria-autocomplete'),label:[...(el.labels || [])].map(x=>x.innerText).join(' ') || el.innerText || el.getAttribute('aria-label'),in_main:!!el.closest('main'),placeholder:el.placeholder,name:el.name,id:el.id,value:el.value,required:el.required,options:el.options ? [...el.options].map(x=>x.value):[],download:el.download,destination:el.href || el.formAction || el.form?.action || location.href,frame_url:location.href,frame_generation:performance.timeOrigin};
 }"""
 
 
@@ -298,7 +300,14 @@ async def run(stack):
                                 "actual_sdk_response": observed.model_dump(mode="json"),
                             },
                         )
-                        return [item.model_dump(mode="json") for item in observed.data]
+                        proposed = [item.model_dump(mode="json") for item in observed.data]
+                        if policy.provider == "dodo" and exact_origin(await page.url()) == DODO_CHECKOUT:
+                            snapshot = (await page.snapshot(include_iframes=True, timeout=10000)).model_dump(mode="json")
+                            proposed = await include_snapshot_manual_choices(
+                                proposed, snapshot, lambda selector: control_state(page, selector, network_page, guard),
+                                policy, await page.url(),
+                            )
+                        return proposed
 
                     async def metadata(selector):
                         boundary.update(call="control_state", selector=selector)
