@@ -43,6 +43,7 @@ let connectionEpoch = 0;
 let run: Run | null = null;
 let findings: Finding[] = [];
 let findingsError = '';
+let findingsRunId: string | null = null;
 let savedRuns = loadRuns();
 let appUrl = '';
 let personaCount = '10';
@@ -143,7 +144,7 @@ function renderBaselineRetryQuote(quote: BaselineRetryQuote, original: Run): voi
 }
 function renderBaselineRetryEntry(current: Run): string {
   if (current.provider !== 'dodo' || current.pass !== 'before' || current.phase !== 'blocked' || current.baseline_retry || current.retry_of_run_id) return '';
-  const reason = baselineRetryBlocker(current, owner, !findingsError, findings.length > 0);
+  const reason = baselineRetryBlocker(current, owner, findingsRunId === current.id && !findingsError, findings.length > 0);
   return `<section class="baseline-retry-entry"><h2>Try the saved customers again</h2><p>A baseline retry creates a distinct initial attempt with all ${number(current.persona_count)} saved customers. The original blocker, steps and estimated use remain in history.</p><p>Review a new budget for both this retry and its same-customer after pass. Approval releases only the old unused hold and reserves the new allowance together.</p><button class="secondary" data-action="baseline-retry-quote" ${busy || !!reason || !!pendingRequest() ? 'disabled' : ''}>Review saved-customer retry budget</button>${reason ? `<p class="small muted">${escape(reason)}</p>` : '<p class="small muted">The service must verify this attempt’s pre-submission safety receipt. Legacy attempts require the owner’s reviewed evidence. An absent outcome does not prove payment safety.</p>'}</section>`;
 }
 function renderSetup(): void {
@@ -400,7 +401,7 @@ async function submitSavedRequest(): Promise<void> {
   }
 }
 async function openRun(entry: SavedRun, initial?: Run): Promise<void> {
-  stopPolling(); closeModal(); error = ''; pollError = ''; findings = []; findingsError = '';
+  stopPolling(); closeModal(); error = ''; pollError = ''; findings = []; findingsError = ''; findingsRunId = null;
   catalogState = { kind: 'loading' };
   view = { kind: 'run', id: entry.id };
   location.hash = `run=${encodeURIComponent(entry.id)}`;
@@ -409,7 +410,7 @@ async function openRun(entry: SavedRun, initial?: Run): Promise<void> {
 }
 async function refreshFindings(id: string, token: string): Promise<void> {
   const epoch = pollEpoch;
-  try { const result = await api.findings(id, token); if (epoch === pollEpoch && view.kind === 'run' && view.id === id) { findings = result.findings; findingsError = ''; } }
+  try { const result = await api.findings(id, token); if (epoch === pollEpoch && view.kind === 'run' && view.id === id) { findings = result.findings; findingsError = ''; findingsRunId = id; } }
   catch (value) { if (epoch === pollEpoch && view.kind === 'run' && view.id === id) findingsError = errorMessage(value); }
 }
 async function refreshScenarioCatalog(current: Run, epoch: number): Promise<void> {
@@ -440,9 +441,10 @@ async function pollRun(epoch: number, initial?: Run): Promise<void> {
     if (entry.parentRunId !== next.parent_run_id) remember(next, entry.token);
     const previousFindings = JSON.stringify(findings);
     const previousError = findingsError;
-    if (nextFindings.kind === 'ready') { findings = nextFindings.findings; findingsError = ''; }
+    const previousFindingsRunId = findingsRunId;
+    if (nextFindings.kind === 'ready') { findings = nextFindings.findings; findingsError = ''; findingsRunId = id; }
     else findingsError = errorMessage(nextFindings.error);
-    if (changed || previousFindings !== JSON.stringify(findings) || previousError !== findingsError) { render(); if (modal?.kind === 'person' || modal?.kind === 'person-trace') renderModal(); }
+    if (changed || previousFindings !== JSON.stringify(findings) || previousError !== findingsError || previousFindingsRunId !== findingsRunId) { render(); if (modal?.kind === 'person' || modal?.kind === 'person-trace') renderModal(); }
     if (catalogEpoch !== epoch) void refreshScenarioCatalog(next, epoch);
     if (isActive(next) || next.repair?.status === 'queued' || next.repair?.status === 'running') pollTimer = setTimeout(() => void pollRun(epoch), 1000);
   } catch (value) {
@@ -524,7 +526,7 @@ async function action(name: string, id: string): Promise<void> {
       const original = view.kind === 'baseline-retry-quote' ? view.original : view.kind === 'run' && run?.id === view.id ? run : null;
       if (!original) break;
       if (pendingRequest()) { openModal({ kind: 'pending' }); break; }
-      const reason = baselineRetryBlocker(original, owner, !findingsError, findings.length > 0);
+      const reason = baselineRetryBlocker(original, owner, findingsRunId === original.id && !findingsError, findings.length > 0);
       if (reason) { error = reason; render(); break; }
       const sourceView = view;
       await mutate(async () => {
