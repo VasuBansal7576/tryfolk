@@ -94,8 +94,8 @@ async def bounded_journeys(personas, execute, persist, *, concurrency=1, reviewe
     persist must retain actual returned evidence, not substitute model or fixture success.
     The review flag is an explicit caller prerequisite, not evidence of provider safety.
     """
-    if type(concurrency) is not int or not 1 <= concurrency <= 4:
-        raise ValueError("Browser callback concurrency must be an integer from one to four.")
+    if type(concurrency) is not int or not 1 <= concurrency <= 10:
+        raise ValueError("Browser callback concurrency must be an integer from one to ten.")
     if concurrency > 1 and not reviewed_guard_boundary:
         raise ValueError("Parallel execution requires a reviewed provider/SDK guard boundary.")
     ids = [persona["persona_id"] for persona in personas]

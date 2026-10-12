@@ -55,8 +55,8 @@ class Settings:
     def __post_init__(self):
         if type(self.bulk_execution) is not bool:
             raise ValueError("TRYFOLK_BULK_EXECUTION must be true or false.")
-        if type(self.browser_concurrency) is not int or not 1 <= self.browser_concurrency <= 4:
-            raise ValueError("TRYFOLK_BROWSER_CONCURRENCY must be a whole number from 1 to 4.")
+        if type(self.browser_concurrency) is not int or not 1 <= self.browser_concurrency <= 10:
+            raise ValueError("TRYFOLK_BROWSER_CONCURRENCY must be a whole number from 1 to 10.")
         if type(self.max_personas) is not int or not 1 <= self.max_personas <= 1000:
             raise ValueError("TRYFOLK_MAX_PERSONAS must be a whole number from 1 to 1000.")
 
@@ -72,7 +72,7 @@ class Settings:
         if bulk_execution not in ("true", "false"):
             raise ValueError("TRYFOLK_BULK_EXECUTION must be true or false.")
         if not concurrency.isascii() or not concurrency.isdecimal():
-            raise ValueError("TRYFOLK_BROWSER_CONCURRENCY must be a whole number from 1 to 4.")
+            raise ValueError("TRYFOLK_BROWSER_CONCURRENCY must be a whole number from 1 to 10.")
         connection_file = Path(os.environ.get("TRYFOLK_CONNECTIONS", "runtime/connections.json"))
         targets = (
             tuple(Target(**x) for x in json.loads(connection_file.read_text()))

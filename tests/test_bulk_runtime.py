@@ -9,7 +9,7 @@ from test_api import quote, start, auth
 from test_worker import FixtureIO
 
 
-@pytest.mark.parametrize('value', [0, 5, True, '2'])
+@pytest.mark.parametrize('value', [0, 11, True, '2'])
 def test_browser_capacity_is_bounded(value):
     with pytest.raises(ValueError):
         Settings(browser_concurrency=value)
