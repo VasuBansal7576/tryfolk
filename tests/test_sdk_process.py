@@ -6,6 +6,65 @@ import pytest
 import tryfolk.process as transport
 
 
+@pytest.mark.parametrize("configured", [None, "relative-evidence"])
+async def test_native_failure_binds_private_bytes_with_unset_or_relative_evidence_root(
+    tmp_path, monkeypatch, configured,
+):
+    """Real subprocess, invented native error; no SDK/provider/model operation."""
+    from types import SimpleNamespace
+    from tryfolk.runtime import Runtime
+    from tryfolk.pre_submission import runtime_gate
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(transport, "ROOT", tmp_path / "owned")
+    monkeypatch.delenv("NEATLOGS_API_KEY", raising=False)
+    if configured is None:
+        monkeypatch.delenv("TRYFOLK_EVIDENCE_ROOT", raising=False)
+    else:
+        monkeypatch.setenv("TRYFOLK_EVIDENCE_ROOT", configured)
+    runtime = Runtime(SimpleNamespace())
+    original_spawn = asyncio.create_subprocess_exec
+    script = '''import os,json,sys
+from pathlib import Path
+sys.stdin.readline()
+root=Path(os.environ.get('TRYFOLK_EVIDENCE_ROOT','runtime/evidence'))
+root.mkdir(parents=True,exist_ok=True)
+raw={'stage':'manual_address','reason':'manual_document_unstable',
+ 'financial_submission_started':False,'financial_poll_started':False,
+ 'owned_origin':'http://127.0.0.1:3301',
+ 'checkout_origin':'https://test.checkout.dodopayments.com'}
+path=root/'stagehand-error-fixture.json'
+path.write_text(json.dumps({'error_type':'ManualAddressGate','pre_submission_evidence':raw}))
+path.chmod(0o600)
+print(json.dumps({'ok':False,'error':'invented native gate',
+ 'error_evidence_path':str(path),'pre_submission_evidence':raw}),flush=True)
+sys.stdin.read()
+'''
+
+    async def external_fixture(*args, **kwargs):
+        return await original_spawn(sys.executable, "-c", script, **kwargs)
+
+    monkeypatch.setattr(transport.asyncio, "create_subprocess_exec", external_fixture)
+    run = {"id": "fixture-run", "provider": "dodo", "revision": "fixture-rev",
+           "source_commit": "a" * 40, "source_digest": "b" * 64, "target_mode": "broken",
+           "preview_url": "http://127.0.0.1:3301"}
+    manifest = {"target_revision": run["revision"], "source_commit": run["source_commit"],
+                "source_sha256": run["source_digest"], "mode": "broken",
+                "provider_environment": "test_mode", "app_origin": run["preview_url"],
+                "source_clean": True}
+    sdk = transport.SDKProcess("stagehand")
+    try:
+        with pytest.raises(RuntimeError) as stopped:
+            await sdk.request({"op": "invented"}, timeout=2)
+        gate = runtime_gate(stopped.value, run, {"id": "fixture-persona"},
+                            {"_retry_target_manifest": manifest}, runtime.evidence)
+        assert gate is not None
+        assert runtime.evidence.is_absolute()
+        assert __import__("pathlib").Path(stopped.value.evidence_path).parent == runtime.evidence
+    finally:
+        await sdk.close()
+
+
 @pytest.mark.parametrize("size", [100_000, 2_100_000])
 async def test_sdk_transport_accepts_actual_snapshot_sized_lines_and_closes_oversized_replies(
     tmp_path, monkeypatch, size

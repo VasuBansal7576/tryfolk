@@ -17,7 +17,7 @@ from .decisions import validated_action
 class Runtime:
     def __init__(self, service):
         self.service = service
-        self.evidence = Path(os.environ.get("TRYFOLK_EVIDENCE_ROOT", "runtime/evidence"))
+        self.evidence = Path(os.environ.get("TRYFOLK_EVIDENCE_ROOT", "runtime/evidence")).resolve()
         self.evidence.mkdir(parents=True, exist_ok=True)
         self.secret = os.environ.get("TARGET_FIXTURE_SECRET", "")
         self.headers = {"Authorization": "Bearer " + self.secret}
@@ -119,7 +119,7 @@ class Runtime:
         raise RuntimeError("Browser Use produced no observed AppBrief.")
 
     async def generate(self, brief, count):
-        persona = SDKProcess("tinytroupe", lambda: self.cancelled(self.active_run_id))
+        persona = SDKProcess("tinytroupe", lambda: self.cancelled(self.active_run_id), evidence_root=self.evidence)
         try:
             value = await persona.request(
                 {"op": "generate", "brief": brief, "count": count}, timeout=180 * count
@@ -213,9 +213,10 @@ class Runtime:
             return await DodoTarget(run["preview_url"]).frame_context(context, run, fixture)
 
         browser = SDKProcess(
-            "stagehand", cancelled, frame_verify=frame_verify if run["provider"] == "dodo" else None
+            "stagehand", cancelled, frame_verify=frame_verify if run["provider"] == "dodo" else None,
+            evidence_root=self.evidence,
         )
-        mind = SDKProcess("tinytroupe", cancelled)
+        mind = SDKProcess("tinytroupe", cancelled, evidence_root=self.evidence)
         actions_executed = []
         capability = None
         policy = BrowserPolicy(run["preview_url"], run["provider"])

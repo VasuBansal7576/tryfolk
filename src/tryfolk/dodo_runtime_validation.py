@@ -19,6 +19,7 @@ ADAPTER_FILES = (
     "src/tryfolk/browser_observation.py",
     "src/tryfolk/observed_controls.py",
     "src/tryfolk/process.py",
+    "src/tryfolk/pre_submission.py",
     "src/tryfolk/browser_network.py",
     "integrations/stagehand/pyproject.toml",
     "integrations/stagehand/uv.lock",

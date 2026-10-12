@@ -13,10 +13,13 @@ RESPONSE_LIMIT = 2_000_000
 
 
 class SDKProcess:
-    def __init__(self, name, cancelled=lambda: False, *, frame_verify=None):
+    def __init__(self, name, cancelled=lambda: False, *, frame_verify=None, evidence_root=None):
         self.name = name
         self.cancelled = cancelled
         self.frame_verify = frame_verify
+        self.evidence_root = Path(
+            evidence_root or os.environ.get("TRYFOLK_EVIDENCE_ROOT", "runtime/evidence")
+        ).resolve()
         self.process = None
 
     async def start(self):
@@ -24,9 +27,8 @@ class SDKProcess:
             "PYTHONPATH": str(ROOT / "src"),
             "ANONYMIZED_TELEMETRY": "false",
             "BROWSER_USE_TELEMETRY": "false",
+            "TRYFOLK_EVIDENCE_ROOT": str(self.evidence_root),
         }
-        if os.environ.get("TRYFOLK_EVIDENCE_ROOT"):
-            env["TRYFOLK_EVIDENCE_ROOT"] = os.environ["TRYFOLK_EVIDENCE_ROOT"]
         working = ROOT / "runtime" / "sdk"
         working.mkdir(parents=True, exist_ok=True)
         self.log = (working / f"{self.name}.log").open("a")

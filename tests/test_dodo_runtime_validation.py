@@ -212,7 +212,8 @@ def artifacts(tmp_path):
 
 @pytest.mark.parametrize(
     "dependency",
-    ["src/tryfolk/scenario_evidence.py", "src/tryfolk/scenarios.py", "src/tryfolk/verification.py"],
+    ["src/tryfolk/scenario_evidence.py", "src/tryfolk/scenarios.py", "src/tryfolk/verification.py",
+     "src/tryfolk/pre_submission.py"],
 )
 @pytest.mark.parametrize("change", ["omitted", "changed"])
 def test_scenario_evidence_dependency_closure_cannot_reuse_stale_runtime_proofs(tmp_path, dependency, change):
