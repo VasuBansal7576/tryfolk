@@ -324,13 +324,39 @@ async def read_production_native_controls(
         observed_frame_url, observed_parent_url = frame.url, frame.parent_frame.url
         context = guard.frame_context(observed_frame_url, observed_parent_url) or {}
         observed = await frame.evaluate(READ_CONTEXT)
+        # A provider read cannot make incomplete INIT/bootstrap/current DOM
+        # executable. Poll these local prerequisites first; once ready, every
+        # existing independent identity recheck still performs a fresh read.
+        local_facts = native_configuration_facts(
+            observed, context=context, identity={}, owned_origin=guard.policy.origin,
+            observed_parent_url=observed_parent_url, current_parent_url=document["url"],
+            observed_frame_url=observed_frame_url, current_frame_url=frame.url,
+        )
+        binding = context.get("config_id"), observed.get("generation")
+        checks["native_generation_current"] = (
+            local_facts["generation_current"] and all(value == binding for value in completed_cards.values())
+        )
+        setup = guard.native_setup_facts(*binding)
+        checks["bootstrap_readiness_current"] = all(setup.get(key) is True for key in (
+            "bootstrap_account_methods_200", "bootstrap_customer_methods_200", "normal_type_observed",
+        ))
+        local_ready = (
+            all(local_facts[key] is True for key in (
+                "observer_available", "init_observed", "configuration_bound", "generation_current",
+                "parent_current", "frame_current",
+            ))
+            and document.get("ready_state") in ("interactive", "complete")
+            and document.get("body_present") is True and document.get("busy") is False
+            and checks["native_generation_current"] and checks["bootstrap_readiness_current"]
+        )
+        if not local_ready:
+            return {"binding": None, "checks": checks}
         identity = await guard.frame_verify(context) if context.get("approved") is True else {}
         facts = native_configuration_facts(
             observed, context=context, identity=identity, owned_origin=guard.policy.origin,
             observed_parent_url=observed_parent_url, current_parent_url=document["url"],
             observed_frame_url=observed_frame_url, current_frame_url=frame.url,
         )
-        binding = context.get("config_id"), observed.get("generation")
         checks["native_configuration_current"] = (
             facts["current_configuration_captured"]
             and document.get("ready_state") in ("interactive", "complete")
