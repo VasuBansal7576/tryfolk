@@ -49,3 +49,11 @@ dialog.screenshot-dialog{width:min(1100px,calc(100% - 28px))}.full-screenshot{ma
 
 .run-progress{margin:30px 0 42px;padding:24px 0;border-bottom:1px solid var(--line)}.run-progress>h2{font-size:28px;margin-bottom:14px}.run-progress>p{margin:14px 0;max-width:800px;line-height:1.65}.progress-facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:24px;margin:24px 0}.progress-facts dt{font-size:12px;color:var(--muted);margin-bottom:9px}.progress-facts dd{font-size:17px;overflow-wrap:anywhere}.progress-boundary{padding:14px 18px;border-left:3px solid var(--teal);background:var(--wash);font-size:14px}.run-progress>.secondary{margin-top:10px}.repair-section>h3{font-size:18px;margin-top:24px}
 @media(max-width:720px){.progress-facts{grid-template-columns:repeat(2,minmax(0,1fr));gap:22px 18px}.progress-facts dd{font-size:15px}.run-progress>h2{font-size:26px}.progress-boundary{font-size:13px}}
+
+.baseline-retry-entry,.baseline-retry-history,.retry-budget{margin:32px 0;padding:24px 0;border-top:1px solid var(--line)}
+.baseline-retry-entry>h2,.baseline-retry-history>h2,.retry-budget>h2{font-size:26px;margin-bottom:16px}
+.baseline-retry-entry>p,.baseline-retry-history>p,.retry-budget>p{max-width:800px;line-height:1.7;margin:14px 0}
+.baseline-retry-entry>.secondary,.baseline-retry-history>.secondary{margin-top:18px;white-space:normal;text-align:left}
+.retry-budget .budget-rows>div:nth-child(6){color:var(--teal);font-weight:500}
+.retry-budget .budget-rows>div:last-child{border-bottom:2px solid var(--line)}
+.quote-page [data-action="confirm-baseline-retry"]{white-space:normal;text-align:left}

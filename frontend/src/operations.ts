@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { quoteSchema } from './contracts.ts';
+import { quoteSchema, baselineRetryQuoteSchema } from './contracts.ts';
 import type { CreatedRun, Run } from './contracts.ts';
 
 // Approval is recorded before dispatch. Closing a dialog or reloading never replaces its key/body.
@@ -14,6 +14,11 @@ const pendingSchema = z.discriminatedUnion('kind', [
     populationId: z.string().min(1), personaCount: z.number().int().positive(), repairRevision: z.string().min(1),
     repairSourceCommit: z.string().min(1).optional(),
   }),
+  z.object({
+    kind: z.literal('baseline-retry'), key: z.string().min(1), approvedAt: z.string(), runId: z.string().min(1),
+    request: z.object({ quote_id: z.string().min(1) }).strict(), quote: baselineRetryQuoteSchema,
+    originalRevision: z.string().min(1), originalSourceCommit: z.string().regex(/^[a-f0-9]{40}$/), originalSourceDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  }),
 ]);
 const declinedSchema = z.object({ status: z.number().int(), code: z.string(), message: z.string() });
 const journalSchema = z.object({ pending: pendingSchema, declined: declinedSchema.nullable() });
@@ -23,9 +28,9 @@ type TabStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 const journalKey = 'tryfolk.pending.v1';
 
 function sameRequest(first: PendingRequest, second: PendingRequest): boolean {
-  return first.kind === 'create' && second.kind === 'create'
-    ? first.request.quote_id === second.request.quote_id
-    : first.kind === 'replay' && second.kind === 'replay' && first.runId === second.runId && first.request.repair_id === second.request.repair_id;
+  if (first.kind === 'create' && second.kind === 'create') return first.request.quote_id === second.request.quote_id;
+  if (first.kind === 'baseline-retry' && second.kind === 'baseline-retry') return first.runId === second.runId && first.request.quote_id === second.request.quote_id;
+  return first.kind === 'replay' && second.kind === 'replay' && first.runId === second.runId && first.request.repair_id === second.request.repair_id;
 }
 function definitivelyDeclined(status: number, code: string): boolean {
   return [400, 402, 404, 409, 422].includes(status) && !['idempotency_conflict', 'contract_mismatch'].includes(code);
@@ -50,6 +55,8 @@ export class RequestJournal {
     }
     const pending = pendingSchema.parse(candidate);
     if (pending.kind === 'create' && pending.quote.id !== pending.request.quote_id) throw new Error('The saved request must use its original approved quote.');
+    if (pending.kind === 'create' && pending.quote.kind === 'baseline_retry') throw new Error('A saved-customer retry requires its owner baseline retry endpoint.');
+    if (pending.kind === 'baseline-retry' && (pending.quote.id !== pending.request.quote_id || pending.quote.retry_of_run_id !== pending.runId)) throw new Error('The retry request must use its original approved quote and blocked attempt.');
     this.write({ pending, declined: null });
     return pending;
   }
@@ -89,9 +96,23 @@ export async function recoverRequest(
   journal.beginAttempt(pending.key);
   const result = await send(pending);
   const current = result.status;
-  const matches = result.id === current.id && (pending.kind === 'create'
-    ? current.pass === 'before' && current.persona_count === pending.quote.persona_count && current.app_url === pending.quote.app_url
-    : current.pass === 'after' && current.parent_run_id === pending.runId && current.population_id === pending.populationId && current.persona_count === pending.personaCount && current.revision === pending.repairRevision && (!pending.repairSourceCommit || current.source_commit === pending.repairSourceCommit));
+  let matches = result.id === current.id;
+  if (pending.kind === 'create') matches &&= !current.retry_of_run_id && current.pass === 'before' && current.persona_count === pending.quote.persona_count && current.app_url === pending.quote.app_url;
+  else if (pending.kind === 'replay') matches &&= current.pass === 'after' && current.parent_run_id === pending.runId && current.population_id === pending.populationId && current.persona_count === pending.personaCount && current.revision === pending.repairRevision && (!pending.repairSourceCommit || current.source_commit === pending.repairSourceCommit);
+  else {
+    const quote = pending.quote;
+    const budget = current.retry_budget;
+    matches &&= current.id !== pending.runId && current.pass === 'before' && current.parent_run_id === null
+      && current.retry_of_run_id === pending.runId && current.population_id === quote.population_id
+      && current.persona_count === quote.persona_count && current.app_url === quote.app_url
+      && current.personas.length === quote.persona_ids.length && current.personas.every((person, index) => person.id === quote.persona_ids[index])
+      && current.baseline_retry?.original_run_id === pending.runId && current.baseline_retry.retry_run_id === current.id
+      && current.baseline_retry.population_sha256 === quote.population_sha256 && current.budget_contract?.id === quote.id
+      && current.revision === pending.originalRevision && current.source_commit === pending.originalSourceCommit && current.source_digest === pending.originalSourceDigest
+      && budget?.historical_spent_microusd === quote.retry_budget.historical_spent_microusd
+      && budget.original_reserved_microusd === quote.retry_budget.original_reserved_microusd
+      && budget.release_microusd === quote.retry_budget.release_microusd && budget.new_reserved_microusd === quote.reserved_microusd;
+  }
   if (!matches) throw new Error('The returned run does not match the original approved request. Its recovery record has been preserved.');
   // Persist access before deleting recovery information. If access cannot be saved, reload can retry the same key.
   if (saveResult(result)) journal.complete(pending.key);

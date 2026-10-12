@@ -161,13 +161,34 @@ const quoteBaseSchema = z.object({
 });
 export const quoteV2Schema = quoteBaseSchema.extend(quoteBudgetSchema.shape);
 // The additive budget is complete or absent. Old contracts never acquire new zero-valued fields.
-export const quoteSchema = z.union([quoteV2Schema, quoteBaseSchema.extend({
+const ordinaryQuoteDataSchema = z.union([quoteV2Schema, quoteBaseSchema.extend({
   subtotal_microusd: z.undefined().optional(), contingency_microusd: z.undefined().optional(), contingency_basis_points: z.undefined().optional(),
   after_contingency_microusd: z.undefined().optional(), after_reserve_microusd: z.undefined().optional(),
   after_reserve_includes_known_replay: z.undefined().optional(), quote_limit_microusd: z.undefined().optional(),
   lifetime_limit_microusd: z.undefined().optional(), lifetime_available_microusd: z.undefined().optional(),
   ledger: z.undefined().optional(), execution_allowances: z.undefined().optional(), forecast_comparison: z.undefined().optional(),
 })]);
+export const retryBudgetSchema = z.object({
+  historical_spent_microusd: money, original_reserved_microusd: money, release_microusd: money,
+  available_before_release_microusd: money, available_after_release_microusd: money,
+  new_reserved_microusd: money, available_after_reserve_microusd: z.number().int(),
+  measured_cash_microusd: z.literal(0), cost_basis: z.literal('estimate'),
+}).refine(budget => budget.release_microusd === budget.original_reserved_microusd - budget.historical_spent_microusd
+  && budget.available_after_release_microusd === budget.available_before_release_microusd + budget.release_microusd
+  && budget.available_after_reserve_microusd === budget.available_after_release_microusd - budget.new_reserved_microusd,
+'Retry budget must retain historical use and disclose the exact hold release and new reservation');
+export const baselineRetryQuoteSchema = ordinaryQuoteDataSchema.and(z.object({
+  kind: z.literal('baseline_retry'), retry_of_run_id: z.string().min(1), population_id: z.string().min(1),
+  population_sha256: z.string().regex(/^[a-f0-9]{64}$/), persona_ids: z.array(z.string().min(1)), retry_budget: retryBudgetSchema,
+})).refine(quote => quote.persona_ids.length === quote.persona_count
+  && new Set(quote.persona_ids).size === quote.persona_count
+  && quote.retry_budget.new_reserved_microusd === quote.reserved_microusd,
+'Retry quote must retain the full saved population and its new reservation');
+// A malformed explicit retry must never fall through and lose its budget/lineage.
+export const quoteSchema = z.union([baselineRetryQuoteSchema, ordinaryQuoteDataSchema.and(z.object({
+  kind: z.undefined().optional(), retry_of_run_id: z.undefined().optional(), population_id: z.undefined().optional(),
+  population_sha256: z.undefined().optional(), persona_ids: z.undefined().optional(), retry_budget: z.undefined().optional(),
+}))]);
 export const countsSchema = z.object({
   requested: count, generated: count, queued: count, executed: count, completed: count,
   failed: count, abandoned: count, pending: count, blocked: count,
@@ -224,6 +245,13 @@ export const comparisonSchema = z.object({
     })),
   }).optional(),
 });
+export const baselineRetryLineageSchema = z.object({
+  original_run_id: z.string().min(1), retry_run_id: z.string().min(1), population_id: z.string().min(1),
+  population_sha256: z.string().regex(/^[a-f0-9]{64}$/), persona_ids: z.array(z.string().min(1)),
+  approval_sha256: z.string().regex(/^[a-f0-9]{64}$/), accepted_at: z.iso.datetime({ offset: true }),
+  retry_budget: retryBudgetSchema, history_excluded_from_retry_denominator: z.literal(true),
+  payment_safety_basis: z.enum(['owner_reviewed_pre_submission_evidence_not_provider_receipt', 'server_recorded_pre_submission_evidence_not_provider_receipt']),
+});
 export const runSchema = z.object({
   id: z.string(), app_url: z.string(), persona_count: count, population_id: z.string(),
   parent_run_id: z.string().nullable(), pass: z.enum(['before', 'after']),
@@ -242,7 +270,32 @@ export const runSchema = z.object({
   after_reserve_microusd: money.optional(), after_reserve_includes_known_replay: z.boolean().optional(),
   gates: z.array(gateSchema), personas: z.array(personaSchema), events: z.array(eventSchema),
   repair: repairSchema.nullable(), comparison: comparisonSchema.nullable(),
-});
+  retry_of_run_id: z.string().min(1).optional(), baseline_retry: baselineRetryLineageSchema.optional(), retry_budget: retryBudgetSchema.optional(),
+}).refine(current => {
+  const lineage = current.baseline_retry;
+  if (!lineage) return !current.retry_of_run_id && !current.retry_budget && current.budget_contract?.kind !== 'baseline_retry';
+  if (current.provider !== 'dodo' || lineage.original_run_id === lineage.retry_run_id
+    || lineage.retry_budget.available_after_reserve_microusd < 0
+    || lineage.population_id !== current.population_id || lineage.persona_ids.length !== current.persona_count
+    || new Set(lineage.persona_ids).size !== current.persona_count
+    || current.personas.length !== current.persona_count
+    || current.personas.some((person, index) => person.id !== lineage.persona_ids[index])) return false;
+  if (current.id === lineage.original_run_id) return current.pass === 'before' && !current.retry_of_run_id && !current.retry_budget && !current.comparison;
+  const quote = current.budget_contract;
+  if (current.retry_of_run_id !== lineage.original_run_id || !current.retry_budget
+    || JSON.stringify(current.retry_budget) !== JSON.stringify(lineage.retry_budget)
+    || current.retry_budget.available_after_reserve_microusd < 0
+    || current.budget.reserved_microusd !== current.retry_budget.new_reserved_microusd
+    || quote?.kind !== 'baseline_retry' || quote.retry_of_run_id !== lineage.original_run_id
+    || quote.population_sha256 !== lineage.population_sha256 || quote.population_id !== current.population_id
+    || quote.persona_count !== current.persona_count || quote.persona_ids.length !== lineage.persona_ids.length
+    || quote.reserved_microusd !== current.retry_budget.new_reserved_microusd
+    || quote.persona_ids.some((id, index) => id !== lineage.persona_ids[index])) return false;
+  if (current.comparison && (current.comparison.before_run_id !== lineage.retry_run_id
+    || current.comparison.population_id !== current.population_id || current.comparison.requested !== current.persona_count)) return false;
+  return current.pass === 'before' ? current.id === lineage.retry_run_id && current.parent_run_id === null
+    : current.parent_run_id === lineage.retry_run_id && (!current.comparison || current.comparison.after_run_id === current.id);
+}, 'Baseline retry lineage must preserve its full population, separate attempt and accepted reservation');
 export const createdRunSchema = z.object({ id: z.string(), access_token: z.string(), status: runSchema });
 export const findingSchema = z.object({
   id: z.string(), run_id: z.string(), persona_id: z.string(), classification: z.string(),
@@ -269,6 +322,8 @@ export const connectionsSchema = z.object({
 export type Gate = z.infer<typeof gateSchema>;
 export type Quote = z.infer<typeof quoteSchema>;
 export type QuoteV2 = z.infer<typeof quoteV2Schema>;
+export type BaselineRetryQuote = z.infer<typeof baselineRetryQuoteSchema>;
+export type RetryBudget = z.infer<typeof retryBudgetSchema>;
 export type Counts = z.infer<typeof countsSchema>;
 export type Persona = z.infer<typeof personaSchema>;
 export type RunEvent = z.infer<typeof eventSchema>;
