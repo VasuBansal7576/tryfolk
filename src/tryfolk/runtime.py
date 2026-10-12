@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import signal
+import time
 from pathlib import Path
 import httpx
 from .codex_bridge import clean_env
@@ -12,6 +13,36 @@ from .verification import Payment, Entitlement, verify
 from .worker import Cancelled
 from .browser_policy import BrowserPolicy
 from .decisions import validated_action
+
+
+class FreshActionRetry:
+    """Only proved nonexecuted field changes permit a new observed selection."""
+
+    def __init__(self, *, timeout=180):
+        self.deadline = time.monotonic() + timeout
+        self.discarded = 0
+
+    def remaining(self):
+        left = self.deadline - time.monotonic()
+        if left <= 0:
+            raise RuntimeError("Original fresh action deadline exhausted; no action dispatched.")
+        return left
+
+    def allow(self, error, action):
+        data = getattr(error, "sdk_data", None)
+        metadata = action.get("_tryfolk") or {}
+        expected = {"same_url": True, "same_generation": True,
+                    "same_control_signature": False, "nonfinancial": True, "executed": False}
+        if (getattr(error, "sdk_code", None) != "nonfinancial_control_stale"
+                or not isinstance(data, dict) or set(data) != {*expected, "field"}
+                or any(data[k] is not value for k, value in expected.items())
+                or data["field"] not in ("address", "city", "state", "postal")
+                or data["field"] != metadata.get("field") or metadata.get("frame_url")
+                or metadata.get("kind") in ("pay", "confirm") or action.get("method") != "fill"
+                or self.discarded >= 3 or time.monotonic() >= self.deadline):
+            return False
+        self.discarded += 1
+        return True
 
 
 class Runtime:
@@ -306,6 +337,7 @@ class Runtime:
             )
             mind = SDKProcess("tinytroupe", cancelled, evidence_root=self.evidence)
         actions_executed = []
+        fresh_retry = None
         capability = None
         policy = BrowserPolicy(run["preview_url"], run["provider"])
         mind_initialized = False
@@ -368,7 +400,10 @@ class Runtime:
                 if cancelled():
                     raise Cancelled()
                 await self.check_revision(run)
-                observation = await browser.request({"op": "observe_native" if bulk else "observe"})
+                if fresh_retry is None:
+                    fresh_retry = FreshActionRetry()
+                observation = await browser.request({"op": "observe_native" if bulk else "observe"},
+                    timeout=fresh_retry.remaining())
                 policy.check_url(observation["url"])
                 observed_actions = observation.pop("actions")
                 actions = [
@@ -377,7 +412,8 @@ class Runtime:
                 ]
                 observation["actions"] = actions
                 shot = self.evidence / f"{run['id']}-{persona['id']}-{step}.png"
-                await browser.request({"op": "screenshot", "path": str(shot.resolve())})
+                await browser.request({"op": "screenshot", "path": str(shot.resolve())},
+                    timeout=fresh_retry.remaining())
                 await emit("observation", {**observation, "screenshot": str(shot)}, persona["id"])
                 if bulk:
                     from .bulk_personas import choose_planned_action
@@ -424,7 +460,16 @@ class Runtime:
                     policy=policy,
                 )
                 policy.validate(action, observation["url"])
-                result = await browser.request({"op": "act", "action": action})
+                try:
+                    result = await browser.request({"op": "act", "action": action},
+                        timeout=fresh_retry.remaining())
+                except RuntimeError as error:
+                    if run["provider"] == "dodo" and fresh_retry.allow(error, action):
+                        # The adapter cleared its stale action list. Return to a
+                        # new observation and selection; never resend old action.
+                        continue
+                    raise
+                fresh_retry = None
                 if not result.get("success", result.get("data", {}).get("success", True)):
                     raise RuntimeError("Stagehand reported browser action failure; no payment assumption.")
                 actions_executed.append(redact_payment(action))

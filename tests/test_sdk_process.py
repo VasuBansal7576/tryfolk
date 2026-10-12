@@ -6,6 +6,32 @@ import pytest
 import tryfolk.process as transport
 
 
+async def test_nonexecuted_control_error_keeps_exact_sdk_code_and_data(tmp_path, monkeypatch):
+    """Actual JSONL subprocess transport, invented adapter error, no provider call."""
+    import json
+    monkeypatch.setattr(transport, "ROOT", tmp_path)
+    spawn = asyncio.create_subprocess_exec
+    data = {"same_url": True, "same_generation": True, "same_control_signature": False,
+            "nonfinancial": True, "executed": False, "field": "address"}
+    script = ("import json,sys;sys.stdin.readline();print(json.dumps(" + repr({
+        "ok": False, "error": "invented stale field", "code": "nonfinancial_control_stale",
+        "data": data,
+    }) + "),flush=True);sys.stdin.read()")
+
+    async def external_fixture(*args, **kwargs):
+        return await spawn(sys.executable, "-c", script, **kwargs)
+
+    monkeypatch.setattr(transport.asyncio, "create_subprocess_exec", external_fixture)
+    sdk = transport.SDKProcess("stagehand")
+    try:
+        with pytest.raises(RuntimeError) as stopped:
+            await sdk.request({"op": "act"}, timeout=2)
+        assert stopped.value.sdk_code == "nonfinancial_control_stale"
+        assert stopped.value.sdk_data == json.loads(json.dumps(data))
+    finally:
+        await sdk.close()
+
+
 @pytest.mark.parametrize("configured", [None, "relative-evidence"])
 async def test_native_failure_binds_private_bytes_with_unset_or_relative_evidence_root(
     tmp_path, monkeypatch, configured,

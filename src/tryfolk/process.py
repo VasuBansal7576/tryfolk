@@ -111,6 +111,7 @@ class SDKProcess:
                 error.evidence_path = result.get("error_evidence_path")
                 error.sdk_code = result.get("code")
                 error.model_invoked = result.get("model_invoked")
+                error.sdk_data = result.get("data")
                 if self.name == "stagehand":
                     error.pre_submission_evidence = result.get("pre_submission_evidence")
                 raise error
