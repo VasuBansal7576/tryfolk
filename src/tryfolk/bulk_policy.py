@@ -1,9 +1,7 @@
-"""Unwired bulk prototype: exact model contexts and bounded callback lifetimes.
+"""Exact model contexts and bounded persona lifetimes used by the durable Worker.
 
-No runtime calls this module. It does not authorize provider traffic, waive guards,
-instantiate TinyPerson, dispatch actions, or establish actual customer outcomes.
-Production integration still needs genuine SDK memory/model receipts and a reviewed
-provider egress gate; an admission semaphore cannot enforce provider request rates.
+Native provider/browser/account guards remain with each runtime journey.
+An admission semaphore does not establish provider throughput or payment success.
 """
 
 import asyncio
@@ -90,14 +88,14 @@ async def infer_batch(batch, inference, validate_output, current_context):
 
 
 async def bounded_journeys(personas, execute, persist, *, concurrency=1, reviewed_guard_boundary=False):
-    """Prototype only: bounded tasks, serialized persistence, complete failure cleanup.
+    """Bounded tasks, serialized persistence, complete failure cleanup.
 
     execute must own all fresh SDK/browser/account/order guards and cleanup in finally.
     persist must retain actual returned evidence, not substitute model or fixture success.
     The review flag is an explicit caller prerequisite, not evidence of provider safety.
     """
     if type(concurrency) is not int or not 1 <= concurrency <= 4:
-        raise ValueError("Prototype callback concurrency must be an integer from one to four.")
+        raise ValueError("Browser callback concurrency must be an integer from one to four.")
     if concurrency > 1 and not reviewed_guard_boundary:
         raise ValueError("Parallel execution requires a reviewed provider/SDK guard boundary.")
     ids = [persona["persona_id"] for persona in personas]

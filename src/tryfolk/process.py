@@ -21,6 +21,7 @@ class SDKProcess:
             evidence_root or os.environ.get("TRYFOLK_EVIDENCE_ROOT", "runtime/evidence")
         ).resolve()
         self.process = None
+        self.request_lock = asyncio.Lock()
 
     async def start(self):
         env = clean_env() | {
@@ -45,6 +46,10 @@ class SDKProcess:
         )
 
     async def request(self, data, timeout=180):
+        async with self.request_lock:
+            return await self._request(data, timeout)
+
+    async def _request(self, data, timeout=180):
         if not self.process:
             await self.start()
         if self.cancelled():
@@ -119,3 +124,29 @@ class SDKProcess:
                 await self.process.wait()
         if hasattr(self, "log"):
             self.log.close()
+
+
+class PersonaChannel:
+    """Persona-bound commands through one run-owned persistent TinyTroupe service."""
+
+    def __init__(self, service, run_id, persona_id):
+        self.service, self.run_id, self.persona_id = service, run_id, persona_id
+        self.initialized = False
+
+    @property
+    def process(self):
+        return self.service.process
+
+    async def request(self, data, timeout=180):
+        value = await self.service.request(
+            {**data, "op": "bulk_" + data["op"],
+             "run_id": self.run_id, "persona_id": self.persona_id}, timeout,
+        )
+        if data["op"] == "init":
+            self.initialized = True
+        return value
+
+    async def close(self):
+        if self.initialized and self.process and self.process.returncode is None:
+            await self.request({"op": "release"})
+            self.initialized = False

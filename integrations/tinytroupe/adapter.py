@@ -154,10 +154,31 @@ def build(persona):
 
 def main():
     person = faculty = None
+    people = {}
     for line in sys.stdin:
         command = json.loads(line)
         try:
-            if command["op"] == "generate":
+            operation = command["op"]
+            bulk_key = None
+            if operation.startswith("bulk_"):
+                bulk_key = (command.get("run_id"), command.get("persona_id"))
+                if not all(isinstance(value, str) and value for value in bulk_key):
+                    raise RuntimeError("Persistent cognition requires exact run/persona identity.")
+                command = {**command, "op": operation.removeprefix("bulk_")}
+                if command["op"] == "release":
+                    released, _ = people.pop(bulk_key)
+                    TinyPerson.all_agents.pop(released.name, None)
+                    print(json.dumps({"ok": True, "data": {"released": True}}), file=protocol, flush=True)
+                    continue
+                if command["op"] != "init":
+                    if bulk_key not in people:
+                        raise RuntimeError("Unknown run/persona memory; no cross-persona fallback.")
+                    person, faculty = people[bulk_key]
+            if command["op"] == "generate_bulk":
+                from bulk_adapter import generate_bulk
+
+                data = generate_bulk(command, TinyPerson, generate)
+            elif command["op"] == "generate":
                 product_context = {k: v for k, v in command["brief"].items() if k != "generation_plan"}
                 factory = TinyPersonFactory(context=json.dumps(product_context))
                 factory.person_prompt_template_path = str(Path(__file__).with_name("person.mustache"))
@@ -216,7 +237,11 @@ def main():
                     )
                 data = {"population": population}
             elif command["op"] == "init":
+                if bulk_key and (bulk_key in people or len(people) >= 4 or command["persona"]["id"] != bulk_key[1]):
+                    raise RuntimeError("Distinct at-most-four owned persona memory sessions are required.")
                 person, faculty = build(command["persona"])
+                if bulk_key:
+                    people[bulk_key] = person, faculty
                 data = {
                     "sdk": "tinytroupe==0.7.0",
                     "memory_count": 0,

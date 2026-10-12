@@ -157,3 +157,33 @@ sys.stdin.read()
         }
     finally:
         await sdk.close()
+
+
+async def test_persistent_persona_channels_serialize_and_keep_exact_identity(tmp_path, monkeypatch):
+    from tryfolk.process import PersonaChannel
+    monkeypatch.setattr(transport, 'ROOT', tmp_path)
+    spawn = asyncio.create_subprocess_exec
+    children = []
+    script = """import json,sys
+for line in sys.stdin:
+ value=json.loads(line)
+ print(json.dumps({'ok':True,'data':{'run_id':value['run_id'],'persona_id':value['persona_id'],'op':value['op']}}),flush=True)
+"""
+    async def external_fixture(*args, **kwargs):
+        child = await spawn(sys.executable, '-c', script, **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(transport.asyncio, 'create_subprocess_exec', external_fixture)
+    service = transport.SDKProcess('tinytroupe')
+    a, b = PersonaChannel(service,'run-unit-fixture','a'), PersonaChannel(service,'run-unit-fixture','b')
+    try:
+        values = await asyncio.gather(a.request({'op':'init'}), b.request({'op':'init'}))
+        assert values == [
+            {'run_id':'run-unit-fixture','persona_id':'a','op':'bulk_init'},
+            {'run_id':'run-unit-fixture','persona_id':'b','op':'bulk_init'},
+        ]
+        assert len(children) == 1
+        await asyncio.gather(a.close(), b.close())
+    finally:
+        await service.close()
+    assert children[0].returncode is not None

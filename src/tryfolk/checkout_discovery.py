@@ -15,7 +15,7 @@ PRIORITIES = {
 }
 BILLING_FIELDS = frozenset({"country", "address", "city", "state", "postal"})
 PHASES = frozenset({"owned_login", "owned_purchase", "primary_billing", "native_card"})
-ELIGIBLE_KINDS = (*PRIORITIES, "login", "purchase", "manual", "billing_continue", "pay")
+ELIGIBLE_KINDS = (*PRIORITIES, "login", "purchase", "manual", "billing_continue", "pay", "confirm", "art_pack", "download")
 POLICY_REJECTIONS = {
     "Only fresh synthetic card fields in the exact direct secure frame are approved.": "policy_secure_frame",
     "Observed control is missing, hidden, disabled or processing.": "policy_control_unavailable",
@@ -126,7 +126,7 @@ class CandidateDiscovery:
 
 async def discover_checkout_candidates(
     snapshot, read_control, policy, url, *, filled, completed_cards, clicked,
-    phase, pay_actions=0, executed_fields=frozenset(),
+    phase, pay_actions=0, executed_fields=frozenset(), include_owned_post_payment=False,
 ):
     if phase not in PHASES:
         raise ValueError("Unknown diagnostic checkout phase")
@@ -164,7 +164,7 @@ async def discover_checkout_candidates(
         try:
             action = policy.bind(
                 {"selector": selector, "method": method, "arguments": [],
-                 "description": "Fresh native checkout diagnostic control"}, control, url,
+                 "description": "Fresh native checkout control"}, control, url,
             )
         except ValueError as error:
             reject(POLICY_REJECTIONS.get(str(error), "policy_bind_rejected"))
@@ -204,6 +204,12 @@ async def discover_checkout_candidates(
                 reject("already_clicked")
                 continue
             priority, eligible = {"login": 0, "purchase": 1}[kind], kind
+        elif include_owned_post_payment and kind in ("confirm", "art_pack", "download"):
+            if kind in clicked:
+                reject("already_clicked")
+                continue
+            priority, eligible = {"confirm": 1, "art_pack": 21, "download": 22}[kind], kind
+            action["description"] = f"Use owned {kind.replace('_', ' ')} control"
         elif kind == "billing_continue":
             if kind in clicked:
                 reject("already_clicked")

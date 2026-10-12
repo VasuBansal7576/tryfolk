@@ -28,6 +28,8 @@ class Settings:
     budget_microusd: int = 1_000_000
     owner_token: str | None = None
     max_personas: int = 20
+    bulk_execution: bool = False
+    browser_concurrency: int = 2
     per_persona_microusd: int = 20_000
     overhead_microusd: int = 50_000
     cfo_plan_path: Path | None = None
@@ -51,6 +53,10 @@ class Settings:
     )
 
     def __post_init__(self):
+        if type(self.bulk_execution) is not bool:
+            raise ValueError("TRYFOLK_BULK_EXECUTION must be true or false.")
+        if type(self.browser_concurrency) is not int or not 1 <= self.browser_concurrency <= 4:
+            raise ValueError("TRYFOLK_BROWSER_CONCURRENCY must be a whole number from 1 to 4.")
         if type(self.max_personas) is not int or not 1 <= self.max_personas <= 1000:
             raise ValueError("TRYFOLK_MAX_PERSONAS must be a whole number from 1 to 1000.")
 
@@ -61,6 +67,12 @@ class Settings:
         max_personas = os.environ.get("TRYFOLK_MAX_PERSONAS", "20")
         if not max_personas.isascii() or not max_personas.isdecimal():
             raise ValueError("TRYFOLK_MAX_PERSONAS must be a whole number from 1 to 1000.")
+        bulk_execution = os.environ.get("TRYFOLK_BULK_EXECUTION", "false")
+        concurrency = os.environ.get("TRYFOLK_BROWSER_CONCURRENCY", "2")
+        if bulk_execution not in ("true", "false"):
+            raise ValueError("TRYFOLK_BULK_EXECUTION must be true or false.")
+        if not concurrency.isascii() or not concurrency.isdecimal():
+            raise ValueError("TRYFOLK_BROWSER_CONCURRENCY must be a whole number from 1 to 4.")
         connection_file = Path(os.environ.get("TRYFOLK_CONNECTIONS", "runtime/connections.json"))
         targets = (
             tuple(Target(**x) for x in json.loads(connection_file.read_text()))
@@ -92,6 +104,8 @@ class Settings:
             budget_microusd=int(os.environ.get("TRYFOLK_BUDGET_MICROUSD", "1000000")),
             owner_token=os.environ.get("TRYFOLK_OWNER_TOKEN"),
             max_personas=int(max_personas),
+            bulk_execution=bulk_execution == "true",
+            browser_concurrency=int(concurrency),
             baseline_retry_approval_path=Path(os.environ["TRYFOLK_BASELINE_RETRY_APPROVAL"])
             if os.environ.get("TRYFOLK_BASELINE_RETRY_APPROVAL")
             else None,

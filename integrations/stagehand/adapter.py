@@ -245,6 +245,8 @@ async def run(stack):
     completed_fields, completed_cards = set(), {}
     billing_initialized_binding = None
     financial_started = False
+    clicked = set()
+    pay_actions = 0
     try:
         while command := await commands.get():
             boundary = {"op": command.get("op"), "call": "dispatch"}
@@ -269,7 +271,7 @@ async def run(stack):
                         viewport:{width:innerWidth,height:innerHeight}})""")
                     data["condition_observation"] = {**observed_context,
                         "source":"stagehand_owned_context", "fresh_context":True}
-                elif op == "observe":
+                elif op in ("observe", "observe_native"):
                     fresh_actions, fresh_document = [], None
                     observation_deadline = asyncio.get_running_loop().time() + 170
                     current_document = await page.evaluate(DOCUMENT_STATE)
@@ -289,6 +291,20 @@ async def run(stack):
                         billing_initialized_binding = initialized["url"], initialized.get("generation")
 
                     async def infer():
+                        if op == "observe_native":
+                            # Stagehand snapshots and read-only current DOM identify controls.
+                            # There is no inference, selector caching or action in this pass.
+                            boundary["call"] = "stagehand.snapshot.native_candidates"
+                            snapshot = (await page.snapshot(include_iframes=True, timeout=10000)).model_dump(mode="json")
+                            discovery = await discover_checkout_candidates(
+                                snapshot, metadata, policy, current_document["url"],
+                                filled=completed_fields, completed_cards=completed_cards,
+                                clicked=clicked, pay_actions=pay_actions,
+                                executed_fields=completed_fields, phase="primary_billing",
+                                include_owned_post_payment=True,
+                            )
+                            boundary["native_discovery"] = discovery.evidence(document_stable=False)
+                            return [action for _, action in sorted(discovery.candidates, key=lambda item: item[0])]
                         boundary["call"] = "stagehand.observe"
                         observed = await stagehand.observe(
                             "List visible enabled checkout, continue, confirm-purchase, art-pack and download controls. Include the Country dropdown even when preselected, the manual address option, and every unfilled billing/address/card field on the hosted test checkout. One action per control: click, fill or selectOptionFromDropdown for native dropdowns. Do not select disabled or Processing controls, navigate, or supply arbitrary test values."
@@ -321,6 +337,12 @@ async def run(stack):
                         timeout=max(0, observation_deadline - asyncio.get_running_loop().time()),
                     )
                     fresh_actions, fresh_document = data["actions"], data["document"]
+                    if op == "observe_native":
+                        data["execution_policy"] = "conditional_persona_plan_native_stagehand_controls_v1"
+                        data["model_inference"] = False
+                        for field in data["field_evidence"]:
+                            if field["approved_value_present"]:
+                                completed_fields.add(field["field"])
                     data["freshness"]["evidence_path"] = private_evidence("freshness", data["freshness"])
                 elif op == "act":
                     current_url = await page.url()
@@ -372,7 +394,13 @@ async def run(stack):
                     data = (await stagehand.act(sdk_action, page=page, timeout=10000)).model_dump(mode="json")
                     if not data.get("data", {}).get("success"):
                         raise RuntimeError("Stagehand did not execute the observed action successfully.")
+                    kind = action.get("_tryfolk", {}).get("kind")
+                    if kind in ("login", "purchase", "confirm", "art_pack", "download", "billing_continue"):
+                        clicked.add(kind)
+                    if kind == "pay":
+                        pay_actions += 1
                     if action.get("_tryfolk", {}).get("diagnostic_manual"):
+                        clicked.add("manual")
                         # Current public source bytes are not registered in the runtime.
                         # Verify the first click's effect; no automatic second click.
                         boundary["call"] = "manual_address_effect_verification"

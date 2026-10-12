@@ -1,4 +1,4 @@
-"""Sequential durable jobs; bounded N is separate from browser concurrency (one)."""
+"""Durable jobs with bounded persona I/O and atomic budget/evidence persistence."""
 
 import asyncio
 import json
@@ -190,7 +190,8 @@ class Worker:
                     await emit("connection_recovery", run["recovery"])
                 await self.io.known_replay(run, population, emit)
         self.phase(run_id, "running")
-        for persona in population:
+        async def execute_persona(job):
+            persona = job["persona"]
             if self.cancelled(run_id):
                 raise Cancelled()
             self.debit(
@@ -199,7 +200,10 @@ class Worker:
                     run, f"{run['pass']}_per_persona_microusd", self.service.settings.per_persona_microusd
                 ),
             )
-            result = await self.io.journey(run, persona, lambda: self.cancelled(run_id), emit)
+            return await self.io.journey(run, persona, lambda: self.cancelled(run_id), emit)
+
+        async def persist_persona(job, result):
+            persona = job["persona"]
             if self.cancelled(run_id):
                 raise Cancelled()
             with self.store.transaction() as db:
@@ -222,6 +226,19 @@ class Worker:
                         "INSERT INTO findings VALUES (?,?,?)", (finding["id"], run_id, json.dumps(finding))
                     )
             await emit("verification", result, persona["id"])
+        from .bulk_policy import bounded_journeys
+
+        try:
+            await bounded_journeys(
+                [{"run_id": run_id, "persona_id": p["id"], "persona": p} for p in population],
+                execute_persona, persist_persona,
+                concurrency=getattr(self.io, "journey_concurrency", 1),
+                reviewed_guard_boundary=True,
+            )
+        finally:
+            # Only the current run's owned pooled SDK/browser resources are closed.
+            if hasattr(self.io, "close_run"):
+                await self.io.close_run(run_id)
         # A terminal poll must see comparison and released allowance together.
         with self.store.transaction() as db:
             current = self.store.load(db, "runs", run_id)

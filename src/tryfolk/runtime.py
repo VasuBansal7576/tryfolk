@@ -7,7 +7,7 @@ import signal
 from pathlib import Path
 import httpx
 from .codex_bridge import clean_env
-from .process import SDKProcess, ROOT
+from .process import SDKProcess, PersonaChannel, ROOT
 from .verification import Payment, Entitlement, verify
 from .worker import Cancelled
 from .browser_policy import BrowserPolicy
@@ -24,6 +24,20 @@ class Runtime:
         from .telemetry import Telemetry
 
         self.telemetry = Telemetry()
+        settings = getattr(service, "settings", None)
+        self.bulk_execution = bool(getattr(settings, "bulk_execution", False))
+        self.journey_concurrency = getattr(settings, "browser_concurrency", 2) if self.bulk_execution else 1
+        self.bulk_minds = {}
+
+    def bulk_mind(self, run_id):
+        if run_id not in self.bulk_minds:
+            self.bulk_minds[run_id] = SDKProcess("tinytroupe", lambda: self.cancelled(run_id), evidence_root=self.evidence)
+        return self.bulk_minds[run_id]
+
+    async def close_run(self, run_id):
+        mind = self.bulk_minds.pop(run_id, None)
+        if mind:
+            await mind.close()
 
     def cancelled(self, run_id):
         with self.service.store.transaction() as db:
@@ -119,6 +133,36 @@ class Runtime:
         raise RuntimeError("Browser Use produced no observed AppBrief.")
 
     async def generate(self, brief, count):
+        if self.bulk_execution and brief.get("provider") == "dodo":
+            if not brief.get("generation_plan"):
+                raise RuntimeError("Bulk Dodo generation requires exact accepted licensed seed/case assignments.")
+            mind = self.bulk_mind(self.active_run_id)
+            population = []
+            try:
+                for index in range(0, count, 64):
+                    chunk_count = min(64, count - index)
+                    value = await mind.request(
+                        {"op": "generate_bulk", "brief": brief, "count": chunk_count,
+                         "start_index": index, "run_id": self.active_run_id}, timeout=600,
+                    )
+                    chunk = value["population"]
+                    if len(chunk) != chunk_count or [p["index"] for p in chunk] != list(range(index, index + chunk_count)):
+                        raise RuntimeError("Bulk generation must retain every exact assigned persona index; N cannot shrink.")
+                    population.extend(chunk)
+                    if len({p["id"] for p in population}) != len(population):
+                        raise RuntimeError("Bulk generation returned duplicate persona IDs.")
+                    # Persist actual generation progress. Requested N and accepted
+                    # plan stay immutable; partial state is never a completed population.
+                    with self.service.store.transaction() as db:
+                        run = self.service.store.load(db, "runs", self.active_run_id)
+                        if run["phase"] == "cancelled":
+                            raise Cancelled()
+                        db.execute("UPDATE populations SET payload=? WHERE id=?",
+                                   (json.dumps(population), run["population_id"]))
+                return population
+            except BaseException:
+                await self.close_run(self.active_run_id)
+                raise
         persona = SDKProcess("tinytroupe", lambda: self.cancelled(self.active_run_id), evidence_root=self.evidence)
         try:
             value = await persona.request(
@@ -216,7 +260,14 @@ class Runtime:
             "stagehand", cancelled, frame_verify=frame_verify if run["provider"] == "dodo" else None,
             evidence_root=self.evidence,
         )
-        mind = SDKProcess("tinytroupe", cancelled, evidence_root=self.evidence)
+        bulk = self.bulk_execution and run["provider"] == "dodo" and bool(persona.get("purchase_plan"))
+        if bulk:
+            from .bulk_personas import validated_purchase_plan
+
+            plan = validated_purchase_plan(persona)
+            mind = PersonaChannel(self.bulk_mind(run["id"]), run["id"], persona["id"])
+        else:
+            mind = SDKProcess("tinytroupe", cancelled, evidence_root=self.evidence)
         actions_executed = []
         capability = None
         policy = BrowserPolicy(run["preview_url"], run["provider"])
@@ -270,11 +321,17 @@ class Runtime:
                     },
                     persona["id"],
                 )
-            for step in range(24 if run["provider"] == "dodo" else 6):
+            if bulk:
+                await emit("conditional_purchase_plan", {
+                    "plan": plan,
+                    "execution": "disclosed deterministic Stagehand controls; unexpected state uses TinyPerson",
+                    "payment_outcome_inferred": False,
+                }, persona["id"])
+            for step in range(plan["max_steps"] if bulk else (24 if run["provider"] == "dodo" else 6)):
                 if cancelled():
                     raise Cancelled()
                 await self.check_revision(run)
-                observation = await browser.request({"op": "observe"})
+                observation = await browser.request({"op": "observe_native" if bulk else "observe"})
                 policy.check_url(observation["url"])
                 observed_actions = observation.pop("actions")
                 actions = [
@@ -285,7 +342,32 @@ class Runtime:
                 shot = self.evidence / f"{run['id']}-{persona['id']}-{step}.png"
                 await browser.request({"op": "screenshot", "path": str(shot.resolve())})
                 await emit("observation", {**observation, "screenshot": str(shot)}, persona["id"])
-                decision = await mind.request({"op": "decide", "observation": redact_payment(observation)})
+                if bulk:
+                    from .bulk_personas import choose_planned_action
+
+                    planned = choose_planned_action(plan, observed_actions, actions_executed)
+                    if not plan["purchase"]:
+                        decision = {"intent": {"type": "ABANDON", "target": "", "content": plan["rationale"]},
+                                    "source": "saved_persona_conditional_plan"}
+                    elif planned is not None:
+                        selected = observed_actions.index(planned)
+                        decision = {"intent": {"type": "BROWSER", "target": actions[selected]["id"],
+                                               "content": plan["rationale"]},
+                                    "source": "disclosed_deterministic_guarded_plan_execution"}
+                    elif plan["unexpected_state"] == "abandon":
+                        decision = {"intent": {"type": "ABANDON", "target": "", "content": "Unexpected current state under saved plan."},
+                                    "source": "saved_persona_conditional_plan"}
+                    else:
+                        # The actual TinyPerson is fed its fresh state and complete
+                        # recorded results. No model output can supply tool selectors/values.
+                        decision = await mind.request({"op": "decide", "observation": redact_payment(observation)})
+                        decision["source"] = "actual_tinyperson_unexpected_state_decision"
+                else:
+                    decision = await mind.request({"op": "decide", "observation": redact_payment(observation)})
+                if bulk:
+                    await mind.request({"op": "feedback", "result": {
+                        "actual_observation": redact_payment(observation), "actual_decision": decision,
+                    }})
                 await emit("decision", decision, persona["id"])
                 intent = decision["intent"]
                 if intent["type"] in ("FINISH", "ABANDON"):
