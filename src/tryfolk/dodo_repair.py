@@ -280,6 +280,13 @@ async def repair(runtime, run, emit, *, reconcile_only=False):
     for field in ("mode", "provider_environment", "product", "checkout_origins", "upstream_commit"):
         if registered.get(field) != original.get(field):
             raise ValueError("Repaired preview changed protected baseline configuration.")
+    from .checkpoint_access import seal_capture_binding
+
+    seal_capture_binding(
+        workspace, runtime.evidence / saved["id"], run_id=run["id"], repair_id=saved["id"],
+        source_digest=digest, owner_token=service.settings.owner_token,
+        repository=service.settings.checkpoint_repository
+    )
     service.register_repair(
         saved["id"],
         head_revision=head,

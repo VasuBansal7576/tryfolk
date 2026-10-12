@@ -37,13 +37,17 @@ class ReplayRequest(BaseModel):
     repair_id: str
 
 
+class CheckpointAccessRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 def bearer(value):
     return value[7:] if value and value.startswith("Bearer ") else None
 
 
-def create_app(settings=None):
+def create_app(settings=None, *, checkpoint_transport=None):
     app = FastAPI(title="Tryfolk", version="0.1.0")
-    service = Service(settings or Settings.from_env())
+    service = Service(settings or Settings.from_env(), checkpoint_transport=checkpoint_transport)
     app.state.service = service
     app.add_middleware(
         CORSMiddleware,
@@ -256,6 +260,10 @@ def create_app(settings=None):
     @app.post("/runs/{run_id}/repairs/recover", status_code=202)
     def recover_repair(run_id: str, request: Request):
         return service.recover_repair(run_id, credential(request))
+
+    @app.post("/runs/{run_id}/repairs/{repair_id}/checkpoint-access")
+    def checkpoint_access(run_id: str, repair_id: str, body: CheckpointAccessRequest, request: Request):
+        return service.finalize_checkpoint_access(run_id, repair_id, credential(request))
 
     @app.post("/runs/{run_id}/replay", status_code=201)
     def replay(

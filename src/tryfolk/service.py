@@ -39,9 +39,10 @@ class DomainError(Exception):
 
 
 class Service:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, checkpoint_transport=None):
         self.settings = settings
         self.store = Store(settings.db_path)
+        self.checkpoint_transport = checkpoint_transport
 
     def target(self, url):
         parsed = urlsplit(url)
@@ -588,6 +589,65 @@ class Service:
                 (run_id, "repair_capture_recovery_requested", now(), json.dumps(recovery)),
             )
             return repair
+
+    def finalize_checkpoint_access(self, run_id, repair_id, token):
+        from .checkpoint_access import (
+            CheckpointAccessError, load_capture_binding, verify_public_access, private_write, encoded, digest
+        )
+
+        def registered(db):
+            self.authorize(db, run_id, token, owner=True)
+            run = self.store.load(db, "runs", run_id)
+            repair = self.store.load(db, "repairs", repair_id)
+            if (
+                not repair or repair["run_id"] != run_id or (run.get("repair") or {}).get("id") != repair_id
+                or run["phase"] != "completed" or repair["status"] != "completed"
+                or run["provider"] != "dodo" or repair.get("provider") != "dodo"
+            ):
+                raise DomainError(
+                    409, "checkpoint_not_registered", "A completed genuine captured Dodo repair is required."
+                )
+            return run, repair
+
+        with self.store.transaction() as db:
+            run, repair = registered(db)
+        try:
+            binding, binding_digest, repository = load_capture_binding(self.settings, run, repair)
+            existing = repair.get("checkpoint_access")
+            if existing and existing["binding_sha256"] == binding_digest and existing["repository"] == repository:
+                return repair
+            access = verify_public_access(binding, binding_digest, repository, transport=self.checkpoint_transport)
+        except CheckpointAccessError as error:
+            raise DomainError(
+                409, str(error), "Public checkpoint access is unverified; inspect the bound capture and approved repository."
+            ) from None
+        access["verified_at"] = now()
+        receipt = encoded(access)
+        access["receipt_sha256"] = digest(receipt)
+        with self.store.transaction() as db:
+            current_run, current_repair = registered(db)
+            if any(current_repair.get(key) != repair.get(key) for key in (
+                "head_revision", "checkpoint_id", "source_digest"
+            )):
+                raise DomainError(
+                    409, "checkpoint_capture_changed", "Registered source changed during access verification."
+                )
+            if current_repair.get("checkpoint_access") == existing:
+                try:
+                    private_write(
+                        self.settings.checkpoint_evidence_root / (
+                            repair_id + "-checkpoint-public-access-" + access["receipt_sha256"] + ".json"
+                        ), receipt
+                    )
+                except (CheckpointAccessError, OSError):
+                    raise DomainError(
+                        409, "checkpoint_evidence_unavailable", "Private access evidence could not be retained."
+                    ) from None
+                current_repair.update(checkpoint_url=access["url"], checkpoint_access=access)
+                self.store.save(db, "repairs", current_repair)
+                current_run["repair"] = current_repair
+                self.store.save(db, "runs", current_run)
+            return current_repair
 
     def register_repair(
         self,

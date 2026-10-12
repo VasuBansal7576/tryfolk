@@ -44,6 +44,10 @@ class Settings:
             },
         )
     )
+    checkpoint_repository: str | None = None
+    checkpoint_evidence_root: Path = field(
+        default_factory=lambda: Path(os.environ.get("TRYFOLK_EVIDENCE_ROOT", "runtime/evidence"))
+    )
 
     @classmethod
     def from_env(cls):
@@ -79,6 +83,7 @@ class Settings:
             db_path=Path(os.environ.get("TRYFOLK_DB", "runtime/tryfolk.sqlite")),
             budget_microusd=int(os.environ.get("TRYFOLK_BUDGET_MICROUSD", "1000000")),
             owner_token=os.environ.get("TRYFOLK_OWNER_TOKEN"),
+            checkpoint_repository=os.environ.get("TRYFOLK_CHECKPOINT_REPOSITORY"),
             targets=targets,
             scenario_catalog_path=Path(os.environ["TRYFOLK_SCENARIO_CATALOG"])
             if os.environ.get("TRYFOLK_SCENARIO_CATALOG")
