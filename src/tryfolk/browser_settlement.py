@@ -2,11 +2,32 @@
 
 import asyncio
 import hashlib
+import json
 from .browser_policy import DODO_CHECKOUT, exact_origin
 
+# Exact public completion messages from owned dodo-target/app/checkout/return/page.tsx.
+# These labels establish browser completion only; receipt/entitlement remain authority.
+APP_CONFIRM_STATUS_HASHES = {text: hashlib.sha256(text.encode()).hexdigest() for text in (
+    "Your payment is confirmed and your art pack is available.",
+    "Your art pack is available.",
+    "Your payment is confirmed, but the art pack is unavailable. The sandbox owner needs to repair fulfillment.",
+    "Payment is still awaiting confirmation. You can check again after completing checkout.",
+    "Payment did not succeed. Return to the art pack to start a fresh checkout.",
+    "The payment could not be matched to this purchase. The sandbox owner needs to review it.",
+    "Payment confirmation is temporarily unavailable. You can check again.",
+    "Payment confirmation is waiting for the sandbox owner to finish setup.",
+)}
+
 DOCUMENT_STATE = r"""(() => {const controls=[...document.querySelectorAll('button,input:not([type=hidden]),select,textarea,a[href]')]
- .filter(el=>el.getClientRects().length && getComputedStyle(el).visibility!=='hidden');return ({
+ .filter(el=>el.getClientRects().length && getComputedStyle(el).visibility!=='hidden');
+ const statuses=location.pathname==='/checkout/return'?[...document.querySelectorAll('[role=status]')]
+  .filter(el=>el.getClientRects().length && getComputedStyle(el).visibility!=='hidden'):[];
+ const publicStatuses=__APP_CONFIRM_STATUS_HASHES__;
+ const completion=statuses.length===1 && statuses[0].innerText.trim().length<=256
+  ? publicStatuses[statuses[0].innerText.trim()] || null : null;
+ return ({
  url:location.href,generation:performance.timeOrigin,ready_state:document.readyState,body_present:!!document.body,
+ completion_status_sha256:completion,
  hosted_test_mode_visible:[...document.querySelectorAll('span,div')].some(el=>
   el.getClientRects().length && getComputedStyle(el).visibility!=='hidden' && el.innerText.trim()==='Test Mode'),
  visible_controls:controls.length,
@@ -18,7 +39,7 @@ DOCUMENT_STATE = r"""(() => {const controls=[...document.querySelectorAll('butto
  control_signature:JSON.stringify(controls.map(el=>[el.tagName,el.type,el.id,el.name,el.autocomplete,
   el.getAttribute('aria-label'),el.placeholder,!!el.disabled,el.getAttribute('aria-disabled'),
   el.tagName==='BUTTON'?el.innerText:null]))
-})})()"""
+})})()""".replace("__APP_CONFIRM_STATUS_HASHES__", json.dumps(APP_CONFIRM_STATUS_HASHES))
 
 
 class SettlementDeadline(RuntimeError):
@@ -48,6 +69,19 @@ async def settle(page, policy, action, *, timeout=10, previous_document=None):
         "art_pack": policy.origin + "/special-downloads",
         "pay": policy.origin + "/checkout/return",
     }.get(kind)
+    owned_confirm = bool(
+        kind == "confirm" and policy.provider == "dodo" and previous_document
+        and previous_document.get("url", "").split("?", 1)[0].split("#", 1)[0] == policy.origin + "/checkout/return"
+        and metadata.get("url") == previous_document.get("url")
+    )
+
+    def status_changed(document):
+        return bool(owned_confirm
+                    and document.get("url") == previous_document.get("url")
+                    and document.get("generation") == previous_document.get("generation")
+                    and document.get("completion_status_sha256") in APP_CONFIRM_STATUS_HASHES.values()
+                    and document.get("completion_status_sha256") != previous_document.get("completion_status_sha256"))
+
     deadline = asyncio.get_running_loop().time() + timeout
     operation = "settlement_start"
     checks = dict.fromkeys((
@@ -99,7 +133,7 @@ async def settle(page, policy, action, *, timeout=10, previous_document=None):
                 same_previous_document=bool(previous_document) and all(
                     document.get(key) == previous_document.get(key) for key in ("url", "generation")
                 ),
-                transition_changed=not previous_document or any(
+                transition_changed=not previous_document or status_changed(document) or any(
                     document.get(key) != previous_document.get(key)
                     for key in ("url", "generation", "control_signature", "error_signature")
                 ),
@@ -114,6 +148,7 @@ async def settle(page, policy, action, *, timeout=10, previous_document=None):
                 and (
                     not transition
                     or not previous_document
+                    or status_changed(document)
                     or any(
                         document.get(key) != previous_document.get(key)
                         for key in ("url", "generation", "control_signature", "error_signature")
@@ -135,7 +170,8 @@ async def settle(page, policy, action, *, timeout=10, previous_document=None):
                     and document.get("generation") == after.get("generation"),
                     post_snapshot_controls_stable=not after.get("busy")
                     and document.get("control_signature") == after.get("control_signature")
-                    and document.get("error_signature") == after.get("error_signature"),
+                    and document.get("error_signature") == after.get("error_signature")
+                    and (not status_changed(document) or document.get("completion_status_sha256") == after.get("completion_status_sha256")),
                 )
                 if (
                     tree.strip()
@@ -150,6 +186,7 @@ async def settle(page, policy, action, *, timeout=10, previous_document=None):
                             not after.get("busy")
                             and document.get("control_signature") == after.get("control_signature")
                             and document.get("error_signature") == after.get("error_signature")
+                            and (not status_changed(document) or document.get("completion_status_sha256") == after.get("completion_status_sha256"))
                         )
                     )
                 ):
