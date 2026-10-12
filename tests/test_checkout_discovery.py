@@ -342,6 +342,70 @@ async def test_manual_mode_after_address_search_requires_the_real_billing_addres
     }
 
 
+@pytest.mark.parametrize("labels", [
+    ["Enter address manually"], ["Enter manually"],
+    ["Enter address manually", "Enter manually"],
+])
+async def test_current_open_manual_form_resolves_with_residual_affordances_without_acting(labels):
+    """Invented I/O exercises real discovery and resolver; no live checkout claim."""
+    import asyncio
+    from tryfolk.manual_address import resolve_manual_address
+
+    policy = BrowserPolicy("http://127.0.0.1:3300", "dodo")
+    controls = {
+        "xpath=/html[1]/body[1]/select[1]": {
+            "present": True, "visible": True, "tag": "SELECT", "label": "Country",
+            "value": "US", "options": ["US"], "destination": URL,
+        },
+    }
+    for index, (name, autocomplete) in enumerate([
+        ("addressLine", "address-line1"), ("city", "address-level2"),
+        ("state", "address-level1"), ("zipCode", "postal-code"),
+    ], start=1):
+        controls[f"xpath=/html[1]/body[1]/input[{index}]"] = {
+            "present": True, "visible": True, "disabled": False, "required": True,
+            "tag": "INPUT", "name": name, "autocomplete": autocomplete,
+            "value": "", "destination": URL,
+        }
+    for index, label in enumerate(labels, start=1):
+        controls[f"xpath=/html[1]/body[1]/button[{index}]"] = {
+            "present": True, "visible": True, "tag": "BUTTON", "label": label,
+            "destination": URL,
+        }
+
+    async def read_control(selector):
+        return controls[selector]
+
+    discovery = await discover_checkout_candidates(
+        {"xpath_map": {str(i): s.removeprefix("xpath=") for i, s in enumerate(controls)}},
+        read_control, policy, URL, filled={"country"}, executed_fields={"country"},
+        completed_cards={}, clicked=set(), phase="primary_billing",
+    )
+    assert {"city", "state", "postal"} <= discovery.observed_fields
+    assert discovery.observed_manual_variants
+    assert discovery.rejection_counts["manual_fields_already_visible"] == len(labels)
+    assert not any(a["_tryfolk"].get("diagnostic_manual") for _, a in discovery.candidates)
+    document = {"url": URL, "generation": 1, "document_stable": True,
+                "ready_state": "complete", "body_present": True, "busy": False}
+
+    async def read_current():
+        return discovery, document
+
+    async def no_action(_):
+        raise AssertionError("An open form must never click a residual affordance")
+
+    result, _ = await resolve_manual_address(
+        read_current, no_action, policy, source_sha256=None,
+        deadline=asyncio.get_running_loop().time() + 1,
+    )
+    assert result is discovery
+    # Visible empty required fields establish the mode, not completed billing.
+    assert result.observed_completion == {"country"}
+    assert {a["_tryfolk"]["field"] for _, a in result.candidates} == {
+        "address", "city", "state", "postal",
+    }
+
+
 async def test_real_executed_billing_address_change_still_stops_manual_effect_verification():
     import pytest
     from tryfolk.checkout_discovery import ExecutedFieldChanged

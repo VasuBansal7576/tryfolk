@@ -83,8 +83,10 @@ async def resolve_manual_address(
             raise ManualAddressGate("manual_country_currently_unverified")
         if fields and fields != MANUAL_FIELDS:
             raise ManualAddressGate("manual_effect_partial")
-        if fields == MANUAL_FIELDS and discovery.observed_manual_variants:
-            raise ManualAddressGate("manual_entry_open_unverified")
+        # Discovery validates each current visible field and removes manual
+        # candidates when the complete form is open. Residual affordance labels
+        # remain observation evidence; they cannot negate those field reads.
+        # This establishes the mode only, never required-field completion.
         return discovery, document
 
     def validate_manual(action, document):

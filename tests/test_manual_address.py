@@ -73,6 +73,32 @@ async def test_current_manual_fields_already_visible_require_no_action():
     assert actions == []
 
 
+@pytest.mark.parametrize("change,reason", [
+    ({"country": False}, "manual_country_currently_unverified"),
+    ({"generation": 2}, "manual_document_changed"),
+    ({"stable": False}, "manual_document_unstable"),
+    ({"visible": {"city"}}, "manual_effect_partial"),
+])
+async def test_residual_affordance_cannot_bypass_current_open_form_prerequisites(change, reason):
+    first = observed(variant="enter_address_manually")
+    state = observed(**({"visible": {"city", "state", "postal"}} | change))
+    state[0].observed_manual_variants = {"enter_address_manually", "enter_manually"}
+
+    async def read():
+        return state
+
+    async def no_action(_):
+        raise AssertionError("An invalid current form cannot execute another action")
+
+    with pytest.raises(ManualAddressGate) as stopped:
+        await resolve_manual_address(
+            read, no_action, BrowserPolicy("http://127.0.0.1:3300", "dodo"),
+            source_sha256=None, deadline=asyncio.get_running_loop().time() + 1,
+            executed=(first[0].candidates[0][1], first[1]),
+        )
+    assert stopped.value.reason == reason
+
+
 @pytest.mark.parametrize("source,variant", [(None, "enter_manually"), (SOURCE, "enter_address_manually"),
                                            ("0" * 64, "enter_manually")])
 async def test_unreviewed_source_or_exact_control_never_repeats_a_successful_click(source, variant):
