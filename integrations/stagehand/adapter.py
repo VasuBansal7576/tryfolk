@@ -31,7 +31,7 @@ from tryfolk.browser_events import EventCapture
 from tryfolk.payment_privacy import redact_payment
 from tryfolk.native_read_observation import NativeControlReads
 from tryfolk.checkout_discovery import discover_checkout_candidates
-from tryfolk.manual_address import resolve_manual_address, wait_for_billing_initialization
+from tryfolk.manual_address import ManualAddressGate, resolve_manual_address, wait_for_billing_initialization
 
 
 def private_evidence(label, data):
@@ -352,13 +352,19 @@ async def run(stack):
                         async def forbidden_repeat(_):
                             raise RuntimeError("Unregistered native manual source cannot repeat an action.")
 
-                        _, verified_document = await resolve_manual_address(
-                            lambda: read_manual_current(
-                                page, network_page, guard, completed_fields=completed_fields,
-                            ), forbidden_repeat, policy, source_sha256=None,
-                            deadline=asyncio.get_running_loop().time() + 10,
-                            executed=(action, fresh_document), on_event=events.append,
-                        )
+                        try:
+                            _, verified_document = await resolve_manual_address(
+                                lambda: read_manual_current(
+                                    page, network_page, guard, completed_fields=completed_fields,
+                                ), forbidden_repeat, policy, source_sha256=None,
+                                deadline=asyncio.get_running_loop().time() + 10,
+                                executed=(action, fresh_document), on_event=events.append,
+                            )
+                        except ManualAddressGate as error:
+                            error.observation_evidence = (error.observation_evidence or {}) | {
+                                "manual_effect": {"verified": False, "events": events},
+                            }
+                            raise
                         data["manual_effect"] = {"verified": True, "events": events,
                                                 "generation_current": verified_document.get("generation")
                                                 == fresh_document.get("generation")}
