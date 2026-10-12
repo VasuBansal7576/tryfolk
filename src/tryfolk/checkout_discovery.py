@@ -78,8 +78,10 @@ async def include_snapshot_manual_choices(proposed, snapshot, read_control, poli
         choices.append(action)
         if action["_tryfolk"]["manual_variant"] == "enter_manually" and control.get("popup_ancestor") is True:
             popup_inner.append(selector)
+    validated_choices = {action["selector"]: action for action in choices}
     selected, seen = [], set()
     for action in [*proposed, *choices]:
+        action = validated_choices.get(action.get("selector"), action)
         selector = action.get("selector")
         if selector in seen or (len(popup_inner) == 1 and selector in outer_selectors):
             continue

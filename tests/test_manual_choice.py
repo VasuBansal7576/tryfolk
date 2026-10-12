@@ -43,6 +43,18 @@ async def test_fresh_observation_exposes_hittable_sdk_snapshot_footer_when_infer
  assert [a['selector'] for a in r['actions']]==[INNER]
  assert r['actions'][0]['_tryfolk']['manual_variant']=='enter_manually'
 
+async def test_validated_manual_replacement_preserves_unrelated_inference_order():
+ from tryfolk.checkout_discovery import include_snapshot_manual_choices
+ p=BrowserPolicy('http://127.0.0.1:3301','dodo')
+ unrelated={'method':'fill','selector':'xpath=/html[1]/body[1]/input[1]','arguments':['invented']}
+ async def read(selector):return control('Enter manually',True)|{'popup_ancestor':True}
+ actions=await include_snapshot_manual_choices(
+  [unrelated,{'method':'fill','selector':INNER,'arguments':['invented']}],
+  {'xpath_map':{'0':INNER[6:]}},read,p,URL)
+ assert actions[0]==unrelated
+ assert len(actions)==2 and actions[1]['selector']==INNER
+ assert actions[1]['method']=='click' and actions[1]['arguments']==[]
+
 async def test_hittable_outer_only_remains_single_primary_choice():
  p=BrowserPolicy('http://127.0.0.1:3301','dodo')
  a=p.bind({'method':'click','selector':OUTER},control('Enter address manually',True),URL)
@@ -68,3 +80,22 @@ async def test_snapshot_supplement_never_reads_or_exposes_foreign_frame_or_inven
                  '1':'/html[1]/body[1]/input[1]'}},forbidden,
    BrowserPolicy('http://127.0.0.1:3301','dodo'),URL)
  assert actions==[]
+
+@pytest.mark.parametrize('proposal',[
+ {'method':'fill','selector':INNER,'arguments':['invented model value']},
+ {'method':'click','selector':INNER,'arguments':['invented model value']},
+])
+async def test_fresh_snapshot_click_supersedes_invalid_same_selector_inference(proposal):
+ from tryfolk.checkout_discovery import include_snapshot_manual_choices
+ p=BrowserPolicy('http://127.0.0.1:3301','dodo')
+ doc={'url':URL,'generation':1,'ready_state':'complete','body_present':True,'control_signature':'stable'}
+ async def read(selector):return control('Enter manually',True)|{'popup_ancestor':True}
+ async def infer():
+  return await include_snapshot_manual_choices([proposal],{'xpath_map':{'0':INNER[6:]}},read,p,URL)
+ class Page:
+  async def evaluate(self,expression):return dict(doc) if expression==DOCUMENT_STATE else 'invented public label'
+ r=await observe_fresh(Page(),p,infer,read)
+ assert len(r['actions'])==1
+ assert r['actions'][0]['selector']==INNER
+ assert r['actions'][0]['method']=='click' and r['actions'][0]['arguments']==[]
+ assert r['actions'][0]['_tryfolk']['manual_variant']=='enter_manually'
