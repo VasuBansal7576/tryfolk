@@ -273,12 +273,15 @@ async def run(stack):
                     fresh_actions, fresh_document = [], None
                     observation_deadline = asyncio.get_running_loop().time() + 170
                     current_document = await page.evaluate(DOCUMENT_STATE)
+                    # Initial billing hydration must not follow the acknowledged
+                    # Continue into the independently guarded payment document.
                     if (
                         policy.provider == "dodo"
                         and exact_origin(current_document["url"]) == DODO_CHECKOUT
-                        and billing_initialized_binding != (
-                            current_document["url"], current_document.get("generation")
-                        )
+                        and billing_initialized_binding is None
+                        and guard.checkout_navigation is not None
+                        and current_document["url"] == guard.checkout_navigation.entry_url
+                        and guard.checkout_navigation.continue_generation is None
                     ):
                         initialized = await wait_for_billing_initialization(
                             lambda: page.evaluate(DOCUMENT_STATE), policy, deadline=observation_deadline,
