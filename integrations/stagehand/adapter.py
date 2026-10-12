@@ -44,6 +44,7 @@ class PreActDocumentDrift(RuntimeError):
         )
         self.code = "nonfinancial_control_stale" if retryable else None
         self.data = comparison
+        self.pre_act_comparison = comparison
 
 
 def private_evidence(label, data):
@@ -451,6 +452,7 @@ async def run(stack):
                                 "Document changed after observation; no browser action was executed or retried."
                             )
                             error.data = comparison
+                            error.pre_act_comparison = comparison
                             raise error
                         if action not in fresh_actions:
                             raise RuntimeError("Action does not match a fresh SDK-observed control.")
@@ -640,7 +642,8 @@ async def run(stack):
                     json.dumps(
                         redact_frame_config(
                             {"ok": False, "error": str(error)[:500], "error_evidence_path": error_path, "pre_submission_evidence": safety,
-                             "code": getattr(error, "code", None), "data": getattr(error, "data", None)}
+                             "code": error.code if isinstance(error, PreActDocumentDrift) else None,
+                             "data": getattr(error, "pre_act_comparison", None)}
                         )
                     ),
                     flush=True,
