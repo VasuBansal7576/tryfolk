@@ -1,0 +1,2211 @@
+{
+  "schema_version": "tryfolk.payment-scenarios.v1",
+  "catalog_version": "2026-10-11.2",
+  "input_semantics": "hypothetical_test_inputs",
+  "coverage_policy": {
+    "catalog_entries_are_observed_results": false,
+    "denominator": "selected_accepted_quote_assignments",
+    "catalog_entries_are_available_inputs": true,
+    "unexercised_cases_are_not_failures": true,
+    "expected_declines_are_app_defects": false
+  },
+  "scenarios": [
+    {
+      "id": "one-time-card-download",
+      "area": "gateway_integration",
+      "title": "Buy one download pack",
+      "customer_context": {
+        "background": "A freelance illustrator needs sample artwork for a client mockup.",
+        "account_history": "Fresh synthetic account, no purchases.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Finish one purchase without OAuth or a second checkout."
+      },
+      "hypothetical_problem": "The customer has never used this shop and needs to know whether checkout leads to usable files.",
+      "customer_goal": "Buy Special Downloads once and open one of the twelve sample files.",
+      "expected_behavior": [
+        "Create a fresh checkout for this account and attempt.",
+        "Show the exact one-time price before payment.",
+        "Grant access only after independently matched settlement, then serve the authorized file."
+      ],
+      "check_kind": "customer_journey",
+      "availability": "runnable",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "isolated_test_auth",
+          "one_time_checkout",
+          "receipt_readonly",
+          "entitlement_readonly",
+          "protected_download",
+          "source_revision_manifest"
+        ],
+        "provider": [
+          "test_card_checkout",
+          "checkout_read",
+          "payment_read"
+        ],
+        "condition": [
+          "Approved existing dodo-public-success-card-us-desktop-v1 condition; fixed USD product."
+        ],
+        "missing": [],
+        "conditions": {
+          "device": "desktop Chromium",
+          "locale": "en-US",
+          "billing_country": "US",
+          "account_history": "new",
+          "fixture_id": "dodo-public-success-card-us-desktop-v1"
+        }
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "Dodo documents card checkout and successful test-card conditions.",
+        "limitations": [],
+        "source_refs": [
+          "checkout",
+          "cards",
+          "testing"
+        ]
+      },
+      "source_refs": [
+        "checkout",
+        "cards",
+        "testing",
+        "target",
+        "provider",
+        "driver_fields",
+        "driver_session"
+      ],
+      "evidence_requirements": [
+        "Independent GET /checkouts/{id}, then GET /payments/{payment_id}, with succeeded status and all run/persona/account/order/customer/product/revision identifiers plus exact amount/currency matched.",
+        "Separate read-only app entitlement observation and authenticated protected download response bound to the same account, order and revision.",
+        "Browser steps and customer outcome, including whether the file was actually received.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "One independently settled owned order has entitlement and the expected authenticated file."
+        ],
+        "limits": [
+          "No other card, method, locale, device or country is covered by this case.",
+          "A download request alone is not proof of provider settlement."
+        ],
+        "app_defect_rule": "A reproducible mismatch between independently succeeded owned payment and promised access is an app defect. A setup/provider error is inconclusive.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "fulfilled",
+      "risk": {
+        "priority": "high",
+        "consequence": "The customer has never used this shop and needs to know whether checkout leads to usable files."
+      },
+      "selection_rationale": "Select to check buy one download pack. The existing owned one-time card journey supports this condition after every readiness/authority gate.",
+      "condition_fixture": {
+        "id": "dodo-public-success-card-us-desktop-v1",
+        "registration": "existing_driver"
+      },
+      "risk_priority": 80
+    },
+    {
+      "id": "card-decline-safe-retry",
+      "area": "payment_methods",
+      "title": "Handle an expected card decline",
+      "customer_context": {
+        "background": "A student designer wants artwork within a small project budget.",
+        "account_history": "Fresh account, no completed payment.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "See a useful error and avoid duplicate orders."
+      },
+      "hypothetical_problem": "A documented decline condition interrupts the first attempt.",
+      "customer_goal": "Understand the decline and deliberately retry with an approved successful test condition.",
+      "expected_behavior": [
+        "Keep access denied for the failed attempt.",
+        "Present a safe explanation and a deliberate retry path.",
+        "Use a fresh checkout for a new attempt and grant only once for a later matched success."
+      ],
+      "check_kind": "customer_journey",
+      "availability": "requires_fixture",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Existing checkout and entitlement routes plus retry outcome capture."
+        ],
+        "provider": [
+          "Documented declined card condition and payment status/error reads."
+        ],
+        "condition": [
+          "Separate approved decline and success fixture IDs; never model-provided card values."
+        ],
+        "missing": [
+          "Current driver only fills its fixed success card; decline and retry conditions are not implemented."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "Dodo documents generic and insufficient-funds decline test cards.",
+        "limitations": [],
+        "source_refs": [
+          "cards",
+          "testing",
+          "failures"
+        ]
+      },
+      "source_refs": [
+        "cards",
+        "testing",
+        "failures",
+        "target",
+        "provider",
+        "driver_fields"
+      ],
+      "evidence_requirements": [
+        "Actual failed receipt for the first owned checkout; sanitized customer-facing error.",
+        "Fresh retry checkout identity and independent final receipt if retry is authorized.",
+        "Separate read-only app entitlement observation and authenticated protected download response bound to the same account, order and revision.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "An expected decline has no grant and is classified as expected_decline; a deliberate successful retry grants the correct account once."
+        ],
+        "limits": [
+          "The catalog supplies no executable decline card and authorizes no retry run."
+        ],
+        "app_defect_rule": "The expected decline is not an app defect. Access after decline, unsafe error disclosure or duplicate fulfillment can be defects.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "expected_decline",
+      "risk": {
+        "priority": "medium",
+        "consequence": "A documented decline condition interrupts the first attempt."
+      },
+      "selection_rationale": "Select to check handle an expected card decline. Hold out until these capability gaps are resolved: Current driver only fills its fixed success card; decline and retry conditions are not implemented.",
+      "condition_fixture": {
+        "id": "proposed-card-decline-safe-retry-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 50
+    },
+    {
+      "id": "pending-payment-no-access",
+      "area": "checkout_security",
+      "title": "Keep non-final payments pending",
+      "customer_context": {
+        "background": "A remote contractor is waiting for a payment confirmation.",
+        "account_history": "One fresh order with no settled payment.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Do not pay again while the first result is uncertain."
+      },
+      "hypothetical_problem": "Checkout returns while provider settlement is still processing or requires action.",
+      "customer_goal": "See an honest pending state and wait without receiving premature access.",
+      "expected_behavior": [
+        "Distinguish pending, failed, setup and provider-read errors.",
+        "Do not infer success from the return URL.",
+        "Grant only after the same owned payment reaches independently verified success."
+      ],
+      "check_kind": "customer_journey",
+      "availability": "requires_fixture",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Existing receipt states and read-only entitlement oracle."
+        ],
+        "provider": [
+          "Non-final checkout/payment status and later independent status reads."
+        ],
+        "condition": [
+          "Approved reproducible processing or requires_customer_action condition and observation window."
+        ],
+        "missing": [
+          "Current success-card driver cannot deliberately hold a non-final state."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "Dodo documents non-final intent states and delayed test-method outcomes.",
+        "limitations": [],
+        "source_refs": [
+          "checkout",
+          "testing",
+          "failures"
+        ]
+      },
+      "source_refs": [
+        "checkout",
+        "testing",
+        "failures",
+        "provider",
+        "target"
+      ],
+      "evidence_requirements": [
+        "Timestamped independent non-final status reads without collapsing errors into balances.",
+        "Separate read-only app entitlement observation and authenticated protected download response bound to the same account, order and revision.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "Every non-final observation remains pending and ungranted; only matched success permits access."
+        ],
+        "limits": [
+          "A timeout remains inconclusive, not failed settlement or an app defect."
+        ],
+        "app_defect_rule": "Premature access or a false success display can be app defects. A pending provider payment is not a defect by itself.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "pending",
+      "risk": {
+        "priority": "high",
+        "consequence": "Checkout returns while provider settlement is still processing or requires action."
+      },
+      "selection_rationale": "Select to check keep non-final payments pending. Hold out until these capability gaps are resolved: Current success-card driver cannot deliberately hold a non-final state.",
+      "condition_fixture": {
+        "id": "proposed-pending-payment-no-access-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 80
+    },
+    {
+      "id": "upi-india-one-time",
+      "area": "payment_methods",
+      "title": "Use an Indian regional payment method",
+      "customer_context": {
+        "background": "An independent designer in India prefers UPI for one-time software purchases.",
+        "account_history": "Fresh synthetic account.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "IN",
+        "constraint": "Pay in INR using the approved test VPA condition."
+      },
+      "hypothetical_problem": "The card-only checkout does not offer the customer preferred method.",
+      "customer_goal": "Complete a one-time INR purchase through UPI when supported.",
+      "expected_behavior": [
+        "Offer UPI only when business, country and currency requirements are satisfied.",
+        "Respect method-specific pending and failed states.",
+        "Bind the final provider outcome to the owned order before access."
+      ],
+      "check_kind": "customer_journey",
+      "availability": "unsupported_by_target",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Method-aware checkout, INR product and regional driver fixture."
+        ],
+        "provider": [
+          "UPI test eligibility for IN/INR under approved business settings."
+        ],
+        "condition": [
+          "Approved test VPA fixture with exact intended outcome; no real VPA."
+        ],
+        "missing": [
+          "Target restricts checkout to credit/debit.",
+          "Driver fixes US billing and a success card.",
+          "Non-Indian merchant adaptive-currency requirements need an explicitly approved target design."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "conditional",
+        "claim": "Dodo documents UPI test conditions for India and INR, subject to merchant and currency settings.",
+        "limitations": [],
+        "source_refs": [
+          "methods",
+          "testing",
+          "currency"
+        ]
+      },
+      "source_refs": [
+        "methods",
+        "testing",
+        "currency",
+        "target",
+        "config",
+        "driver_fields"
+      ],
+      "evidence_requirements": [
+        "Independent GET /checkouts/{id}, then GET /payments/{payment_id}, with succeeded status and all run/persona/account/order/customer/product/revision identifiers plus exact amount/currency matched.",
+        "Actual selected method, country and currency evidence.",
+        "Separate read-only app entitlement observation and authenticated protected download response bound to the same account, order and revision.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "An eligible test UPI payment independently succeeds in INR and grants the owned account."
+        ],
+        "limits": [
+          "Availability is not established for this business or current target."
+        ],
+        "app_defect_rule": "Unsupported method is a capability gap. An expected regional decline is not an app defect.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "fulfilled",
+      "risk": {
+        "priority": "medium",
+        "consequence": "The card-only checkout does not offer the customer preferred method."
+      },
+      "selection_rationale": "Select to check use an indian regional payment method. Hold out until these capability gaps are resolved: Target restricts checkout to credit/debit. Driver fixes US billing and a success card. Non-Indian merchant adaptive-currency requirements need an explicitly approved target design.",
+      "condition_fixture": {
+        "id": "proposed-upi-india-one-time-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 50
+    },
+    {
+      "id": "issuer-3ds-challenge",
+      "area": "payment_methods",
+      "title": "Complete or abandon an issuer challenge",
+      "customer_context": {
+        "background": "A customer buying a digital asset encounters an authentication prompt.",
+        "account_history": "Fresh account, no prior payment.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Do not unlock access before issuer authentication completes."
+      },
+      "hypothetical_problem": "The issuer requires extra authentication during card checkout.",
+      "customer_goal": "Complete an approved test challenge or safely abandon it.",
+      "expected_behavior": [
+        "Keep requires_customer_action separate from settlement.",
+        "Leave challenge decisions with the provider/issuer.",
+        "No access after failed, abandoned or pending authentication."
+      ],
+      "check_kind": "provider_control",
+      "availability": "provider_owned",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Observation of challenge state and entitlement denial; challenge-aware browser boundary."
+        ],
+        "provider": [
+          "Documented 3DS conditions and independent final status."
+        ],
+        "condition": [
+          "Approved deterministic sandbox challenge fixture; no real authentication account."
+        ],
+        "missing": [
+          "Current driver has no challenge fixture or challenge automation.",
+          "Target does not request force_3ds."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "conditional",
+        "claim": "Dodo documents 3DS states and a checkout force_3ds option; issuer behavior remains provider-controlled.",
+        "limitations": [],
+        "source_refs": [
+          "cards",
+          "checkout",
+          "failures"
+        ]
+      },
+      "source_refs": [
+        "cards",
+        "checkout",
+        "failures",
+        "target"
+      ],
+      "evidence_requirements": [
+        "Provider challenge/state evidence and independent receipt, with sensitive authentication data omitted.",
+        "Separate read-only app entitlement observation and authenticated protected download response bound to the same account, order and revision.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "The app distinguishes incomplete authentication from paid access and obeys the final matched status."
+        ],
+        "limits": [
+          "This checks app integration around an issuer control, not issuer fraud decisions or authentication strength."
+        ],
+        "app_defect_rule": "An issuer challenge or authentication failure is expected provider behavior, not an app defect.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "provider_control",
+      "risk": {
+        "priority": "medium",
+        "consequence": "The issuer requires extra authentication during card checkout."
+      },
+      "selection_rationale": "Select to check complete or abandon an issuer challenge. Hold out until these capability gaps are resolved: Current driver has no challenge fixture or challenge automation. Target does not request force_3ds.",
+      "condition_fixture": {
+        "id": "proposed-issuer-3ds-challenge-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 50
+    },
+    {
+      "id": "wallet-device-eligibility",
+      "area": "payment_methods",
+      "title": "Show a wallet only on an eligible device",
+      "customer_context": {
+        "background": "A returning designer prefers a device wallet.",
+        "account_history": "Fresh isolated account; no saved wallet credentials.",
+        "device": "eligible wallet device",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Avoid entering or provisioning a real card."
+      },
+      "hypothetical_problem": "Wallet availability depends on device, business configuration and provider setup.",
+      "customer_goal": "See eligible methods or a clear fallback without a fabricated wallet success.",
+      "expected_behavior": [
+        "Respect provider eligibility and use a documented fallback.",
+        "Do not claim a wallet was tested from a desktop card purchase."
+      ],
+      "check_kind": "provider_control",
+      "availability": "provider_owned",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Wallet-aware method discovery and device observations."
+        ],
+        "provider": [
+          "Wallet eligibility and a zero-charge synthetic wallet test path."
+        ],
+        "condition": [
+          "Explicitly approved wallet/device fixture without real cards or personal accounts."
+        ],
+        "missing": [
+          "Current target allows only credit/debit.",
+          "Current driver is desktop Chromium.",
+          "No approved synthetic wallet fixture is established within the current safety boundary."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "conditional",
+        "claim": "Dodo documents Apple Pay and Google Pay, but their documented test setup has account/device/domain requirements outside this task.",
+        "limitations": [],
+        "source_refs": [
+          "methods",
+          "testing"
+        ]
+      },
+      "source_refs": [
+        "methods",
+        "testing",
+        "target",
+        "driver_session"
+      ],
+      "evidence_requirements": [
+        "Actual eligibility/configuration evidence; if no safe fixture exists, record unsupported and do not attempt payment.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "The eligibility result and fallback are accurate for the observed device."
+        ],
+        "limits": [
+          "No wallet account provisioning, real card entry, domain verification or compliance claim is authorized."
+        ],
+        "app_defect_rule": "An unavailable wallet on an ineligible device is not an app defect.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "provider_control",
+      "risk": {
+        "priority": "medium",
+        "consequence": "Wallet availability depends on device, business configuration and provider setup."
+      },
+      "selection_rationale": "Select to check show a wallet only on an eligible device. Hold out until these capability gaps are resolved: Current target allows only credit/debit. Current driver is desktop Chromium. No approved synthetic wallet fixture is established within the current safety boundary.",
+      "condition_fixture": {
+        "id": "proposed-wallet-device-eligibility-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 50
+    },
+    {
+      "id": "paypal-unavailable-method",
+      "area": "payment_methods",
+      "title": "Do not promise an unavailable method",
+      "customer_context": {
+        "background": "A digital artist normally prefers PayPal.",
+        "account_history": "Fresh account without PayPal credentials.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Discover availability without opening a personal account."
+      },
+      "hypothetical_problem": "A checkout parameter enum mentions PayPal while current method guidance says new transactions are unavailable.",
+      "customer_goal": "Receive accurate method discovery and choose a supported option.",
+      "expected_behavior": [
+        "Do not infer operational support from an API enum.",
+        "Record PayPal as unavailable under the checked guidance and do not start a PayPal transaction."
+      ],
+      "check_kind": "customer_journey",
+      "availability": "unsupported_by_target",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Method availability discovery and accurate customer copy."
+        ],
+        "provider": [
+          "Current business/method availability confirmation."
+        ],
+        "condition": [
+          "Read-only official guidance and provider capability check before any later authorized execution."
+        ],
+        "missing": [
+          "Target is card-only.",
+          "Current official method guide marks PayPal temporarily unavailable for new transactions."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "conditional",
+        "claim": "The checkout guide includes PayPal as a parameter value; the current payment-method guide marks it unavailable for new transactions.",
+        "limitations": [
+          "Enum presence does not establish operational eligibility."
+        ],
+        "source_refs": [
+          "methods",
+          "checkout"
+        ]
+      },
+      "source_refs": [
+        "methods",
+        "checkout",
+        "target"
+      ],
+      "evidence_requirements": [
+        "Dated method guidance and actual discovered methods; no invented payment receipt.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "Availability remains unexercised and no successful PayPal coverage is claimed."
+        ],
+        "limits": [
+          "Method availability can change; recheck official guidance for a future accepted quote."
+        ],
+        "app_defect_rule": "An accurately disclosed unavailable method is not an app defect.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "rejected",
+      "risk": {
+        "priority": "medium",
+        "consequence": "A checkout parameter enum mentions PayPal while current method guidance says new transactions are unavailable."
+      },
+      "selection_rationale": "Select to check do not promise an unavailable method. Hold out until these capability gaps are resolved: Target is card-only. Current official method guide marks PayPal temporarily unavailable for new transactions.",
+      "condition_fixture": {
+        "id": "proposed-paypal-unavailable-method-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 50
+    },
+    {
+      "id": "forged-return-no-payment",
+      "area": "checkout_security",
+      "title": "Visit a return page without paying",
+      "customer_context": {
+        "background": "A cautious first-time customer bookmarks the payment return page.",
+        "account_history": "Fresh owned account, no succeeded payment.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Check order status without receiving unearned access."
+      },
+      "hypothetical_problem": "A return URL is visited directly or contains untrusted payment parameters.",
+      "customer_goal": "Get an honest unpaid status while protecting access.",
+      "expected_behavior": [
+        "Treat return parameters as navigation input.",
+        "Read provider truth independently and deny access without matched settlement."
+      ],
+      "check_kind": "customer_journey",
+      "availability": "requires_fixture",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Existing return route, independent receipt and entitlement oracle."
+        ],
+        "provider": [
+          "Actual checkout/payment lookup, including absent or failed payment identity."
+        ],
+        "condition": [
+          "Owned unpaid checkout plus controlled URL-mutation fixture."
+        ],
+        "missing": [
+          "Current browser policy does not expose a general forged-return condition; an approved security fixture is needed."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "Dodo checkout status is independently retrievable and may have no payment ID before completion.",
+        "limitations": [],
+        "source_refs": [
+          "checkout"
+        ]
+      },
+      "source_refs": [
+        "checkout",
+        "target",
+        "provider"
+      ],
+      "evidence_requirements": [
+        "Before/after read-only entitlement and independent unpaid checkout observations.",
+        "Exact sanitized return navigation and rejection evidence.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "Return visitation never grants access without independently matched success."
+        ],
+        "limits": [
+          "A URL or email match is never provider evidence."
+        ],
+        "app_defect_rule": "A grant caused by return parameters alone is an app defect. Correct rejection is expected.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "rejected",
+      "risk": {
+        "priority": "high",
+        "consequence": "A return URL is visited directly or contains untrusted payment parameters."
+      },
+      "selection_rationale": "Select to check visit a return page without paying. Hold out until these capability gaps are resolved: Current browser policy does not expose a general forged-return condition; an approved security fixture is needed.",
+      "condition_fixture": {
+        "id": "proposed-forged-return-no-payment-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 80
+    },
+    {
+      "id": "foreign-account-order-binding",
+      "area": "checkout_security",
+      "title": "Reject another account payment",
+      "customer_context": {
+        "background": "Two team designers test separate purchases.",
+        "account_history": "Two fresh synthetic accounts owned by the same authorized run.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Keep each account purchase and files separate."
+      },
+      "hypothetical_problem": "One account attempts to reference the other account checkout or order.",
+      "customer_goal": "Receive a rejection without entitlement crossover or leaking another account details.",
+      "expected_behavior": [
+        "Validate account/order/customer/product/run/persona/revision binding before every grant.",
+        "Reject foreign identifiers and preserve the legitimate owner entitlement."
+      ],
+      "check_kind": "customer_journey",
+      "availability": "requires_fixture",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Existing bound receipt, reconcile and account-owned download checks."
+        ],
+        "provider": [
+          "Independent customer and metadata-bearing checkout/payment reads."
+        ],
+        "condition": [
+          "Two controlled run-owned accounts and approved identifier-swap condition."
+        ],
+        "missing": [
+          "Current persona browser driver has no identifier-swap security fixture."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "Checkout/payment identity and metadata can support merchant-owned binding checks; Dodo does not validate Tryfolk persona ownership.",
+        "limitations": [],
+        "source_refs": [
+          "checkout"
+        ]
+      },
+      "source_refs": [
+        "checkout",
+        "target",
+        "provider"
+      ],
+      "evidence_requirements": [
+        "Sanitized identifier binding/rejection evidence; read-only entitlement observations for both accounts.",
+        "Independent GET /checkouts/{id}, then GET /payments/{payment_id}, with succeeded status and all run/persona/account/order/customer/product/revision identifiers plus exact amount/currency matched.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "Foreign account/order/product references cannot grant or serve files; the rightful account remains unaffected."
+        ],
+        "limits": [
+          "Only isolated accounts owned by the authorized run may be used. No genuine-user takeover test."
+        ],
+        "app_defect_rule": "Cross-account access is an app defect. Correct denial is an expected security outcome.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "rejected",
+      "risk": {
+        "priority": "high",
+        "consequence": "One account attempts to reference the other account checkout or order."
+      },
+      "selection_rationale": "Select to check reject another account payment. Hold out until these capability gaps are resolved: Current persona browser driver has no identifier-swap security fixture.",
+      "condition_fixture": {
+        "id": "proposed-foreign-account-order-binding-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 80
+    },
+    {
+      "id": "fraud-error-safe-disclosure",
+      "area": "fraud_signals",
+      "title": "Explain a blocked payment safely",
+      "customer_context": {
+        "background": "A legitimate customer sees a generic payment failure.",
+        "account_history": "Fresh account with an approved failure fixture.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Understand a safe next step without learning fraud internals."
+      },
+      "hypothetical_problem": "Provider failure details may include sensitive risk or bank information.",
+      "customer_goal": "See a safe customer message while merchant evidence retains a sanitized diagnostic category.",
+      "expected_behavior": [
+        "Inspect failure fields only after independent failed status.",
+        "Map sensitive provider errors to safe customer copy.",
+        "Keep access denied and distinguish risk rejection from app faults."
+      ],
+      "check_kind": "merchant_event",
+      "availability": "requires_fixture",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Safe failure mapping and restricted diagnostic projection."
+        ],
+        "provider": [
+          "Failed payment error fields."
+        ],
+        "condition": [
+          "Approved documented failure fixture or explicitly fixture-labelled payload test."
+        ],
+        "missing": [
+          "Current sanitized receipt omits error fields.",
+          "No merchant error-mapping check or failure browser fixture is implemented."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "Dodo warns that raw failure details can reveal sensitive fraud information and documents safe error handling.",
+        "limitations": [],
+        "source_refs": [
+          "failures",
+          "cards",
+          "sdk_payments"
+        ]
+      },
+      "source_refs": [
+        "failures",
+        "cards",
+        "sdk_payments",
+        "provider"
+      ],
+      "evidence_requirements": [
+        "Actual or explicitly fixture-labelled failed event/read with diagnostic category and customer-visible text.",
+        "Entitlement denial evidence.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "Expected provider rejection is classified separately; customer copy does not expose restricted details."
+        ],
+        "limits": [
+          "No test of fraud scoring accuracy, risk-model fairness or risk bypass is established."
+        ],
+        "app_defect_rule": "Unsafe error disclosure or a false paid claim can be app defects. A documented risk/decline result is not.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "expected_decline",
+      "risk": {
+        "priority": "medium",
+        "consequence": "Provider failure details may include sensitive risk or bank information."
+      },
+      "selection_rationale": "Select to check explain a blocked payment safely. Hold out until these capability gaps are resolved: Current sanitized receipt omits error fields. No merchant error-mapping check or failure browser fixture is implemented.",
+      "condition_fixture": {
+        "id": "proposed-fraud-error-safe-disclosure-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 50
+    },
+    {
+      "id": "hosted-card-data-boundary",
+      "area": "pci_integration",
+      "title": "Keep card data inside hosted checkout",
+      "customer_context": {
+        "background": "A small studio administrator is concerned about payment privacy.",
+        "account_history": "Fresh account, approved public test card condition.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Buy without sending card details to the owned app."
+      },
+      "hypothetical_problem": "The customer needs confidence that the app handles tokens and outcomes rather than card numbers.",
+      "customer_goal": "Complete hosted checkout and observe the owned-app data boundary.",
+      "expected_behavior": [
+        "Collect card details only on authorized provider checkout surfaces.",
+        "Keep app requests, retained traces and logs free of card numbers/CVC/secrets.",
+        "Retain only sanitized checkout/payment identifiers and outcomes."
+      ],
+      "check_kind": "merchant_event",
+      "availability": "requires_fixture",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Hosted checkout flow and an approved redacted request/log audit."
+        ],
+        "provider": [
+          "Hosted card collection and token/payment identity."
+        ],
+        "condition": [
+          "Known public test card with controlled redaction checks; never a real card."
+        ],
+        "missing": [
+          "No dedicated scoped card-data/log-boundary audit fixture exists in the current scenario executor."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "Dodo describes hosted card processing and tokenization. Tryfolk must separately verify its own data handling.",
+        "limitations": [],
+        "source_refs": [
+          "cards",
+          "checkout"
+        ]
+      },
+      "source_refs": [
+        "cards",
+        "checkout",
+        "provider",
+        "driver_fields"
+      ],
+      "evidence_requirements": [
+        "Scoped sanitized app request/log observations with secret/card redaction checks; source references.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "Owned-app requests and retained evidence contain no card number, CVC or private key."
+        ],
+        "limits": [
+          "This is an integration behavior check, not a PCI audit, certification or legal compliance conclusion.",
+          "Do not retain raw provider card-entry traffic as proof."
+        ],
+        "app_defect_rule": "Card/secret leakage into owned app data is an app defect. Provider certification is outside this verification boundary.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "provider_control",
+      "risk": {
+        "priority": "high",
+        "consequence": "The customer needs confidence that the app handles tokens and outcomes rather than card numbers."
+      },
+      "selection_rationale": "Select to check keep card data inside hosted checkout. Hold out until these capability gaps are resolved: No dedicated scoped card-data/log-boundary audit fixture exists in the current scenario executor.",
+      "condition_fixture": {
+        "id": "proposed-hosted-card-data-boundary-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 80
+    },
+    {
+      "id": "international-fixed-currency",
+      "area": "international_currency",
+      "title": "Show and charge the configured currency",
+      "customer_context": {
+        "background": "A UK contractor wants predictable purchase totals.",
+        "account_history": "Fresh account buying a one-time product.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "GB",
+        "constraint": "Know the exact GBP total without unexpected currency switching."
+      },
+      "hypothetical_problem": "Displayed price and charged currency could differ when billing location changes.",
+      "customer_goal": "Buy at the explicitly configured fixed total or receive an honest unsupported condition.",
+      "expected_behavior": [
+        "Compare displayed total with server-owned expected amount/currency.",
+        "Reject provider currency or amount mismatches before access.",
+        "Do not claim adaptive FX coverage from a fixed-currency order."
+      ],
+      "check_kind": "customer_journey",
+      "availability": "requires_fixture",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Existing fixed GBP configuration, corresponding product and amount, exact receipt binding."
+        ],
+        "provider": [
+          "Eligible card checkout in the fixed product currency."
+        ],
+        "condition": [
+          "Approved GB billing fixture and owner-approved GBP test product condition."
+        ],
+        "missing": [
+          "Current driver fixes US billing.",
+          "Business/product GBP eligibility has not been established by this catalog."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "conditional",
+        "claim": "Dodo documents currency and billing-country selection behavior; adaptive currency is a separate business feature.",
+        "limitations": [],
+        "source_refs": [
+          "checkout",
+          "currency"
+        ]
+      },
+      "source_refs": [
+        "checkout",
+        "currency",
+        "config",
+        "target",
+        "driver_fields"
+      ],
+      "evidence_requirements": [
+        "Independent GET /checkouts/{id}, then GET /payments/{payment_id}, with succeeded status and all run/persona/account/order/customer/product/revision identifiers plus exact amount/currency matched.",
+        "Rendered price and actual billing country/currency condition.",
+        "Separate read-only app entitlement observation and authenticated protected download response bound to the same account, order and revision.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "Displayed and independently charged currency/amount agree with the accepted fixed-currency condition."
+        ],
+        "limits": [
+          "No FX-rate accuracy, bank conversion fee or all-country coverage claim."
+        ],
+        "app_defect_rule": "A silently wrong app total or grant after amount/currency mismatch is an app defect. An ineligible currency is a capability gap.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "fulfilled",
+      "risk": {
+        "priority": "medium",
+        "consequence": "Displayed price and charged currency could differ when billing location changes."
+      },
+      "selection_rationale": "Select to check show and charge the configured currency. Hold out until these capability gaps are resolved: Current driver fixes US billing. Business/product GBP eligibility has not been established by this catalog.",
+      "condition_fixture": {
+        "id": "proposed-international-fixed-currency-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 50
+    },
+    {
+      "id": "checkout-language-consistency",
+      "area": "localization",
+      "title": "Use a checkout language the customer understands",
+      "customer_context": {
+        "background": "A French-speaking illustrator is reviewing a digital purchase.",
+        "account_history": "Fresh synthetic account.",
+        "device": "desktop Chromium",
+        "locale": "fr-FR",
+        "billing_country": "FR",
+        "constraint": "Understand price, errors and return status in the chosen language."
+      },
+      "hypothetical_problem": "The storefront or provider checkout may ignore the intended language.",
+      "customer_goal": "Complete a clear localized journey without ambiguous price formatting.",
+      "expected_behavior": [
+        "Pin the requested locale as an actual driver/provider condition.",
+        "Record which app and checkout strings are localized.",
+        "Preserve payment identity through the localized return journey."
+      ],
+      "check_kind": "customer_journey",
+      "availability": "unsupported_by_target",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Localized storefront/return copy and locale-aware price rendering."
+        ],
+        "provider": [
+          "Checkout customization.force_language for a documented language."
+        ],
+        "condition": [
+          "Approved fr-FR browser and supported provider language condition."
+        ],
+        "missing": [
+          "App price rendering uses fixed English formatting.",
+          "Target does not set force_language.",
+          "Current driver uses en-US."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "Dodo documents checkout force_language; this does not localize the owned application.",
+        "limitations": [],
+        "source_refs": [
+          "checkout"
+        ]
+      },
+      "source_refs": [
+        "checkout",
+        "target",
+        "driver_session"
+      ],
+      "evidence_requirements": [
+        "Actual browser locale, rendered strings and price formatting.",
+        "Independent GET /checkouts/{id}, then GET /payments/{payment_id}, with succeeded status and all run/persona/account/order/customer/product/revision identifiers plus exact amount/currency matched.",
+        "Separate read-only app entitlement observation and authenticated protected download response bound to the same account, order and revision.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "The declared supported strings and amount/currency are understandable in the observed locale."
+        ],
+        "limits": [
+          "A French persona narrative alone is not localization coverage. No full accessibility or translation-quality audit."
+        ],
+        "app_defect_rule": "Incorrect app copy or total formatting under an implemented locale can be app defects. Missing locale support is a disclosed gap.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "fulfilled",
+      "risk": {
+        "priority": "medium",
+        "consequence": "The storefront or provider checkout may ignore the intended language."
+      },
+      "selection_rationale": "Select to check use a checkout language the customer understands. Hold out until these capability gaps are resolved: App price rendering uses fixed English formatting. Target does not set force_language. Current driver uses en-US.",
+      "condition_fixture": {
+        "id": "proposed-checkout-language-consistency-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 50
+    },
+    {
+      "id": "tax-inclusive-total-display",
+      "area": "tax_display",
+      "title": "Show the full tax-inclusive total",
+      "customer_context": {
+        "background": "A studio purchaser needs the final total before approving a small expense.",
+        "account_history": "Fresh synthetic account.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Avoid a surprise tax increase at checkout."
+      },
+      "hypothetical_problem": "Product, checkout and receipt could present inconsistent gross totals or tax components.",
+      "customer_goal": "Review a tax-inclusive total and a consistent breakdown where available.",
+      "expected_behavior": [
+        "Declare the accepted product tax-inclusive price and expected gross amount.",
+        "Match the provider gross total before grants.",
+        "Only claim tax breakdown coverage when the provider fields were actually read."
+      ],
+      "check_kind": "customer_journey",
+      "availability": "requires_fixture",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Existing gross amount binding plus safe tax/line-item read projection and display."
+        ],
+        "provider": [
+          "Tax-inclusive product pricing and payment tax/line-item fields."
+        ],
+        "condition": [
+          "Owner-approved test tax-inclusive product, billing location and known expected gross/breakdown."
+        ],
+        "missing": [
+          "Current receipt sanitization omits tax/line items and UI does not expose their breakdown."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "Dodo documents tax-inclusive pricing and the official SDK exposes tax and line-item fields.",
+        "limitations": [],
+        "source_refs": [
+          "tax",
+          "sdk_payments"
+        ]
+      },
+      "source_refs": [
+        "tax",
+        "sdk_payments",
+        "config",
+        "provider"
+      ],
+      "evidence_requirements": [
+        "Independent GET /checkouts/{id}, then GET /payments/{payment_id}, with succeeded status and all run/persona/account/order/customer/product/revision identifiers plus exact amount/currency matched.",
+        "Actual checkout gross total and independently read tax/line-item breakdown.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "Displayed gross amount matches the provider total; displayed tax components agree with the observed payment."
+        ],
+        "limits": [
+          "No claim that a tax rate, jurisdiction treatment or filing is legally correct."
+        ],
+        "app_defect_rule": "Wrong displayed totals or grant after total mismatch are app defects. Tax-law compliance is outside scope.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "fulfilled",
+      "risk": {
+        "priority": "medium",
+        "consequence": "Product, checkout and receipt could present inconsistent gross totals or tax components."
+      },
+      "selection_rationale": "Select to check show the full tax-inclusive total. Hold out until these capability gaps are resolved: Current receipt sanitization omits tax/line items and UI does not expose their breakdown.",
+      "condition_fixture": {
+        "id": "proposed-tax-inclusive-total-display-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 50
+    },
+    {
+      "id": "full-refund-access-policy",
+      "area": "refunds",
+      "title": "Observe a full refund and access policy",
+      "customer_context": {
+        "background": "A designer purchased the wrong asset pack.",
+        "account_history": "A settled run-owned purchase exists.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Receive the declared refund outcome and know whether access remains."
+      },
+      "hypothetical_problem": "A full refund can settle while app access remains inconsistent with merchant policy.",
+      "customer_goal": "See a correctly bound full refund and the separately declared entitlement policy.",
+      "expected_behavior": [
+        "Register the merchant refund/access policy before acceptance.",
+        "Bind refund to the original owned payment and observe final refund status.",
+        "Apply the declared access policy idempotently."
+      ],
+      "check_kind": "merchant_event",
+      "availability": "unsupported_by_target",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Refund read projection, signed lifecycle handler and predeclared entitlement policy."
+        ],
+        "provider": [
+          "Test refund create/retrieve with payment binding."
+        ],
+        "condition": [
+          "Separately authorized merchant lifecycle fixture for a settled owned test payment."
+        ],
+        "missing": [
+          "Current write/read key grants exclude Refunds.",
+          "Target has no refund API, event handler or access-revocation policy.",
+          "Current task authorizes no refund operation."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "Dodo tax guidance and official SDK document full refunds; request acceptance is not final settlement.",
+        "limitations": [],
+        "source_refs": [
+          "tax",
+          "sdk_refunds",
+          "sdk_payments"
+        ]
+      },
+      "source_refs": [
+        "tax",
+        "sdk_refunds",
+        "sdk_payments",
+        "target",
+        "provider"
+      ],
+      "evidence_requirements": [
+        "Independent original payment and refund status/amount/currency/binding reads.",
+        "Policy snapshot and read-only entitlement before/after; signed-event evidence if used.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "A final bound full refund and observed access agree with the predeclared merchant policy."
+        ],
+        "limits": [
+          "A refund request alone is not a settled refund. No default assumption that refund revokes access."
+        ],
+        "app_defect_rule": "Only a deviation from the registered merchant policy or wrong-account handling is an app defect.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "lifecycle_policy",
+      "risk": {
+        "priority": "medium",
+        "consequence": "A full refund can settle while app access remains inconsistent with merchant policy."
+      },
+      "selection_rationale": "Select to check observe a full refund and access policy. Hold out until these capability gaps are resolved: Current write/read key grants exclude Refunds. Target has no refund API, event handler or access-revocation policy. Current task authorizes no refund operation.",
+      "condition_fixture": {
+        "id": "proposed-full-refund-access-policy-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 50
+    },
+    {
+      "id": "partial-refund-tax-binding",
+      "area": "refunds",
+      "title": "Refund part of a purchase accurately",
+      "customer_context": {
+        "background": "A studio purchaser wants a partial credit for one item.",
+        "account_history": "A settled owned order with refundable items exists.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Receive the approved partial amount without changing unrelated access."
+      },
+      "hypothetical_problem": "Per-item refund amount and tax treatment may be confused with the entire order.",
+      "customer_goal": "Observe a correctly bound partial refund and declared entitlement outcome.",
+      "expected_behavior": [
+        "Declare refundable items, quantity, gross/net interpretation and access policy.",
+        "Keep partial refund totals within the original bound payment.",
+        "Read the final refund independently."
+      ],
+      "check_kind": "merchant_event",
+      "availability": "unsupported_by_target",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Multi-item refund mapping, refund reads and explicit partial-access policy."
+        ],
+        "provider": [
+          "Per-item refund amount and tax_inclusive setting."
+        ],
+        "condition": [
+          "Separately approved itemized owned test order and expected partial totals."
+        ],
+        "missing": [
+          "Current target is one product/quantity one.",
+          "Refund grants, handlers, projections and policy are absent."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "Dodo documents per-item partial refund tax treatment and official SDK item parameters.",
+        "limitations": [],
+        "source_refs": [
+          "tax",
+          "sdk_refunds",
+          "sdk_payments"
+        ]
+      },
+      "source_refs": [
+        "tax",
+        "sdk_refunds",
+        "sdk_payments",
+        "target"
+      ],
+      "evidence_requirements": [
+        "Original item/payment evidence plus independently final refund items, amount and currency.",
+        "Entitlement policy and observed app state.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "Final partial refund matches the registered items/amount/tax interpretation and access policy."
+        ],
+        "limits": [
+          "No partial refund is currently authorized or runnable. Legal tax accuracy is not tested."
+        ],
+        "app_defect_rule": "Wrong item/account/amount handling under an implemented policy can be a defect. A pending or rejected refund is not one by itself.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "lifecycle_policy",
+      "risk": {
+        "priority": "medium",
+        "consequence": "Per-item refund amount and tax treatment may be confused with the entire order."
+      },
+      "selection_rationale": "Select to check refund part of a purchase accurately. Hold out until these capability gaps are resolved: Current target is one product/quantity one. Refund grants, handlers, projections and policy are absent.",
+      "condition_fixture": {
+        "id": "proposed-partial-refund-tax-binding-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 50
+    },
+    {
+      "id": "subscription-initial-activation",
+      "area": "subscriptions",
+      "title": "Activate a recurring purchase once",
+      "customer_context": {
+        "background": "A studio manager wants recurring access for a team tool.",
+        "account_history": "Fresh synthetic account, no subscription.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Know recurring terms and when access begins."
+      },
+      "hypothetical_problem": "Initial payment and subscription activation may arrive as separate events.",
+      "customer_goal": "Receive access only according to registered paid activation policy.",
+      "expected_behavior": [
+        "Show recurring price/period and cancellation terms before purchase.",
+        "Bind subscription and initial payment to the owned account.",
+        "Handle activation and payment events without duplicate grants."
+      ],
+      "check_kind": "customer_journey",
+      "availability": "unsupported_by_target",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Subscription product, subscription reads/handlers and explicit activation policy."
+        ],
+        "provider": [
+          "Test recurring checkout plus subscription/payment identity."
+        ],
+        "condition": [
+          "Separately authorized recurring fixture with no paid trial and a declared lifecycle policy."
+        ],
+        "missing": [
+          "Current target, key scopes and receipt schema allow only one-time purchases.",
+          "All subscriptions and paid trials are forbidden under current authority."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "Dodo documents recurring activation and separate payment/subscription lifecycle events.",
+        "limitations": [],
+        "source_refs": [
+          "subscriptions",
+          "sdk_subscriptions",
+          "webhooks"
+        ]
+      },
+      "source_refs": [
+        "subscriptions",
+        "sdk_subscriptions",
+        "webhooks",
+        "provider",
+        "target"
+      ],
+      "evidence_requirements": [
+        "Independent initial payment and subscription reads plus account metadata.",
+        "Registered recurring terms, activation policy and read-only entitlement.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "Observed paid/active states and access agree with the registered policy once."
+        ],
+        "limits": [
+          "Catalog presence does not authorize a subscription or recurring charge."
+        ],
+        "app_defect_rule": "Policy/binding violations can be app defects. Unimplemented recurring capability is a disclosed gap.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "lifecycle_policy",
+      "risk": {
+        "priority": "medium",
+        "consequence": "Initial payment and subscription activation may arrive as separate events."
+      },
+      "selection_rationale": "Select to check activate a recurring purchase once. Hold out until these capability gaps are resolved: Current target, key scopes and receipt schema allow only one-time purchases. All subscriptions and paid trials are forbidden under current authority.",
+      "condition_fixture": {
+        "id": "proposed-subscription-initial-activation-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 50
+    },
+    {
+      "id": "renewal-failure-grace-period",
+      "area": "renewal",
+      "title": "Handle a failed renewal without inventing a policy",
+      "customer_context": {
+        "background": "A team administrator depends on continued access during a billing interruption.",
+        "account_history": "Previously active run-owned subscription in a future approved fixture.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Understand the declared grace period and recovery steps."
+      },
+      "hypothetical_problem": "A renewal fails and may move through delinquency and on-hold states.",
+      "customer_goal": "See access and notices match the predeclared renewal policy.",
+      "expected_behavior": [
+        "Keep failed renewal distinct from initial activation.",
+        "Observe provider state transitions and apply registered grace/on-hold rules.",
+        "Recovery must not grant another account or double-apply access."
+      ],
+      "check_kind": "merchant_event",
+      "availability": "unsupported_by_target",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Renewal reads/event handling and persisted grace/recovery policy."
+        ],
+        "provider": [
+          "Subscription renewal failure, past_due/on_hold and recovery signals."
+        ],
+        "condition": [
+          "Separately authorized controlled renewal fixture and virtual/observation timing definition."
+        ],
+        "missing": [
+          "Subscriptions are forbidden on the current target.",
+          "No lifecycle clock, event handler, read scope or grace policy is implemented."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "Dodo subscription guidance describes renewal delinquency, on-hold and payment-method recovery.",
+        "limitations": [],
+        "source_refs": [
+          "subscriptions",
+          "sdk_subscriptions",
+          "webhooks"
+        ]
+      },
+      "source_refs": [
+        "subscriptions",
+        "sdk_subscriptions",
+        "webhooks",
+        "target"
+      ],
+      "evidence_requirements": [
+        "Independent renewal payment and subscription state timeline.",
+        "Accepted timing/policy snapshot, notices and read-only entitlement timeline.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "Every observed access transition and notice follows the accepted lifecycle policy."
+        ],
+        "limits": [
+          "A failure event is not enough to infer immediate cancellation or access revocation."
+        ],
+        "app_defect_rule": "Expected renewal decline is not an app defect. A deviation from the registered grace/recovery policy may be.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "lifecycle_policy",
+      "risk": {
+        "priority": "medium",
+        "consequence": "A renewal fails and may move through delinquency and on-hold states."
+      },
+      "selection_rationale": "Select to check handle a failed renewal without inventing a policy. Hold out until these capability gaps are resolved: Subscriptions are forbidden on the current target. No lifecycle clock, event handler, read scope or grace policy is implemented.",
+      "condition_fixture": {
+        "id": "proposed-renewal-failure-grace-period-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 50
+    },
+    {
+      "id": "cancel-at-period-end",
+      "area": "cancellation",
+      "title": "Respect a scheduled cancellation",
+      "customer_context": {
+        "background": "A project manager wants to stop recurring billing after a project finishes.",
+        "account_history": "One active run-owned subscription in a future fixture.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Avoid a later renewal while using the paid period allowed by policy."
+      },
+      "hypothetical_problem": "The app may confuse scheduling cancellation with immediate cancellation.",
+      "customer_goal": "See confirmed cancellation timing and the declared remaining access.",
+      "expected_behavior": [
+        "Record whether cancellation is immediate or at the next billing date.",
+        "Independently read the provider cancellation state.",
+        "Apply the registered access policy and do not claim future billing stopped without evidence."
+      ],
+      "check_kind": "merchant_event",
+      "availability": "unsupported_by_target",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Cancellation action/read projection and explicit paid-period access policy."
+        ],
+        "provider": [
+          "Subscription update with cancelled status or cancel_at_next_billing_date."
+        ],
+        "condition": [
+          "Separately approved owned recurring fixture, cancellation timing and later observation window."
+        ],
+        "missing": [
+          "Current target has no subscription, cancellation route, key scope or lifecycle policy.",
+          "Recurring operations are forbidden under current authority."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "The official SDK declares cancellation timing fields and cancelled status; this is API support, not target implementation.",
+        "limitations": [],
+        "source_refs": [
+          "sdk_subscriptions",
+          "subscriptions"
+        ]
+      },
+      "source_refs": [
+        "sdk_subscriptions",
+        "subscriptions",
+        "target"
+      ],
+      "evidence_requirements": [
+        "Independent subscription update result followed by read, effective timing and later billing observations.",
+        "Policy snapshot and read-only entitlement.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "Confirmed cancellation timing and observed access match the accepted policy; future-renewal claim requires its own observation."
+        ],
+        "limits": [
+          "No real cancellation or subscription operation is authorized. A scheduled flag alone does not prove no later charge."
+        ],
+        "app_defect_rule": "Wrong timing or access under a registered policy can be app defects. Supported cancellation is not currently exercised.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "lifecycle_policy",
+      "risk": {
+        "priority": "medium",
+        "consequence": "The app may confuse scheduling cancellation with immediate cancellation."
+      },
+      "selection_rationale": "Select to check respect a scheduled cancellation. Hold out until these capability gaps are resolved: Current target has no subscription, cancellation route, key scope or lifecycle policy. Recurring operations are forbidden under current authority.",
+      "condition_fixture": {
+        "id": "proposed-cancel-at-period-end-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 50
+    },
+    {
+      "id": "dispute-chargeback-lifecycle",
+      "area": "disputes_chargebacks",
+      "title": "Observe a disputed owned payment",
+      "customer_context": {
+        "background": "A customer questions a completed digital purchase.",
+        "account_history": "Settled run-owned test purchase, never a genuine chargeback.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Know the declared dispute/access policy without losing unrelated purchases."
+      },
+      "hypothetical_problem": "A dispute can progress independently of the original succeeded payment.",
+      "customer_goal": "Observe the test dispute state and app policy outcome bound to the correct purchase.",
+      "expected_behavior": [
+        "Keep payment settlement, refund and dispute status separate.",
+        "Bind dispute to the original owned payment/account.",
+        "Apply only a registered merchant policy, with idempotent event handling."
+      ],
+      "check_kind": "merchant_event",
+      "availability": "unsupported_by_target",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Dispute read projection/handler and explicit entitlement policy."
+        ],
+        "provider": [
+          "Dispute states and an approved documented test dispute condition."
+        ],
+        "condition": [
+          "Separately authorized lifecycle fixture; documented ACH/SEPA test-dispute examples do not imply a card dispute fixture."
+        ],
+        "missing": [
+          "Current target/key scopes do not include dispute resources or handlers.",
+          "Current card-only driver lacks a dispute condition and merchant policy."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "conditional",
+        "claim": "Official SDK exposes disputes; testing guidance documents specific method test-dispute conditions, not universal card dispute simulation.",
+        "limitations": [],
+        "source_refs": [
+          "sdk_disputes",
+          "sdk_payments",
+          "testing"
+        ]
+      },
+      "source_refs": [
+        "sdk_disputes",
+        "sdk_payments",
+        "testing",
+        "target",
+        "provider"
+      ],
+      "evidence_requirements": [
+        "Independent dispute identity/status/payment binding and original payment read.",
+        "Registered access policy, event ledger and read-only entitlement.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "Bound observed dispute transitions and access match the registered policy without affecting another account."
+        ],
+        "limits": [
+          "No genuine chargeback, dispute filing or claim about winning a dispute is authorized."
+        ],
+        "app_defect_rule": "Expected test dispute status is not an app defect. Wrong-account or policy handling can be.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "lifecycle_policy",
+      "risk": {
+        "priority": "medium",
+        "consequence": "A dispute can progress independently of the original succeeded payment."
+      },
+      "selection_rationale": "Select to check observe a disputed owned payment. Hold out until these capability gaps are resolved: Current target/key scopes do not include dispute resources or handlers. Current card-only driver lacks a dispute condition and merchant policy.",
+      "condition_fixture": {
+        "id": "proposed-dispute-chargeback-lifecycle-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 50
+    },
+    {
+      "id": "invoice-receipt-owned-purchase",
+      "area": "invoice_receipt",
+      "title": "Retrieve the receipt for the correct purchase",
+      "customer_context": {
+        "background": "A freelancer needs a purchase receipt for project expenses.",
+        "account_history": "A settled run-owned one-time order exists.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "See the correct amount/currency and account without exposing another customer invoice."
+      },
+      "hypothetical_problem": "A paid return page may be mistaken for an invoice, or an invoice link may belong to another payment.",
+      "customer_goal": "Retrieve an actual provider invoice/receipt projection for the owned settled purchase.",
+      "expected_behavior": [
+        "Use independently matched payment identity before exposing receipt fields.",
+        "Display only a safe projection or approved provider invoice link.",
+        "Keep ownership checks and absent/pending invoice state explicit."
+      ],
+      "check_kind": "customer_journey",
+      "availability": "unsupported_by_target",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Safe invoice/receipt read projection and account-owned UI route."
+        ],
+        "provider": [
+          "Payment invoice_id/invoice_url fields where available."
+        ],
+        "condition": [
+          "Approved settled owned payment with invoice availability; no public evidence link or other customer invoice."
+        ],
+        "missing": [
+          "Current sanitized receipt omits invoice fields and target has no invoice UI.",
+          "Controller needs an explicit approved invoice-origin policy before any link is visited."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "Official payment SDK exposes invoice identity/URL; field presence is not proof that every payment has an invoice.",
+        "limitations": [],
+        "source_refs": [
+          "sdk_payments",
+          "checkout"
+        ]
+      },
+      "source_refs": [
+        "sdk_payments",
+        "checkout",
+        "provider",
+        "target"
+      ],
+      "evidence_requirements": [
+        "Independent GET /checkouts/{id}, then GET /payments/{payment_id}, with succeeded status and all run/persona/account/order/customer/product/revision identifiers plus exact amount/currency matched.",
+        "Independent invoice availability/identity and safe amount/currency projection bound to the account.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "The observed invoice belongs to the owned settled payment and displays the matched total/currency."
+        ],
+        "limits": [
+          "Return-page text or a fixture receipt is not a provider invoice. Do not expose private invoice URLs in public evidence."
+        ],
+        "app_defect_rule": "A wrong-account invoice or false receipt claim can be an app defect. An absent invoice remains unavailable/inconclusive.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "fulfilled",
+      "risk": {
+        "priority": "medium",
+        "consequence": "A paid return page may be mistaken for an invoice, or an invoice link may belong to another payment."
+      },
+      "selection_rationale": "Select to check retrieve the receipt for the correct purchase. Hold out until these capability gaps are resolved: Current sanitized receipt omits invoice fields and target has no invoice UI. Controller needs an explicit approved invoice-origin policy before any link is visited.",
+      "condition_fixture": {
+        "id": "proposed-invoice-receipt-owned-purchase-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 50
+    },
+    {
+      "id": "signed-webhook-grant-once",
+      "area": "webhooks_events",
+      "title": "Authenticate a payment event and grant once",
+      "customer_context": {
+        "background": "A customer has paid but confirmation arrives twice.",
+        "account_history": "One settled run-owned order awaiting event processing.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Receive access once despite retried delivery."
+      },
+      "hypothetical_problem": "An attacker sends an invalid signature, then the valid event is delivered repeatedly.",
+      "customer_goal": "Observe that only authenticated correctly bound settlement can fulfill the order once.",
+      "expected_behavior": [
+        "Authenticate untouched raw bytes with official SDK unwrap.",
+        "Reject invalid signatures and mismatched event/order/account/product.",
+        "Use an immutable event ledger and independently matched payment before granting; replay applies once."
+      ],
+      "check_kind": "merchant_event",
+      "availability": "requires_fixture",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Existing raw-body unwrap, event ledger, binding and independent grant checks."
+        ],
+        "provider": [
+          "Actual signed test payment event for a genuine test-mode owned purchase."
+        ],
+        "condition": [
+          "Approved endpoint/secret and controlled invalid/replay delivery fixtures; explicitly labelled unit events remain fixtures."
+        ],
+        "missing": [
+          "Current canonical run has no authorized signed webhook endpoint/secret/delivery fixture."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "Dodo documents raw-body authentication, unique delivery IDs and retries; dashboard examples are sample payloads.",
+        "limitations": [],
+        "source_refs": [
+          "webhooks"
+        ]
+      },
+      "source_refs": [
+        "webhooks",
+        "target",
+        "provider"
+      ],
+      "evidence_requirements": [
+        "Authenticated event ID/body hash and sanitized signature outcome; event-to-order mapping and apply count.",
+        "Independent GET /checkouts/{id}, then GET /payments/{payment_id}, with succeeded status and all run/persona/account/order/customer/product/revision identifiers plus exact amount/currency matched.",
+        "Separate read-only app entitlement observation and authenticated protected download response bound to the same account, order and revision.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "Bad signature grants zero access; the correctly bound independently settled event grants once, including exact replay."
+        ],
+        "limits": [
+          "Signed examples and invented unit payloads are not genuine Dodo purchase evidence.",
+          "No endpoint/tunnel signup is authorized by this catalog."
+        ],
+        "app_defect_rule": "Unauthenticated or misbound grant, duplicate effect or mutable event history is an app defect.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "fulfilled",
+      "risk": {
+        "priority": "high",
+        "consequence": "An attacker sends an invalid signature, then the valid event is delivered repeatedly."
+      },
+      "selection_rationale": "Select to check authenticate a payment event and grant once. Hold out until these capability gaps are resolved: Current canonical run has no authorized signed webhook endpoint/secret/delivery fixture.",
+      "condition_fixture": {
+        "id": "proposed-signed-webhook-grant-once-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 80
+    },
+    {
+      "id": "unhandled-lifecycle-event-disclosed",
+      "area": "webhooks_events",
+      "title": "Disclose ignored non-payment events",
+      "customer_context": {
+        "background": "A support operator reviews a customer lifecycle event.",
+        "account_history": "Owned test order with a separately approved lifecycle fixture.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Know whether the app handles the event rather than assuming a webhook acknowledgment changed access."
+      },
+      "hypothetical_problem": "The webhook route accepts an authenticated refund, dispute or subscription event but currently ignores it.",
+      "customer_goal": "Record acknowledged versus applied events and leave unsupported policy outcomes explicit.",
+      "expected_behavior": [
+        "Authenticate before classification.",
+        "Do not treat an HTTP acknowledgment as applied lifecycle policy.",
+        "Record ignored event type and unchanged entitlement without inventing support."
+      ],
+      "check_kind": "merchant_event",
+      "availability": "unsupported_by_target",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "Read-only event disposition evidence plus future per-type policy handlers where required."
+        ],
+        "provider": [
+          "Documented refund, dispute and subscription event schemas."
+        ],
+        "condition": [
+          "Separately approved signed lifecycle condition or explicitly fixture-labelled schema test."
+        ],
+        "missing": [
+          "Current webhook route only applies payment.succeeded.",
+          "Refund/dispute/subscription policy handlers are absent and related operations are not authorized."
+        ],
+        "conditions": {}
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "Dodo documents multiple event payload families; the owned route deliberately ignores authenticated non-payment.succeeded types.",
+        "limitations": [],
+        "source_refs": [
+          "webhooks",
+          "sdk_refunds",
+          "sdk_disputes",
+          "sdk_subscriptions"
+        ]
+      },
+      "source_refs": [
+        "webhooks",
+        "target",
+        "sdk_refunds",
+        "sdk_disputes",
+        "sdk_subscriptions"
+      ],
+      "evidence_requirements": [
+        "Sanitized event type/authentication/disposition and read-only entitlement before/after.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "Ignored event is disclosed as unsupported and cannot be reported as lifecycle coverage or a successful policy application."
+        ],
+        "limits": [
+          "Adding a catalog entry does not add a handler or expand key grants."
+        ],
+        "app_defect_rule": "A false lifecycle-success report is a reporting defect. Disclosed unimplemented handling is a capability gap.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "lifecycle_policy",
+      "risk": {
+        "priority": "high",
+        "consequence": "The webhook route accepts an authenticated refund, dispute or subscription event but currently ignores it."
+      },
+      "selection_rationale": "Select to check disclose ignored non-payment events. Hold out until these capability gaps are resolved: Current webhook route only applies payment.succeeded. Refund/dispute/subscription policy handlers are absent and related operations are not authorized.",
+      "condition_fixture": {
+        "id": "proposed-unhandled-lifecycle-event-disclosed-v1",
+        "registration": "not_registered"
+      },
+      "risk_priority": 80
+    },
+    {
+      "id": "paid-no-access-download-retest",
+      "area": "paid_without_access",
+      "title": "Retest a paid customer who cannot download",
+      "customer_context": {
+        "background": "A freelance illustrator paid for artwork needed for a client deadline.",
+        "account_history": "Fresh synthetic account per pass with the same saved profile and initial memory.",
+        "device": "desktop Chromium",
+        "locale": "en-US",
+        "billing_country": "US",
+        "constraint": "Recover the promised files without paying twice in one pass."
+      },
+      "hypothetical_problem": "A disclosed target source fault suppresses fulfillment after an independently settled payment.",
+      "customer_goal": "Observe the access failure, then repeat the identical saved case on a separately pinned repaired revision.",
+      "expected_behavior": [
+        "Check provider success independently before diagnosing paid-but-no-access.",
+        "Use separate read-only entitlement and protected download evidence.",
+        "Replay the accepted scenario/profile/initial memory/conditions on the repaired source with fresh isolated account and checkout identities."
+      ],
+      "check_kind": "customer_journey",
+      "availability": "runnable",
+      "exercise_status": "not_exercised",
+      "required_capabilities": {
+        "target": [
+          "isolated_test_auth",
+          "one_time_checkout",
+          "receipt_readonly",
+          "entitlement_readonly",
+          "protected_download",
+          "source_revision_manifest",
+          "source_fault_repair"
+        ],
+        "provider": [
+          "test_card_checkout",
+          "checkout_read",
+          "payment_read"
+        ],
+        "condition": [
+          "Approved existing success-card US desktop condition; separately pinned before/after source manifests."
+        ],
+        "missing": [],
+        "conditions": {
+          "device": "desktop Chromium",
+          "locale": "en-US",
+          "billing_country": "US",
+          "account_history": "new",
+          "fixture_id": "dodo-public-success-card-us-desktop-v1"
+        }
+      },
+      "provider_support": {
+        "status": "documented",
+        "claim": "Dodo checkout/payment reads can establish settlement; app fulfillment remains an independently observed owned-target behavior.",
+        "limitations": [],
+        "source_refs": [
+          "checkout",
+          "cards",
+          "testing"
+        ]
+      },
+      "source_refs": [
+        "checkout",
+        "cards",
+        "testing",
+        "target",
+        "provider",
+        "config",
+        "download",
+        "driver_fields",
+        "driver_session"
+      ],
+      "evidence_requirements": [
+        "Independent GET /checkouts/{id}, then GET /payments/{payment_id}, with succeeded status and all run/persona/account/order/customer/product/revision identifiers plus exact amount/currency matched.",
+        "Separate read-only app entitlement observation and authenticated protected download response bound to the same account, order and revision.",
+        "Immutable accepted quote/scenario/profile/initial-memory/condition snapshots and hashes.",
+        "Exact before/after source manifest and actual protected file response/identity.",
+        "Retain sanitized immutable evidence with provenance, timestamps and fixture labels. Do not store secrets or card data."
+      ],
+      "verification_boundary": {
+        "pass": [
+          "Before can be called paid-no-access only with matched success and absent promised access. After passes only with matched success, entitlement and actual authorized file."
+        ],
+        "limits": [
+          "No assertion that the actual current frozen run failed for this hypothetical reason.",
+          "Fixture provider reads cannot diagnose a genuine Dodo payment.",
+          "Browser URL/email or an unobserved download anchor is insufficient."
+        ],
+        "app_defect_rule": "Independently settled payment plus reproducibly missing promised app access is an app defect. Setup, pending and provider-read errors remain separate.",
+        "nonpayment_is_app_defect": false
+      },
+      "expected_outcome": "fulfilled",
+      "risk": {
+        "priority": "high",
+        "consequence": "A disclosed target source fault suppresses fulfillment after an independently settled payment."
+      },
+      "selection_rationale": "Select to check retest a paid customer who cannot download. The existing owned one-time card journey supports this condition after every readiness/authority gate.",
+      "condition_fixture": {
+        "id": "dodo-public-success-card-us-desktop-v1",
+        "registration": "existing_driver"
+      },
+      "risk_priority": 90
+    }
+  ],
+  "catalog_owner": "tryfolk-dodo-r1",
+  "provider": "dodo_test_mode",
+  "source_base": "869ae63f7433b24ce42fe5d2f4f5f7711531d81f",
+  "target_source_sha256": "15cdde99320dd1a283f9cfab4f01e2c13fe5a584a2158cd3ba30fb5355acd0ac",
+  "documentation_checked_on": "2026-10-11",
+  "catalog_is_data_only": true,
+  "readiness_policy": {
+    "execution_authorized_by_catalog": false,
+    "runnable_meaning": "Existing target and driver can attempt this case after every gate passes. This is an implementation capability, never a current authorization, readiness result or observed pass.",
+    "gates": [
+      "Explicit authority for both budgeted N-persona passes and their selected cases.",
+      "Owner-approved Dodo test-mode product and distinct narrowly scoped write/read keys; no new secrets created by catalog selection.",
+      "Owned loopback target readiness and exact revision manifest match; no production mode or provider overrides.",
+      "Condition fixture supported by the actual driver and separately approved; customer narrative cannot change payment fields, device, locale or method.",
+      "Real independent test-provider receipts and read-only app entitlement/download evidence. Fixture-labelled unit data, examples and redirects are never genuine Dodo payment evidence."
+    ],
+    "provider_api_origin": "https://test.dodopayments.com",
+    "checkout_origin": "https://test.checkout.dodopayments.com",
+    "current_driver_condition": {
+      "fixture_id": "dodo-public-success-card-us-desktop-v1",
+      "device": "desktop Chromium",
+      "locale": "en-US",
+      "billing_country": "US",
+      "method": "card",
+      "source_refs": [
+        "driver_fields",
+        "driver_session",
+        "testing"
+      ]
+    },
+    "prohibited_actions": [
+      "live charges or real cards",
+      "subscriptions or paid trials on the current target",
+      "bank/KYC or production provider",
+      "account/publication/deployment changes",
+      "provider/model calls authorized merely by catalog presence"
+    ]
+  },
+  "sources": {
+    "checkout": {
+      "kind": "official_docs",
+      "url": "https://docs.dodopayments.com/developer-resources/checkout-session",
+      "checked_on": "2026-10-11",
+      "claim": "Checkout sessions carry a single-use URL, product/customer metadata, optional language and 3DS settings, and nullable payment identity before completion."
+    },
+    "methods": {
+      "kind": "official_docs",
+      "url": "https://docs.dodopayments.com/features/payment-methods",
+      "checked_on": "2026-10-11",
+      "claim": "Method eligibility depends on currency, country and business settings. The current method guide states PayPal is temporarily unavailable for new transactions."
+    },
+    "testing": {
+      "kind": "official_docs",
+      "url": "https://docs.dodopayments.com/miscellaneous/testing-process",
+      "checked_on": "2026-10-11",
+      "claim": "Dodo documents distinct test conditions for cards and regional methods, including delayed outcomes. Documentation is not execution evidence."
+    },
+    "cards": {
+      "kind": "official_docs",
+      "url": "https://docs.dodopayments.com/features/payment-methods/cards",
+      "checked_on": "2026-10-11",
+      "claim": "Card guidance describes hosted card entry, documented decline fixtures and issuer-owned 3DS challenges. It does not establish Tryfolk compliance or test results."
+    },
+    "failures": {
+      "kind": "official_docs",
+      "url": "https://docs.dodopayments.com/developer-resources/handle-payment-failures",
+      "checked_on": "2026-10-11",
+      "claim": "Failed payments expose error fields that merchants must translate safely; non-final states need further verification."
+    },
+    "webhooks": {
+      "kind": "official_docs",
+      "url": "https://docs.dodopayments.com/developer-resources/webhooks",
+      "checked_on": "2026-10-11",
+      "claim": "Webhook guidance requires raw-body authentication and delivery idempotency. Signed dashboard examples are sample events, not real purchases."
+    },
+    "currency": {
+      "kind": "official_docs",
+      "url": "https://docs.dodopayments.com/features/adaptive-currency",
+      "checked_on": "2026-10-11",
+      "claim": "Adaptive currency uses country and eligibility rules. It is disabled in the current fixed-currency target."
+    },
+    "tax": {
+      "kind": "official_docs",
+      "url": "https://docs.dodopayments.com/features/tax-inclusive-pricing",
+      "checked_on": "2026-10-11",
+      "claim": "Tax-inclusive pricing uses price.tax_inclusive. The guide documents full and per-item partial refunds with tax treatment."
+    },
+    "subscriptions": {
+      "kind": "official_docs",
+      "url": "https://docs.dodopayments.com/developer-resources/subscription-integration-guide",
+      "checked_on": "2026-10-11",
+      "claim": "Subscription guidance distinguishes activation, renewal, delinquency and payment-method recovery. The owned target implements one-time purchases only."
+    },
+    "target": {
+      "kind": "owned_source",
+      "path": "dodo-target/lib/target.ts",
+      "commit": "869ae63f7433b24ce42fe5d2f4f5f7711531d81f",
+      "symbols": "Target",
+      "claim": "One-time card checkout and authenticated reconciliation; only verified payment.succeeded webhook events can reach grants. Other authenticated event types are ignored."
+    },
+    "provider": {
+      "kind": "owned_source",
+      "path": "dodo-target/lib/provider.ts",
+      "commit": "869ae63f7433b24ce42fe5d2f4f5f7711531d81f",
+      "symbols": "DodoTestProvider / paymentMismatches / sanitizedPayment",
+      "claim": "Separate test-only write/read clients; checkout then payment reads bind identifiers, amount and currency. Sanitized receipts omit invoice, tax, refund and dispute projections."
+    },
+    "config": {
+      "kind": "owned_source",
+      "path": "dodo-target/lib/config.ts",
+      "commit": "869ae63f7433b24ce42fe5d2f4f5f7711531d81f",
+      "symbols": "configuration / sourceFingerprint",
+      "claim": "Only isolated local fixtures and fixed USD/INR/EUR/GBP are configured. Hashed target source excludes scenarios, tests and docs."
+    },
+    "download": {
+      "kind": "owned_source",
+      "path": "dodo-target/app/special-downloads/page.tsx",
+      "commit": "869ae63f7433b24ce42fe5d2f4f5f7711531d81f",
+      "symbols": "Special Downloads page",
+      "claim": "Account-owned entitlement leads to protected download anchors."
+    },
+    "driver_fields": {
+      "kind": "owned_source",
+      "path": "src/tryfolk/browser_policy.py",
+      "commit": "869ae63f7433b24ce42fe5d2f4f5f7711531d81f",
+      "symbols": "TEST_FIELDS / BrowserPolicy",
+      "claim": "Driver controls one documented successful card and US billing fields. A persona cannot supply other payment fields."
+    },
+    "driver_session": {
+      "kind": "owned_source",
+      "path": "integrations/stagehand/local_session.py",
+      "commit": "869ae63f7433b24ce42fe5d2f4f5f7711531d81f",
+      "symbols": "browser context",
+      "claim": "Current condition uses desktop Chromium, en-US locale and fixed viewport."
+    },
+    "sdk_payments": {
+      "kind": "official_sdk",
+      "package": "dodopayments",
+      "version": "2.54.2",
+      "repository": "https://github.com/dodopayments/dodopayments-typescript",
+      "installed_path": "dodo-target/node_modules/dodopayments/resources/payments.d.ts",
+      "symbols": "Payments.retrieve / retrieveLineItems / Payment",
+      "claim": "Official SDK declares invoice_url, invoice_id, tax, refunds, disputes and payment error fields. Exposing them safely requires a new target read projection."
+    },
+    "sdk_refunds": {
+      "kind": "official_sdk",
+      "package": "dodopayments",
+      "version": "2.54.2",
+      "repository": "https://github.com/dodopayments/dodopayments-typescript",
+      "installed_path": "dodo-target/node_modules/dodopayments/resources/refunds.d.ts",
+      "symbols": "Refunds.create / retrieve / RefundCreateParams",
+      "claim": "Official SDK supports refund identity, payment binding and per-item tax-inclusive partial refunds."
+    },
+    "sdk_disputes": {
+      "kind": "official_sdk",
+      "package": "dodopayments",
+      "version": "2.54.2",
+      "repository": "https://github.com/dodopayments/dodopayments-typescript",
+      "installed_path": "dodo-target/node_modules/dodopayments/resources/disputes.d.ts",
+      "symbols": "Disputes.retrieve / list / Dispute",
+      "claim": "Official SDK exposes dispute/payment identity and lifecycle states. These methods are absent from the owned target wrapper."
+    },
+    "sdk_subscriptions": {
+      "kind": "official_sdk",
+      "package": "dodopayments",
+      "version": "2.54.2",
+      "repository": "https://github.com/dodopayments/dodopayments-typescript",
+      "installed_path": "dodo-target/node_modules/dodopayments/resources/subscriptions.d.ts",
+      "symbols": "Subscriptions.update / SubscriptionUpdateParams",
+      "claim": "Official SDK declares immediate cancelled status and cancel_at_next_billing_date. These operations are absent from the owned target wrapper."
+    }
+  },
+  "replay_policy": {
+    "freeze_at": "quote_acceptance",
+    "immutable_fields": [
+      "catalog_version",
+      "scenario_id",
+      "scenario_snapshot",
+      "scenario_sha256",
+      "profile_snapshot",
+      "profile_sha256",
+      "initial_memory_snapshot",
+      "initial_memory_sha256",
+      "condition_fixture_snapshot",
+      "condition_fixture_sha256",
+      "accepted_quote_snapshot"
+    ],
+    "restore_exactly": [
+      "scenario_snapshot",
+      "profile_snapshot",
+      "initial_memory_snapshot",
+      "condition_fixture_snapshot"
+    ],
+    "fresh_identifiers": [
+      "run_attempt_id",
+      "account_id",
+      "cookie_session",
+      "order_id",
+      "checkout_session_id",
+      "payment_id"
+    ],
+    "accepted_quote_may_change": false,
+    "target_revision_rule": "Pin exact before/after target manifests separately. Revision is the intended changed variable; no regenerated profile or remembered before-pass knowledge enters the after initial memory.",
+    "hash_rule": "Persist exact UTF-8 snapshot bytes with SHA-256. Read those frozen bytes for replay, not a newer catalog or regenerated dataset row.",
+    "generated_state_freeze_at": "before_first_journey",
+    "accepted_assignment_fields": [
+      "scenario_snapshot",
+      "condition_fixture_snapshot",
+      "accepted_quote_snapshot",
+      "seed_snapshot_when_selected"
+    ],
+    "generated_state_fields": [
+      "profile_snapshot",
+      "initial_memory_snapshot"
+    ],
+    "generated_state_rule": "Actual generated profile and initial memory do not exist at quote acceptance. Freeze them once after generation and before the first journey; restore those exact bytes before the after journey. Accepted quote and assignments never change."
+  },
+  "selection_policy": {
+    "owner": "core backend; UI renders saved data",
+    "demographic_payment_predictions": false,
+    "requires_registered_condition": true,
+    "whole_catalog_coverage_from_N": false,
+    "exercised_ids_separate_from_assigned_ids": true,
+    "merchant_events_count_as_browser_personas": false,
+    "rule": "Select scenarios first using actual target capabilities, registered fixtures and concrete risk. Pair a saved relevant profile only after eligibility. A persona narrative is never a provider condition.",
+    "rationale_rule": "Save the case ID, risk, supported capability/condition IDs, customer goal and plain reason for each selected assignment. Reject unsupported requirements before accepting the quote.",
+    "budget_rule": "Quote both fixed N-persona passes upfront and freeze selected assignments. Thousands of available seeds do not expand N or spending.",
+    "coverage_rule": "Report assigned, attempted, independently verified and inconclusive IDs separately for each pass. Held-out and merchant/event checks use separate counts. Selected N establishes coverage only for the selected actually exercised cases."
+  },
+  "version": "2026-10-11.2"
+}

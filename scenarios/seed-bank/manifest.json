@@ -1,0 +1,104 @@
+{
+  "schema_version": "tryfolk.seed-preparation-manifest.v1",
+  "status": "private_prepared_root_publication_review_pending",
+  "normalizer_version": "normalize-v1",
+  "catalog_version": "2026-10-11.2",
+  "bank": {
+    "schema_version": "tryfolk.persona-seeds.v1",
+    "version": "2026-10-11.normalize-v1.a1ac327aa1f767b48620487771decfea38598b36b5b55fde62009226a4cde459",
+    "file_name": "seed-bank.json",
+    "sha256": "9ddaf0282f7a264909290758befcafcfd9ccd798816317c86624846463fc8303",
+    "canonical_sha256": "607f00061e8d81f4323bba67e0ce06f96859f06237a5c3b47b079c98b27c4a4d",
+    "bytes": 17411259,
+    "tracked": false
+  },
+  "source": {
+    "attribution": "NVIDIA Corporation, Nemotron-Personas-USA and Nemotron-Personas-India. Adapted by Tryfolk through filtering, field selection, Unicode/whitespace normalization and relevance tagging. No NVIDIA endorsement.",
+    "dataset": "NVIDIA Nemotron-Personas bounded USA/India bundle",
+    "license": "CC-BY-4.0",
+    "license_url": "https://creativecommons.org/licenses/by/4.0/",
+    "revision": "sha256:6e4cdf4b4d8e38404b01bc55102ca52f6797e5ca4adf62ee5bf9a058a294ada1",
+    "revision_kind": "sha256_of_explicit_upstream_source_bundle_not_an_upstream_git_commit",
+    "upstream_sources": [
+      {
+        "dataset": "nvidia/Nemotron-Personas-India",
+        "license": "CC-BY-4.0",
+        "publisher": "NVIDIA Corporation",
+        "revision": "adefeefcc0fc3f85726d20bed0e4ed8d66372a54",
+        "url": "https://huggingface.co/datasets/nvidia/Nemotron-Personas-India"
+      },
+      {
+        "dataset": "nvidia/Nemotron-Personas-USA",
+        "license": "CC-BY-4.0",
+        "publisher": "NVIDIA Corporation",
+        "revision": "5b4cd35ab46490c1da1bd2b5a2324d6f871be180",
+        "url": "https://huggingface.co/datasets/nvidia/Nemotron-Personas-USA"
+      }
+    ],
+    "url": "https://huggingface.co/nvidia"
+  },
+  "admission": {
+    "examined": 8000,
+    "accepted": 2703,
+    "rejected": 5297,
+    "examined_by_source": {
+      "nvidia/Nemotron-Personas-India": 4000,
+      "nvidia/Nemotron-Personas-USA": 4000
+    },
+    "accepted_by_source": {
+      "nvidia/Nemotron-Personas-India": 1188,
+      "nvidia/Nemotron-Personas-USA": 1515
+    },
+    "rejected_by_reason": {
+      "invalid_age": 4,
+      "no_explicit_creative_relevance": 4441,
+      "not_adult": 852
+    }
+  },
+  "sample_limit_rows": 8000,
+  "http_response_bytes": 45981347,
+  "profile_records_are_synthetic": true,
+  "executed_personas": 0,
+  "provider_calls": 0,
+  "model_calls": 0,
+  "publication_review_required": true,
+  "normalizer_sha256": "67642b2a544d40b5f7a28b3e5177c40e74ae348f2d5a0231a7171ddce144f3d7",
+  "source_cards": [
+    {
+      "dataset": "nvidia/Nemotron-Personas-USA",
+      "revision": "5b4cd35ab46490c1da1bd2b5a2324d6f871be180",
+      "url": "https://huggingface.co/datasets/nvidia/Nemotron-Personas-USA/blob/5b4cd35ab46490c1da1bd2b5a2324d6f871be180/README.md",
+      "card_sha256": "31b7c4fa060b4847a0d43c646da25225f8922ce8fc6531330e0b3a842b0c4223",
+      "license": "CC-BY-4.0",
+      "commercial_use_stated": true
+    },
+    {
+      "dataset": "nvidia/Nemotron-Personas-India",
+      "revision": "adefeefcc0fc3f85726d20bed0e4ed8d66372a54",
+      "url": "https://huggingface.co/datasets/nvidia/Nemotron-Personas-India/blob/adefeefcc0fc3f85726d20bed0e4ed8d66372a54/README.md",
+      "card_sha256": "e90e3a6e76a24e114c3699f34c388047aea5251a080fca3dc840856b5813e11f",
+      "license": "CC-BY-4.0",
+      "commercial_use_stated": true
+    }
+  ],
+  "excluded_sources": [
+    {
+      "dataset": "proj-persona/PersonaHub",
+      "revision": "16777e34bf5cb758b925cae5d84e868ee6c2100c",
+      "card_license": "CC-BY-NC-SA-4.0",
+      "card_sha256": "1aae1391a961025c6c2d94100c91e27e443a8a8e859507bf8d15016d45b3963c",
+      "reason": "Noncommercial license and linked official Tencent research-only disclaimer; no rows imported.",
+      "official_repository": "https://github.com/tencent-ailab/persona-hub",
+      "repository_revision": "72bf19b886312041b32f7cae12c02dab8653c6fa",
+      "repository_readme_sha256": "5f1e9f4f5aa484f9e03c4d56ca33d666122a462ffbb389ec5b28c9ed33722a83"
+    }
+  ],
+  "limitations": [
+    "Bounded first-4000-row sample per source, not random or population-representative.",
+    "Creative-context matching is lexical relevance, not measured realism or purchase intent.",
+    "Age contradictions and instruction-like patterns are screened deterministically; arbitrary semantic contradictions or obfuscated injection are not proved absent.",
+    "No provider condition, locale/device/country coverage, fraud prediction or executed customer follows from source text.",
+    "Actual generated profiles and initial memory are separate future saved states.",
+    "Normalized records remain private until root completes publication safety review."
+  ]
+}
