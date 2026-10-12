@@ -118,6 +118,7 @@ class Service:
 
     def quote(self, url, count, scenario_ids=None):
         target = self.target(url)
+        self.validate_count(count)
         scenario_plan, scenario_gates = self.scenario_plan(target, count, scenario_ids)
         gates = list(self.settings.gates) + scenario_gates
         gates.extend(target.setup_gates)
@@ -165,6 +166,7 @@ class Service:
             "app_url": url,
             "persona_count": count,
             "max_personas": self.settings.max_personas,
+            "fixed_persona_count": self.settings.fixed_persona_count,
             "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
             "affordable": costs["reserved"] <= available,
             "ready": not gates,
@@ -219,6 +221,14 @@ class Service:
         }
         return q
 
+    def validate_count(self, count):
+        fixed = self.settings.fixed_persona_count
+        if fixed is not None and count != fixed:
+            raise DomainError(
+                422, "fixed_cohort_count",
+                "This deployment runs the same four saved buyers before and after repair. Request a fresh four-buyer quote.",
+            )
+
     def baseline_retry_quote(self, run_id, token):
         from .baseline_retry import quote_retry
 
@@ -244,6 +254,7 @@ class Service:
             q = self.store.load(db, "quotes", quote_id)
             if not q:
                 raise DomainError(404, "quote_missing", "Quote not found.")
+            self.validate_count(q["persona_count"])
             if q.get("kind") == "baseline_retry":
                 raise DomainError(
                     409, "owner_required", "Use the owner baseline retry endpoint for this quote."
@@ -783,6 +794,7 @@ class Service:
                     raise DomainError(409, "idempotency_conflict", "Replay key used for a different request.")
                 return json.loads(old[1])
             before = self.store.load(db, "runs", run_id)
+            self.validate_count(before["persona_count"])
             repair = self.store.load(db, "repairs", repair_id)
             population = self.store.load(db, "populations", before["population_id"])
             money = db.execute(

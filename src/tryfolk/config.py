@@ -28,6 +28,7 @@ class Settings:
     budget_microusd: int = 1_000_000
     owner_token: str | None = None
     max_personas: int = 20
+    fixed_persona_count: int | None = None
     bulk_execution: bool = False
     browser_concurrency: int = 2
     per_persona_microusd: int = 20_000
@@ -59,6 +60,11 @@ class Settings:
             raise ValueError("TRYFOLK_BROWSER_CONCURRENCY must be a whole number from 1 to 10.")
         if type(self.max_personas) is not int or not 1 <= self.max_personas <= 1000:
             raise ValueError("TRYFOLK_MAX_PERSONAS must be a whole number from 1 to 1000.")
+        if self.fixed_persona_count is not None and (
+            type(self.fixed_persona_count) is not int or self.fixed_persona_count != 4
+            or self.max_personas != 4 or self.browser_concurrency != 4 or not self.bulk_execution
+        ):
+            raise ValueError("TRYFOLK_FIXED_PERSONAS=4 requires max_personas=4 and four concurrent bulk lanes.")
 
     @classmethod
     def from_env(cls):
@@ -69,6 +75,9 @@ class Settings:
             raise ValueError("TRYFOLK_MAX_PERSONAS must be a whole number from 1 to 1000.")
         bulk_execution = os.environ.get("TRYFOLK_BULK_EXECUTION", "false")
         concurrency = os.environ.get("TRYFOLK_BROWSER_CONCURRENCY", "2")
+        fixed = os.environ.get("TRYFOLK_FIXED_PERSONAS")
+        if fixed is not None and fixed != "4":
+            raise ValueError("TRYFOLK_FIXED_PERSONAS must be absent or exactly 4.")
         if bulk_execution not in ("true", "false"):
             raise ValueError("TRYFOLK_BULK_EXECUTION must be true or false.")
         if not concurrency.isascii() or not concurrency.isdecimal():
@@ -104,6 +113,7 @@ class Settings:
             budget_microusd=int(os.environ.get("TRYFOLK_BUDGET_MICROUSD", "1000000")),
             owner_token=os.environ.get("TRYFOLK_OWNER_TOKEN"),
             max_personas=int(max_personas),
+            fixed_persona_count=4 if fixed is not None else None,
             bulk_execution=bulk_execution == "true",
             browser_concurrency=int(concurrency),
             baseline_retry_approval_path=Path(os.environ["TRYFOLK_BASELINE_RETRY_APPROVAL"])

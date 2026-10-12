@@ -187,6 +187,7 @@ def create_app(settings=None, *, checkpoint_transport=None):
                 next((t.url for t in service.settings.targets if t.fault == "paid-no-access"), None),
             ),
             "max_personas": service.settings.max_personas,
+            "fixed_persona_count": service.settings.fixed_persona_count,
             "cfo_plan_status": "imported" if service.settings.cfo_plan_path else "missing",
         }
 
