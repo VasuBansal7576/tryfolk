@@ -18,8 +18,9 @@ REVIEWED_OPENERS = {
 
 
 class ManualAddressGate(RuntimeError):
-    def __init__(self, reason):
+    def __init__(self, reason, *, observation_evidence=None):
         self.reason = reason
+        self.observation_evidence = observation_evidence
         super().__init__("Manual address effect is unestablished: " + reason)
 
 
@@ -164,22 +165,48 @@ async def wait_for_billing_initialization(read_document, policy, *, deadline, on
     loop = asyncio.get_running_loop()
     emit = on_event or (lambda event: None)
     original = None
+    document_reads = 0
+    last_document = None
+
+    def stopped(reason):
+        # The adapter already retains this closed field in private error
+        # evidence. Use existing reads only, without raw URLs, page text or
+        # controls; an initialization gate is never a customer outcome.
+        return ManualAddressGate(reason, observation_evidence={
+            "stage": "billing_initialization", "reason": reason,
+            "document_reads": document_reads, "last_document": last_document,
+            "customer_outcome": "unmeasured",
+        })
+
     while True:
         remaining = deadline - loop.time()
         if remaining <= 0:
-            raise ManualAddressGate("billing_initialization_unobserved")
+            raise stopped("billing_initialization_unobserved")
         try:
             document = await asyncio.wait_for(read_document(), remaining)
         except TimeoutError:
-            raise ManualAddressGate("billing_initialization_unobserved") from None
+            raise stopped("billing_initialization_unobserved") from None
+        document_reads += 1
+        binding = document["url"], document.get("generation")
+        last_document = {
+            "origin_approved": policy.provider == "dodo" and exact_origin(document["url"]) == DODO_CHECKOUT,
+            "same_initial_document": original is None or binding == original,
+            "ready_state": document.get("ready_state") if document.get("ready_state") in
+                ("loading", "interactive", "complete") else "unknown",
+            "body_present": document.get("body_present") is True,
+            "busy": document.get("busy") if isinstance(document.get("busy"), bool) else None,
+            "hosted_test_mode_visible": document.get("hosted_test_mode_visible") is True,
+            "visible_controls_present": isinstance(document.get("visible_controls"), int)
+                and document["visible_controls"] > 0,
+            "visible_error_observed": document.get("error_signature") not in (None, "[]"),
+        }
         policy.check_url(document["url"])
         if policy.provider != "dodo" or exact_origin(document["url"]) != DODO_CHECKOUT:
-            raise ManualAddressGate("manual_origin_unapproved")
-        binding = document["url"], document.get("generation")
+            raise stopped("manual_origin_unapproved")
         if original is None:
             original = binding
         elif binding != original:
-            raise ManualAddressGate("manual_document_changed")
+            raise stopped("manual_document_changed")
         ready = (
             document.get("hosted_test_mode_visible") is True
             and document.get("ready_state") in ("interactive", "complete")

@@ -161,6 +161,65 @@ async def test_billing_without_observed_test_badge_exhausts_original_deadline():
     assert all(event["initialization_observed"] is False for event in events)
 
 
+async def test_initialization_stop_retains_last_closed_document_checks_without_an_extra_read():
+    import json
+
+    reads = []
+    document = observed()[1] | {"hosted_test_mode_visible": False,
+                               "visible_controls": 3, "error_signature": '["private error"]'}
+
+    async def read():
+        reads.append("read")
+        return document
+
+    with pytest.raises(ManualAddressGate) as stopped:
+        await wait_for_billing_initialization(
+            read, BrowserPolicy("http://127.0.0.1:3300", "dodo"),
+            deadline=asyncio.get_running_loop().time() + 0.01,
+        )
+    evidence = stopped.value.observation_evidence
+    assert evidence["reason"] == "billing_initialization_unobserved"
+    assert evidence["document_reads"] == len(reads) == 1
+    assert evidence["last_document"] == {
+        "origin_approved": True, "same_initial_document": True,
+        "ready_state": "complete", "body_present": True, "busy": False,
+        "hosted_test_mode_visible": False, "visible_controls_present": True,
+        "visible_error_observed": True,
+    }
+    assert evidence["customer_outcome"] == "unmeasured"
+    assert all(value not in json.dumps(evidence) for value in (URL, "private error", "xpath=", SOURCE))
+
+
+async def test_initialization_timeout_before_first_document_retains_unknown_checks():
+    async def read():
+        await asyncio.sleep(60)
+
+    with pytest.raises(ManualAddressGate) as stopped:
+        await wait_for_billing_initialization(
+            read, BrowserPolicy("http://127.0.0.1:3300", "dodo"),
+            deadline=asyncio.get_running_loop().time() + 0.01,
+        )
+    assert stopped.value.observation_evidence["document_reads"] == 0
+    assert stopped.value.observation_evidence["last_document"] is None
+
+
+async def test_initialization_document_swap_retains_changed_binding_without_private_urls():
+    documents = iter([observed()[1] | {"hosted_test_mode_visible": False},
+                      observed(generation=2)[1] | {"hosted_test_mode_visible": True}])
+
+    async def read():
+        return next(documents)
+
+    with pytest.raises(ManualAddressGate) as stopped:
+        await wait_for_billing_initialization(
+            read, BrowserPolicy("http://127.0.0.1:3300", "dodo"),
+            deadline=asyncio.get_running_loop().time() + 1,
+        )
+    assert stopped.value.observation_evidence["reason"] == "manual_document_changed"
+    assert stopped.value.observation_evidence["document_reads"] == 2
+    assert stopped.value.observation_evidence["last_document"]["same_initial_document"] is False
+
+
 async def test_billing_deadline_cannot_be_extended_by_a_slow_document_read():
     async def read():
         await asyncio.sleep(60)
