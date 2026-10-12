@@ -9,7 +9,7 @@ import json
 from uuid import NAMESPACE_URL, uuid5
 
 from tryfolk.bulk_personas import PurchaseIntent, validated_purchase_plan
-from tryfolk.scenarios import digest
+from tryfolk.scenarios import digest, challenge_binding
 
 MAX_CHUNK = 64
 MAX_MODEL_INPUT = 256_000
@@ -70,6 +70,7 @@ def _generate_bulk(command, TinyPerson, generate, created):
     people, requests, used_seeds = [], [], set()
     # Validate the whole chunk before constructing any SDK person or invoking a model.
     for offset, assignment in enumerate(selected):
+        challenge_binding(assignment)
         seed_binding = assignment.get("seed", {})
         seed = seed_binding.get("record_snapshot", {})
         conditions = assignment.get("condition_fixture_snapshot", {})
@@ -113,6 +114,9 @@ def _generate_bulk(command, TinyPerson, generate, created):
         person.define("supported_test_context", deepcopy(assignment["condition_fixture_snapshot"]))
         profile = deepcopy(person.to_json()["persona"])
         scenario = assignment["scenario_snapshot"]
+        challenge = challenge_binding(assignment)
+        challenge_fields = ({"buyer_challenge": challenge,
+                             "buyer_challenge_sha256": assignment["buyer_challenge_sha256"]} if challenge else {})
         people.append(
             (
                 person,
@@ -124,6 +128,7 @@ def _generate_bulk(command, TinyPerson, generate, created):
                     "conditions": deepcopy(assignment["condition_fixture_snapshot"]),
                     "bulk_scenario_snapshot": deepcopy(scenario),
                     "bulk_seed_provenance": deepcopy(assignment["seed"]),
+                    **deepcopy(challenge_fields),
                 },
             )
         )
@@ -132,6 +137,7 @@ def _generate_bulk(command, TinyPerson, generate, created):
                 "persona_id": persona_id,
                 "profile": profile,
                 "scenario": scenario,
+                **deepcopy(challenge_fields),
                 "hypothetical_problem_is_unobserved": True,
                 "purchase_context": {
                     "provider": "dodo",
@@ -185,6 +191,7 @@ def _generate_bulk(command, TinyPerson, generate, created):
             "profile_sha256": digest(persona["profile"]),
             "scenario_sha256": digest(persona["bulk_scenario_snapshot"]),
             "source": "genuine_codex_batch_intent",
+            **({"buyer_challenge_sha256": persona["buyer_challenge_sha256"]} if "buyer_challenge" in persona else {}),
         }
         goal = persona["bulk_scenario_snapshot"]["customer_goal"]
         memory = [
@@ -193,6 +200,8 @@ def _generate_bulk(command, TinyPerson, generate, created):
                 "content": json.dumps(
                     {
                         "customer_goal": goal,
+                        **({"buyer_challenge": persona["buyer_challenge"],
+                            "buyer_challenge_sha256": persona["buyer_challenge_sha256"]} if "buyer_challenge" in persona else {}),
                         "conditional_purchase_intent": persona["purchase_plan"],
                         "supported_test_context": persona["conditions"],
                         "hypothetical_problem_is_unobserved": True,

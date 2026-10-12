@@ -4,6 +4,7 @@ Catalog inputs describe hypothetical cases. Only actual retained journey evidenc
 establish exercise; catalog size and seed diversity are never coverage denominators.
 """
 
+from copy import deepcopy
 import hashlib
 import json
 import re
@@ -19,6 +20,51 @@ def digest(value):
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
     ).hexdigest()
+
+
+class BuyerChallenge(BaseModel):
+    """A buyer constraint inside supported journeys, never measured case coverage."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    version: Literal["tryfolk.four-buyers.v1"]
+    id: Literal["paid-file-deadline", "manual-billing", "bounded-purchase", "isolated-download"]
+    title: str = Field(min_length=1, max_length=160)
+    buyer_constraint: str = Field(min_length=1, max_length=1200)
+    check_emphasis: list[str] = Field(min_length=1, max_length=8)
+    hypothetical_problem_is_unobserved: Literal[True]
+
+
+FOUR_BUYER_CHALLENGES = tuple(BuyerChallenge.model_validate({
+    "version": "tryfolk.four-buyers.v1", "id": ident, "title": title,
+    "buyer_constraint": constraint, "check_emphasis": checks,
+    "hypothetical_problem_is_unobserved": True,
+}).model_dump() for ident, title, constraint, checks in (
+    ("paid-file-deadline", "Deadline-critical illustrator",
+     "I need usable artwork for a client deadline. Buy the one-time art pack once; a checkout success message is insufficient until independently matched payment and actual usable download are established.",
+     ["matched_payment", "settled_app_access", "actual_protected_file"]),
+    ("manual-billing", "Manual-billing studio buyer",
+     "Address suggestions may not match my billing address. Buy the one-time art pack once, prefer a freshly visible manual-address choice, and continue only after required US billing fields are verified. Judge completion by usable paid artwork, not an assumed payment outcome.",
+     ["fresh_manual_choice", "verified_required_billing_fields", "owned_calculation_before_continue", "paid_file_access"]),
+    ("bounded-purchase", "Strict-budget procurement buyer",
+     "My test purchase budget is exactly USD 1.00 for one art pack. Make at most one payment attempt and require an independently matched amount and currency plus usable paid artwork. Do not assume the displayed final checkout total has been validated.",
+     ["independent_amount_100_USD", "one_owned_purchase", "paid_file_access"]),
+    ("isolated-download", "Account-isolation asset buyer",
+     "Other buyers may check out concurrently. My purchase and downloaded artwork must belong to my own isolated account, order and source revision. Buy once and require actual authorized file evidence; another buyer's payment or access cannot satisfy my goal.",
+     ["fresh_account_context", "owned_payment_order_revision", "owned_download_bytes_and_hash"]),
+))
+
+
+def challenge_binding(record):
+    """Validate optional historical-compatible, canonical descriptor and hash."""
+    present = {key for key in ("buyer_challenge", "buyer_challenge_sha256") if key in record}
+    if not present:
+        return None
+    if len(present) != 2:
+        raise ValueError("Complete immutable buyer challenge binding required.")
+    descriptor = BuyerChallenge.model_validate(record["buyer_challenge"]).model_dump()
+    canonical = next((value for value in FOUR_BUYER_CHALLENGES if value["id"] == descriptor["id"]), None)
+    if descriptor != canonical or record["buyer_challenge_sha256"] != digest(descriptor):
+        raise ValueError("Buyer challenge constraint or binding changed.")
+    return deepcopy(descriptor)
 
 
 class DataRecord(BaseModel):
@@ -332,6 +378,11 @@ def select_plan(catalog, bank, target, count, manual_ids=None):
                     "measured_relevance": False,
                 },
             }
+        if count == 4 and all(s["id"] in ("one-time-card-download", "paid-no-access-download-retest")
+                              and s.get("condition_fixture", {}).get("id") == "dodo-public-success-card-us-desktop-v1"
+                              for s in chosen):
+            assignment["buyer_challenge"] = deepcopy(FOUR_BUYER_CHALLENGES[index])
+            assignment["buyer_challenge_sha256"] = digest(assignment["buyer_challenge"])
         assignments.append(assignment)
     return {
         "catalog_version": catalog["version"],
@@ -410,6 +461,10 @@ def freeze_population(population, plan):
             raise ValueError(
                 "Scenario personas require an accepted seed, actual TinyPerson snapshot, profile and initial semantic memory."
             )
+        challenge = challenge_binding(assignment)
+        if challenge is not None and (challenge_binding(persona) != challenge
+                or challenge["buyer_constraint"] not in json.dumps(persona["initial_semantic_memory"], ensure_ascii=False)):
+            raise ValueError("Assigned buyer constraint must be present in the saved persona and initial memory.")
         persona["assigned_scenario"] = {
             **assignment,
             "saved_persona_sha256": digest(saved_persona(persona)),
@@ -433,6 +488,8 @@ def validate_population(population, plan):
         raise ValueError("Saved scenario population must remain exactly the quoted N.")
     for index, persona in enumerate(population):
         actual, expected = persona.get("assigned_scenario", {}), plan["assignments"][index]
+        if challenge_binding(expected) != challenge_binding(persona):
+            raise ValueError("Saved buyer challenge changed; same-persona replay blocked.")
         if (
             persona.get("index") != index
             or actual.get("saved_persona_sha256") != digest(saved_persona(persona))
@@ -492,6 +549,8 @@ def generation_constraints(brief, index):
         return None
     assignment = plan["assignments"][index]
     return {
+        **({"buyer_challenge": challenge_binding(assignment),
+            "buyer_challenge_sha256": assignment["buyer_challenge_sha256"]} if challenge_binding(assignment) else {}),
         "scenario": assignment["scenario_snapshot"],
         "seed_profile": assignment["seed"]["record_snapshot"]["profile"],
         "conditions": assignment["condition_fixture_snapshot"],

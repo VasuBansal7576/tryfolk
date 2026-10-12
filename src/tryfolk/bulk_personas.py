@@ -7,7 +7,7 @@ all native frame, checkout, customer, currency and financial-submit guards.
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 from typing import Literal
 
-from .scenarios import digest
+from .scenarios import digest, challenge_binding
 
 
 class PurchaseIntent(BaseModel):
@@ -20,7 +20,9 @@ class PurchaseIntent(BaseModel):
 
 def validated_purchase_plan(persona):
     plan = persona.get("purchase_plan")
-    if not isinstance(plan, dict) or set(plan) != {
+    challenge = challenge_binding(persona)
+    challenge_keys = {"buyer_challenge_sha256"} if challenge is not None else set()
+    if not isinstance(plan, dict) or set(plan) != challenge_keys | {
         "persona_id",
         "profile_sha256",
         "scenario_sha256",
@@ -31,6 +33,8 @@ def validated_purchase_plan(persona):
         "source",
     }:
         raise ValueError("Complete individual purchase plan required.")
+    if challenge is not None and plan["buyer_challenge_sha256"] != digest(challenge):
+        raise ValueError("Individual purchase intention buyer challenge changed.")
     if plan["persona_id"] != persona.get("id") or plan["source"] != "genuine_codex_batch_intent":
         raise ValueError("Purchase plan identity or inference source changed.")
     if plan["profile_sha256"] != digest(persona.get("profile")):

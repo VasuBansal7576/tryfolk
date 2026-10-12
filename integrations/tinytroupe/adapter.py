@@ -225,6 +225,15 @@ def main():
                         raise RuntimeError(
                             "TinyTroupe did not generate the requested population; no silent reduction."
                         )
+                    semantic = [{"type": "information",
+                                 "content": f"I intend to {persona_goal}. My supported initial conditions are {json.dumps(conditions, sort_keys=True)}. Hypothetical problems are task inputs, not observed outcomes."}]
+                    challenge_fields = {}
+                    if constraints and constraints.get("buyer_challenge"):
+                        challenge_fields = {key: constraints[key] for key in ("buyer_challenge", "buyer_challenge_sha256")}
+                        semantic[0]["content"] += " Buyer challenge: " + json.dumps(challenge_fields, sort_keys=True)
+                        for memory in semantic:
+                            person.semantic_memory.store({"simulation_timestamp": None, **memory})
+                            person.listen(memory["content"])
                     spec = person.to_json()
                     population.append(
                         {
@@ -233,13 +242,9 @@ def main():
                             "name": person.name,
                             "profile": spec["persona"],
                             "conditions": conditions,
-                            "memory": [],
-                            "initial_semantic_memory": [
-                                {
-                                    "type": "information",
-                                    "content": f"I intend to {persona_goal}. My supported initial conditions are {json.dumps(conditions, sort_keys=True)}. Hypothetical problems are task inputs, not observed outcomes.",
-                                }
-                            ],
+                            "memory": person.episodic_memory.retrieve_all() if challenge_fields else [],
+                            "initial_semantic_memory": semantic,
+                            **challenge_fields,
                             "initial_snapshot": person.to_json(),
                         }
                     )
