@@ -390,3 +390,68 @@ def test_export_failure_is_a_receipt_gate_even_if_flush_returns_true(otlp, monke
     assert receipt["delivery_flushed"] is False
     assert "span_export_failures" in receipt["payload_gates"]
     assert receipt["finalized_readback"] == "not_verified"
+
+
+def baseline_reuse():
+    lineage = {"original_run_id": "4" * 32, "retry_run_id": RUN["id"],
+               "population_id": RUN["population_id"], "population_sha256": "b" * 64}
+    run = {**RUN, "retry_of_run_id": lineage["original_run_id"], "baseline_retry": lineage}
+    event = {k: lineage[k] for k in ("original_run_id", "population_id", "population_sha256")}
+    event.update(requested=1, initial_state="saved_initial_snapshot", generation_performed=False)
+    return run, event
+
+
+def test_real_sdk_exports_only_exact_lineage_bound_population_reuse_without_masked_drop(otlp, tmp_path):
+    run, event = baseline_reuse()
+    event.update(private=POISON)
+    original = deepcopy(event)
+    telemetry = Telemetry()
+    with telemetry.run(run):
+        telemetry.event("baseline_population_reused", event)
+    reused = next(s for s in spans(otlp) if s.name == "tryfolk.baseline_population_reused")
+    summary = json.loads(attrs(reused)["output.value"].string_value)
+    assert {k: summary[k] for k in ("population_sha256", "requested", "initial_state", "generation_performed")} == {
+        "population_sha256": "b" * 64, "requested": 1,
+        "initial_state": "saved_initial_snapshot", "generation_performed": False,
+    }
+    assert "original_run_id" not in summary and "population_id" not in summary
+    assert POISON.encode() not in b"".join(data for data, _ in otlp)
+    receipt = json.loads(next(tmp_path.glob("*-trace.json")).read_text())
+    assert receipt["delivery_flushed"] is True and receipt["payload_gates"] == []
+    assert receipt["delivery_counters"]["masked_span_drops"] == 0
+    assert event == original
+
+
+@pytest.mark.parametrize("field,value", [
+    ("original_run_id", "5" * 32), ("population_id", "6" * 32),
+    ("population_sha256", "c" * 64), ("requested", 2), ("requested", True),
+    ("initial_state", "fresh_generation"), ("generation_performed", True),
+    ("generation_performed", 0),
+])
+def test_real_sdk_drops_foreign_population_reuse_binding(otlp, tmp_path, field, value):
+    run, event = baseline_reuse()
+    event[field] = value
+    telemetry = Telemetry()
+    with telemetry.run(run):
+        telemetry.event("baseline_population_reused", event)
+    assert not any(s.name == "tryfolk.baseline_population_reused" for s in spans(otlp))
+    receipt = json.loads(next(tmp_path.glob("*-trace.json")).read_text())
+    assert receipt["delivery_flushed"] is False
+    assert "baseline_population_binding" in receipt["payload_gates"]
+    assert receipt["delivery_counters"]["masked_span_drops"] == 1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("retry_of_run_id", "5" * 32), ("id", None), ("population_id", None),
+    ("pass", "after"), ("baseline_retry", {}),
+])
+def test_real_sdk_requires_valid_before_retry_lineage_for_population_reuse(otlp, tmp_path, field, value):
+    run, event = baseline_reuse()
+    run[field] = value
+    telemetry = Telemetry()
+    with telemetry.run(run):
+        telemetry.event("baseline_population_reused", event)
+    assert not any(s.name == "tryfolk.baseline_population_reused" for s in spans(otlp))
+    receipt = json.loads(next(tmp_path.glob("*-trace.json")).read_text())
+    assert receipt["delivery_flushed"] is False
+    assert "baseline_population_binding" in receipt["payload_gates"]

@@ -22,7 +22,7 @@ KINDS = frozenset({
     "discovery", "persona_initialized", "scenario_fixture", "observation", "decision",
     "browser_action", "scenario_payment_condition", "capability", "persona_memory", "verification",
     "repair", "known_replay_action", "known_replay_capability", "known_failure_replay",
-    "held_out_checks", "connection_recovery",
+    "held_out_checks", "connection_recovery", "baseline_population_reused",
 })
 CLASSIFICATIONS = frozenset({
     "verification_unavailable", "correlation_mismatch", "payment_unsettled", "payment_and_entitlement",
@@ -136,6 +136,24 @@ class TracePolicy:
             self.context["revision"] = run["revision"]
         if type(run.get("persona_count")) is int and 1 <= run["persona_count"] <= 1000:
             self.context["N"] = run["persona_count"]
+        lineage = mapping(run.get("baseline_retry"))
+        original = run.get("retry_of_run_id")
+        self._baseline_reuse = None
+        if (
+            self.context.get("provider") == "dodo" and self.context.get("pass") == "before"
+            and self.context.get("run_id") and self.context.get("population_id")
+            and isinstance(original, str) and HEX_ID.fullmatch(original)
+            and lineage.get("original_run_id") == original
+            and lineage.get("retry_run_id") == self.context.get("run_id")
+            and lineage.get("population_id") == self.context.get("population_id")
+            and isinstance(lineage.get("population_sha256"), str)
+            and HASH.fullmatch(lineage["population_sha256"]) and self.context.get("N")
+        ):
+            self._baseline_reuse = {
+                "original_run_id": original, "population_id": lineage["population_id"],
+                "population_sha256": lineage["population_sha256"], "requested": self.context["N"],
+                "initial_state": "saved_initial_snapshot", "generation_performed": False,
+            }
         self._gates = set()
         self._lock = Lock()
 
@@ -177,7 +195,12 @@ class TracePolicy:
                     "scenario_sha256", "saved_persona_sha256", "profile_sha256", "initial_memory_sha256",
                     "condition_fixture_sha256",
                 ))
-        if kind == "discovery":
+        if kind == "baseline_population_reused":
+            copy_hashes(result, data, ("population_sha256",))
+            copy_count(result, data, ("requested",))
+            copy_enum(result, data, "initial_state", {"saved_initial_snapshot"})
+            copy_bool(result, data, ("generation_performed",))
+        elif kind == "discovery":
             if data.get("sdk") == "browser-use==0.13.11":
                 result["sdk"] = data["sdk"]
             if data.get("measured_payment") is False:
@@ -312,7 +335,15 @@ class TracePolicy:
             if isinstance(persona, str) and HEX_ID.fullmatch(persona):
                 identity["persona_id"] = persona
             kind = name.removeprefix("tryfolk.")
-            summary = self.summary(kind, json_mapping(original.get("output.value")), identity.get("persona_id"))
+            data = json_mapping(original.get("output.value"))
+            if kind == "baseline_population_reused" and (
+                not self._baseline_reuse or type(data.get("requested")) is not int
+                or data.get("generation_performed") is not False
+                or any(data.get(key) != value for key, value in self._baseline_reuse.items())
+            ):
+                self.reject("baseline_population_binding")
+                return None
+            summary = self.summary(kind, data, identity.get("persona_id"))
             if kind != "persona_run" and isinstance(original.get("output.value"), str):
                 summary["observed_payload_sha256"] = hashlib.sha256(
                     original["output.value"].encode()
