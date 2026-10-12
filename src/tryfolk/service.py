@@ -164,6 +164,7 @@ class Service:
             **({"scenario_plan": scenario_plan} if scenario_plan else {}),
             "app_url": url,
             "persona_count": count,
+            "max_personas": self.settings.max_personas,
             "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
             "affordable": costs["reserved"] <= available,
             "ready": not gates,
@@ -243,6 +244,15 @@ class Service:
                 raise DomainError(409, "quote_expired", "Request a fresh quote.")
             if db.execute("SELECT consumed FROM quotes WHERE id=?", (quote_id,)).fetchone()[0]:
                 raise DomainError(409, "quote_consumed", "Quote has already been used.")
+            if q["persona_count"] > self.settings.max_personas or any(
+                gate["code"] == "capacity" for gate in q["gates"]
+            ):
+                raise DomainError(
+                    422,
+                    "capacity",
+                    f"Request a fresh quote within the current {self.settings.max_personas}-persona allowance. "
+                    "A capacity-gated quote cannot start a job; the requested count is never reduced.",
+                )
             if q["reserved_microusd"] > q.get(
                 "quote_limit_microusd", q.get("scheduler_event_limit_microusd", self.settings.budget_microusd)
             ):

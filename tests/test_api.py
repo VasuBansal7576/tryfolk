@@ -90,9 +90,12 @@ def test_unsafe_or_unconnected_origins_are_rejected_and_count_is_not_shrunk(tmp_
     assert q["persona_count"] == 21
     assert q["ready"] is False
     assert q["gates"][0]["code"] == "capacity"
-    run = start(client, q).json()
-    assert run["status"]["counts"]["blocked"] == 21
-    assert run["status"]["counts"]["executed"] == 0
+    response = start(client, q)
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "capacity"
+    with client.app.state.service.store.transaction() as db:
+        assert db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM reservations").fetchone()[0] == 0
 
 
 def test_owner_session_is_http_only_scoped_and_csrf_protected(tmp_path):

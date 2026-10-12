@@ -50,10 +50,17 @@ class Settings:
         default_factory=lambda: Path(os.environ.get("TRYFOLK_EVIDENCE_ROOT", "runtime/evidence"))
     )
 
+    def __post_init__(self):
+        if type(self.max_personas) is not int or not 1 <= self.max_personas <= 1000:
+            raise ValueError("TRYFOLK_MAX_PERSONAS must be a whole number from 1 to 1000.")
+
     @classmethod
     def from_env(cls):
         import json
 
+        max_personas = os.environ.get("TRYFOLK_MAX_PERSONAS", "20")
+        if not max_personas.isascii() or not max_personas.isdecimal():
+            raise ValueError("TRYFOLK_MAX_PERSONAS must be a whole number from 1 to 1000.")
         connection_file = Path(os.environ.get("TRYFOLK_CONNECTIONS", "runtime/connections.json"))
         targets = (
             tuple(Target(**x) for x in json.loads(connection_file.read_text()))
@@ -84,6 +91,7 @@ class Settings:
             db_path=Path(os.environ.get("TRYFOLK_DB", "runtime/tryfolk.sqlite")),
             budget_microusd=int(os.environ.get("TRYFOLK_BUDGET_MICROUSD", "1000000")),
             owner_token=os.environ.get("TRYFOLK_OWNER_TOKEN"),
+            max_personas=int(max_personas),
             baseline_retry_approval_path=Path(os.environ["TRYFOLK_BASELINE_RETRY_APPROVAL"])
             if os.environ.get("TRYFOLK_BASELINE_RETRY_APPROVAL")
             else None,

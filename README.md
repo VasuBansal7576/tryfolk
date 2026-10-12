@@ -40,7 +40,12 @@ that record, then run the durable worker in a second terminal:
 TRYFOLK_CFO_PLAN=runtime/cfo-plan.json uv run python scripts/run_worker.py
 ```
 
-Choose N=1–20 and reserve **both** complete passes before execution. Browser concurrency is one.
+The default execution ceiling is 20 personas. Operators may set `TRYFOLK_MAX_PERSONAS` to a whole
+number from 1 to 1000 before launching the API and worker; invalid configuration fails startup.
+`GET /readiness` and fresh quotes report the configured `max_personas`. A request above it keeps
+its original N and receives a capacity gate; acceptance creates no job, population or reservation.
+Raising capacity does not raise the budget or clear provider, setup or affordability gates.
+Reserve **both** complete passes before execution. Browser concurrency is one.
 The population is generated once, saved to SQLite with initial cognition, and reused at identical
 N against the repaired revision with fresh accounts, cookies and checkout identities.
 Generation/cancellation never silently reduces N. A killed worker blocks ambiguous work rather
