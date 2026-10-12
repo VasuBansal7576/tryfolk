@@ -35,6 +35,17 @@ from tryfolk.manual_address import ManualAddressGate, read_current_manual_contro
 from tryfolk.pre_submission import adapter_safety
 
 
+class PreActDocumentDrift(RuntimeError):
+    """The SDK act was never entered; only closed comparison facts leave here."""
+
+    def __init__(self, comparison, *, retryable=False):
+        super().__init__(
+            "Document changed after observation; no browser action was executed or retried."
+        )
+        self.code = "nonfinancial_control_stale" if retryable else None
+        self.data = comparison
+
+
 def private_evidence(label, data):
     root = Path(os.environ.get("TRYFOLK_EVIDENCE_ROOT", "runtime/evidence"))
     root.mkdir(parents=True, exist_ok=True)
@@ -401,9 +412,46 @@ async def run(stack):
                         current_document = await page.evaluate(DOCUMENT_STATE)
                         policy.check_url(current_document["url"])
                         if not fresh_document or not same_document(fresh_document, current_document):
-                            raise RuntimeError(
+                            comparison = {
+                                "same_url": bool(fresh_document) and fresh_document.get("url") == current_document.get("url"),
+                                "same_generation": bool(fresh_document) and fresh_document.get("generation") == current_document.get("generation"),
+                                "same_control_signature": bool(fresh_document) and fresh_document.get("control_signature") == current_document.get("control_signature"),
+                                "nonfinancial": False,
+                                "executed": False,
+                            }
+                            metadata = action.get("_tryfolk") or {}
+                            retryable = (
+                                comparison["same_url"] and comparison["same_generation"]
+                                and not comparison["same_control_signature"]
+                                and action in fresh_actions
+                                and action.get("method") == "fill"
+                                and metadata.get("field") in ("address", "city", "state", "postal")
+                                and isinstance(current_document.get("generation"), (int, float))
+                                and not isinstance(current_document.get("generation"), bool)
+                                and 0 < current_document["generation"] < float("inf")
+                                and not financial_started
+                                and not (guard.card_attempt and (guard.card_attempt.armed_at is not None or guard.card_attempt.confirmed))
+                                and exact_origin(current_document["url"]) == DODO_CHECKOUT
+                                and current_document.get("body_present") is True
+                                and current_document.get("ready_state") in ("interactive", "complete")
+                                and current_document.get("busy") is False
+                                and not metadata.get("frame_url")
+                                and "/iframe[" not in str(action.get("selector") or "")
+                            )
+                            if retryable:
+                                try:
+                                    policy.validate(action, current_document["url"])
+                                    retryable = policy.bind(action, control, current_document["url"]) == action
+                                except ValueError:
+                                    retryable = False
+                            if retryable:
+                                comparison.update(nonfinancial=True, field=metadata["field"])
+                                raise PreActDocumentDrift(comparison, retryable=True)
+                            error = RuntimeError(
                                 "Document changed after observation; no browser action was executed or retried."
                             )
+                            error.data = comparison
+                            raise error
                         if action not in fresh_actions:
                             raise RuntimeError("Action does not match a fresh SDK-observed control.")
                         policy.validate(action, current_url)
@@ -591,7 +639,8 @@ async def run(stack):
                 print(
                     json.dumps(
                         redact_frame_config(
-                            {"ok": False, "error": str(error)[:500], "error_evidence_path": error_path, "pre_submission_evidence": safety}
+                            {"ok": False, "error": str(error)[:500], "error_evidence_path": error_path, "pre_submission_evidence": safety,
+                             "code": getattr(error, "code", None), "data": getattr(error, "data", None)}
                         )
                     ),
                     flush=True,
