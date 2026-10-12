@@ -29,7 +29,8 @@ from tryfolk.secure_frame import redact_frame_config
 from tryfolk.checkout_timing import CheckoutTiming
 from tryfolk.browser_events import EventCapture
 from tryfolk.payment_privacy import redact_payment
-from tryfolk.native_read_observation import NativeControlReads
+from tryfolk.native_read_observation import NativeControlReads, NativeObservationGate, read_current_native_controls
+from tryfolk.native_card_observation import READ_CONTEXT, native_configuration_facts
 from tryfolk.checkout_discovery import discover_checkout_candidates, include_snapshot_manual_choices
 from tryfolk.manual_address import ManualAddressGate, read_current_manual_controls, resolve_manual_address, wait_for_billing_initialization
 from tryfolk.pre_submission import adapter_safety
@@ -101,6 +102,98 @@ async def read_manual_current(
     discovery = await read_controls(before)
     after = await page.evaluate(DOCUMENT_STATE)
     return discovery, after | {"document_stable": same_document(before, after)}
+
+
+async def read_production_native_controls(
+    page, network_page, guard, read_controls, *, original_document,
+    completed_cards, deadline, on_event,
+):
+    """Wait/read only: the acknowledged Continue must establish its secure child.
+
+    A ready parent with no native controls is not a persona observation. This
+    grants no card capability and never acts, confirms, polls or infers.
+    """
+    original_binding = original_document.get("url"), original_document.get("generation")
+
+    async def current_state():
+        document = await page.evaluate(DOCUMENT_STATE)
+        guard.policy.check_url(document["url"])
+        if (
+            exact_origin(document["url"]) != DODO_CHECKOUT
+            or (document.get("url"), document.get("generation")) != original_binding
+        ):
+            raise NativeObservationGate("native_parent_document_changed")
+        already_generated = await page.evaluate(
+            "/Payment with the given checkout session has already been generated/i.test(document.body?.innerText||'')"
+        )
+        if already_generated is True:
+            on_event({"decision": "deny_hosted_checkout_session_already_generated"})
+            raise NativeObservationGate("hosted_checkout_session_already_generated")
+        children = [
+            frame for frame in network_page.frames
+            if frame.parent_frame == network_page.main_frame
+            and guard.frame_context(frame.url, frame.parent_frame.url)
+        ]
+        checks = {key: False for key in (
+            "native_configuration_current", "native_generation_current",
+            "independent_Test_identity_current", "bootstrap_readiness_current",
+        )}
+        on_event({"decision": "native_child_count", "single_current_child": len(children) == 1})
+        if len(children) > 1:
+            raise NativeObservationGate("single_current_native_child")
+        if not children:
+            return {"binding": None, "checks": checks}
+        frame = children[0]
+        observed_frame_url, observed_parent_url = frame.url, frame.parent_frame.url
+        context = guard.frame_context(observed_frame_url, observed_parent_url) or {}
+        observed = await frame.evaluate(READ_CONTEXT)
+        identity = await guard.frame_verify(context) if context.get("approved") is True else {}
+        facts = native_configuration_facts(
+            observed, context=context, identity=identity, owned_origin=guard.policy.origin,
+            observed_parent_url=observed_parent_url, current_parent_url=document["url"],
+            observed_frame_url=observed_frame_url, current_frame_url=frame.url,
+        )
+        binding = context.get("config_id"), observed.get("generation")
+        checks["native_configuration_current"] = (
+            facts["current_configuration_captured"]
+            and document.get("ready_state") in ("interactive", "complete")
+            and document.get("body_present") is True and document.get("busy") is False
+        )
+        checks["native_generation_current"] = (
+            facts["generation_current"] and all(value == binding for value in completed_cards.values())
+        )
+        checks["independent_Test_identity_current"] = (
+            facts["independent_test_identity_current"] and identity.get("customer_correlated") is True
+        )
+        setup = guard.native_setup_facts(*binding)
+        checks["bootstrap_readiness_current"] = all(setup.get(key) is True for key in (
+            "bootstrap_account_methods_200", "bootstrap_customer_methods_200", "normal_type_observed",
+        ))
+        return {"binding": (*binding, frame.url, document["url"], document.get("generation"),
+                             document.get("control_signature")), "checks": checks}
+
+    try:
+        async with asyncio.timeout_at(deadline):
+            while asyncio.get_running_loop().time() < deadline:
+                state = await current_state()
+                ready = all(state["checks"].values())
+                on_event({"decision": "native_readiness", "checks": state["checks"]})
+                if not ready:
+                    if completed_cards:
+                        raise NativeObservationGate("native_changed_after_executed_card")
+                    await asyncio.sleep(min(.1, max(0, deadline - asyncio.get_running_loop().time())))
+                    continue
+                candidates = await read_current_native_controls(
+                    read_controls, current_state, deadline=deadline, on_event=on_event,
+                    max_attempts=2, stop_on_change=bool(completed_cards),
+                )
+                if candidates:
+                    return candidates
+                on_event({"decision": "native_snapshot_no_executable_controls"})
+                await asyncio.sleep(min(.1, max(0, deadline - asyncio.get_running_loop().time())))
+        raise NativeObservationGate("original_deadline_exhausted")
+    except TimeoutError:
+        raise NativeObservationGate("original_deadline_exhausted") from None
 
 
 async def _control_state_read(page, selector, network_page, guard, trace):
@@ -352,16 +445,34 @@ async def run(stack):
                             # Stagehand snapshots and read-only current DOM identify controls.
                             # There is no inference, selector caching or action in this pass.
                             boundary["call"] = "stagehand.snapshot.native_candidates"
-                            snapshot = (await page.snapshot(include_iframes=True, timeout=10000)).model_dump(mode="json")
-                            discovery = await discover_checkout_candidates(
-                                snapshot, metadata, policy, current_document["url"],
-                                filled=completed_fields, completed_cards=completed_cards,
-                                clicked=clicked, pay_actions=pay_actions,
-                                executed_fields=completed_fields, phase="primary_billing",
-                                include_owned_post_payment=True,
-                            )
-                            boundary["native_discovery"] = discovery.evidence(document_stable=False)
-                            return [action for _, action in sorted(discovery.candidates, key=lambda item: item[0])]
+                            async def read_candidates():
+                                snapshot = (await page.snapshot(include_iframes=True, timeout=10000)).model_dump(mode="json")
+                                discovery = await discover_checkout_candidates(
+                                    snapshot, metadata, policy, current_document["url"],
+                                    filled=completed_fields, completed_cards=completed_cards,
+                                    clicked=clicked, pay_actions=pay_actions,
+                                    executed_fields=completed_fields, phase="primary_billing",
+                                    include_owned_post_payment=True,
+                                )
+                                boundary["native_discovery"] = discovery.evidence(document_stable=False)
+                                return [action for _, action in sorted(discovery.candidates, key=lambda item: item[0])]
+
+                            if (
+                                policy.provider == "dodo" and "billing_continue" in clicked
+                                and exact_origin(current_document["url"]) == DODO_CHECKOUT
+                                and pay_actions == 0 and not financial_started
+                            ):
+                                def native_event(event):
+                                    events = boundary.setdefault("native_read_events", [])
+                                    events.append(event)
+                                    del events[:-32]
+
+                                return await read_production_native_controls(
+                                    page, network_page, guard, read_candidates,
+                                    original_document=current_document, completed_cards=completed_cards,
+                                    deadline=observation_deadline, on_event=native_event,
+                                )
+                            return await read_candidates()
                         boundary["call"] = "stagehand.observe"
                         observed = await stagehand.observe(
                             "List visible enabled checkout, continue, confirm-purchase, art-pack and download controls. Include the Country dropdown even when preselected, the manual address option, and every unfilled billing/address/card field on the hosted test checkout. One action per control: click, fill or selectOptionFromDropdown for native dropdowns. Do not select disabled or Processing controls, navigate, or supply arbitrary test values."
