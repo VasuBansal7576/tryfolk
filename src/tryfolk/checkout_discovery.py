@@ -9,7 +9,7 @@ import re
 
 
 PRIORITIES = {
-    "country": 2, "address": 4, "city": 5, "state": 6, "postal": 7,
+    "country": 2, "address_query": 4, "address": 4, "city": 5, "state": 6, "postal": 7,
     "card_name": 9, "card_number": 10, "card_expiry": 11,
     "card_month": 11, "card_year": 12, "card_cvc": 13,
 }
@@ -216,4 +216,12 @@ class ExecutedFieldChanged(ValueError):
     def __init__(self, field, discovery):
         self.field = field
         self.discovery = discovery
+        self.code = "executed_field_changed"
+        # The adapter already serializes observation_evidence. Keep the partial
+        # pass explicit: it does not establish a stable document or completion.
+        self.observation_evidence = {
+            "failed_field": field if field in PRIORITIES else "unknown",
+            "discovery_pass_complete": False,
+            "discovery": discovery.evidence(document_stable=False),
+        }
         super().__init__("Previously executed checkout field no longer verifies")

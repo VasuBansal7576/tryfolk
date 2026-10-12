@@ -219,3 +219,142 @@ async def test_changed_executed_country_stops_without_repeating_the_action():
     assert stopped.value.field == "country"
     assert stopped.value.discovery.evidence(document_stable=False)["current_completion_conflicts"]["country"] is True
     assert stopped.value.discovery.candidates == []
+
+
+async def test_manual_effect_current_field_failure_retains_closed_diagnostics_without_repeating():
+    """Invented changed-value I/O at the actual discovery/manual-effect seam.
+
+    This locks down the diagnostic loss in retained234, not its unrecorded
+    failed field or the provider's current DOM state.
+    """
+    import asyncio
+    import json
+    import pytest
+    from tryfolk.checkout_discovery import ExecutedFieldChanged
+    from tryfolk.manual_address import resolve_manual_address
+
+    policy = BrowserPolicy("http://127.0.0.1:3300", "dodo")
+    document = {"url": URL, "generation": 1, "body_present": True,
+                "ready_state": "complete", "busy": False, "document_stable": True}
+    manual = policy.bind(
+        {"method": "click", "selector": "xpath=/html[1]/body[1]/button[1]", "arguments": []},
+        {"present": True, "visible": True, "tag": "BUTTON", "label": "Enter address manually",
+         "destination": URL}, URL,
+    )
+    repeats = []
+
+    async def read_control(selector):
+        return {"present": True, "visible": True, "tag": "SELECT", "label": "Country",
+                "value": "private-changed-value", "options": ["US"], "destination": URL}
+
+    async def read_current():
+        discovery = await discover_checkout_candidates(
+            {"xpath_map": {"0": "/html[1]/body[1]/select[1]"}}, read_control, policy, URL,
+            filled={"country", "address"}, executed_fields={"country", "address"},
+            completed_cards={}, clicked=set(), phase="primary_billing",
+        )
+        return discovery, document
+
+    async def forbidden_repeat(action):
+        repeats.append(action)
+        raise AssertionError("A changed executed field must stop without another action")
+
+    with pytest.raises(ExecutedFieldChanged) as stopped:
+        await resolve_manual_address(
+            read_current, forbidden_repeat, policy,
+            deadline=asyncio.get_running_loop().time() + 1, executed=(manual, document),
+        )
+    facts = stopped.value.observation_evidence
+    assert facts["failed_field"] == "country"
+    assert facts["discovery_pass_complete"] is False
+    assert facts["discovery"]["current_completion_conflicts"]["country"] is True
+    assert facts["discovery"]["observed_completion"]["country"] is False
+    assert repeats == []
+    retained = json.dumps(facts)
+    assert all(private not in retained for private in ("private-", "xpath=", URL, "Country"))
+
+
+async def test_manual_mode_after_address_search_requires_the_real_billing_address():
+    """Offline transition from the retained234 public renderer, not live DOM.
+
+    Source594824... has H's unnamed role=combobox query/value:u with
+    autocomplete=off, separate from form addressLine/address-line1. Opening
+    manual mode hides H and reveals that initially empty form field.
+    """
+    import asyncio
+    from tryfolk.manual_address import resolve_manual_address
+
+    policy = BrowserPolicy("http://127.0.0.1:3300", "dodo")
+    query = {"present": True, "visible": True, "tag": "INPUT", "label": "Address Line",
+             "placeholder": "Address Line", "autocomplete": "off", "name": "",
+             "role": "combobox", "aria_autocomplete": "list", "destination": URL}
+    search = policy.bind({"method": "fill", "selector": "xpath=/html[1]/body[1]/input[1]",
+                          "arguments": []}, query, URL)
+    # The successful bounded search fill is not a committed billing address.
+    policy.validate_completion(search, query | {"value": search["arguments"][0]}, URL)
+    completed = {"country", search["_tryfolk"]["field"]}
+    controls = {
+        "xpath=/html[1]/body[1]/select[1]": {
+            "present": True, "visible": True, "tag": "SELECT", "label": "Country",
+            "value": "US", "options": ["US"], "destination": URL,
+        },
+    }
+    for index, (name, autocomplete) in enumerate(
+        [("addressLine", "address-line1"), ("city", "address-level2"),
+         ("state", "address-level1"), ("zipCode", "postal-code")], start=1,
+    ):
+        controls[f"xpath=/html[1]/body[1]/input[{index}]"] = {
+            "present": True, "visible": True, "tag": "INPUT", "name": name,
+            "autocomplete": autocomplete, "value": "", "destination": URL,
+        }
+    document = {"url": URL, "generation": 1, "body_present": True,
+                "ready_state": "complete", "busy": False, "document_stable": True}
+    manual = policy.bind(
+        {"method": "click", "selector": "xpath=/html[1]/body[1]/button[1]", "arguments": []},
+        {"present": True, "visible": True, "tag": "BUTTON", "label": "Enter address manually",
+         "destination": URL}, URL,
+    )
+
+    async def read_current():
+        async def read_control(selector):
+            return controls[selector]
+
+        discovery = await discover_checkout_candidates(
+            {"xpath_map": {str(i): s.removeprefix("xpath=") for i, s in enumerate(controls)}},
+            read_control, policy, URL, filled=completed, executed_fields=completed,
+            completed_cards={}, clicked=set(), phase="primary_billing",
+        )
+        return discovery, document
+
+    async def forbidden_repeat(_):
+        raise AssertionError("Opening manual fields must not repeat the click")
+
+    discovery, _ = await resolve_manual_address(
+        read_current, forbidden_repeat, policy, deadline=asyncio.get_running_loop().time() + 1,
+        executed=(manual, document),
+    )
+    assert search["_tryfolk"]["field"] == "address_query"
+    assert "address" not in discovery.filled
+    assert discovery.observed_completion == {"country"}
+    assert {a["_tryfolk"]["field"] for _, a in discovery.candidates} == {
+        "address", "city", "state", "postal",
+    }
+
+
+async def test_real_executed_billing_address_change_still_stops_manual_effect_verification():
+    import pytest
+    from tryfolk.checkout_discovery import ExecutedFieldChanged
+
+    async def read_control(_):
+        return {"present": True, "visible": True, "tag": "INPUT", "name": "addressLine",
+                "autocomplete": "address-line1", "value": "private-changed-value", "destination": URL}
+
+    with pytest.raises(ExecutedFieldChanged) as stopped:
+        await discover_checkout_candidates(
+            {"xpath_map": {"0": "/html[1]/body[1]/input[1]"}}, read_control,
+            BrowserPolicy("http://127.0.0.1:3300", "dodo"), URL,
+            filled={"country", "address"}, executed_fields={"address"},
+            completed_cards={}, clicked=set(), phase="primary_billing",
+        )
+    assert stopped.value.field == "address"
+    assert stopped.value.observation_evidence["discovery"]["current_completion_conflicts"]["address"]

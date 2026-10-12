@@ -19,6 +19,7 @@ TEST_FIELDS = {
     "card_cvc": "123",
     "card_name": "Tryfolk Test Customer",
     "address": "123 Test Street",
+    "address_query": "123 Test Street",
     "city": "New York",
     "state": "New York",
     "postal": "10001",
@@ -202,6 +203,12 @@ class BrowserPolicy:
                 field = next((f for pattern, f in patterns if re.search(pattern, label)), None)
             if not field or control.get("tag") not in ("INPUT", "SELECT", "TEXTAREA"):
                 raise ValueError("Checkout field is outside the documented synthetic input contract.")
+            if field == "address" and (
+                control.get("role") == "combobox" and control.get("aria_autocomplete") == "list"
+            ):
+                # The hosted address search holds query state, not addressLine.
+                # A retained query value never satisfies billing completion.
+                field = "address_query"
             if frame_url and not field.startswith("card_"):
                 raise ValueError("The secure frame grants synthetic card fields only.")
             value = TEST_FIELDS[field]
