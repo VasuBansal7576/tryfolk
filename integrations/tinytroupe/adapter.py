@@ -10,7 +10,7 @@ protocol = sys.stdout
 sys.stdout = sys.stderr  # TinyTroupe prints its disclaimer/config; keep protocol separate.
 from tinytroupe import config_manager
 from tinytroupe.clients import register_client, force_api_type
-from tinytroupe.agent import TinyPerson
+from tinytroupe.agent import TinyPerson, CognitiveActionModel, CognitiveActionModelWithReasoning
 from tinytroupe.agent.action_generator import ActionGenerator
 from tinytroupe.agent.mental_faculty import TinyMentalFaculty
 from tinytroupe.factory import TinyPersonFactory
@@ -73,7 +73,14 @@ class CodexClient:
             value = generate(current_messages, spec.model_json_schema(), label="tinytroupe-generation")
             spec.model_validate(value)
         elif hasattr(response_format, "model_json_schema"):
-            value = generate(current_messages, response_format.model_json_schema(), label="tinytroupe")
+            schema = response_format.model_json_schema()
+            if response_format in (CognitiveActionModel, CognitiveActionModelWithReasoning):
+                # The real SDK also defines DONE/THINK/TALK. Our single external
+                # decision contract is narrower; constrain inference, never remap it.
+                schema["$defs"]["Action"]["properties"]["type"]["enum"] = [
+                    "BROWSER", "FINISH", "ABANDON"
+                ]
+            value = generate(current_messages, schema, label="tinytroupe")
             response_format.model_validate(value)
         else:
             # TinyTroupe's LLMChat handles its own typed JSON coercion. Preserve that
