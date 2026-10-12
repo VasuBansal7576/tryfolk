@@ -204,10 +204,13 @@ class BrowserPolicy:
             if not field or control.get("tag") not in ("INPUT", "SELECT", "TEXTAREA"):
                 raise ValueError("Checkout field is outside the documented synthetic input contract.")
             if field == "address" and (
-                control.get("role") == "combobox" and control.get("aria_autocomplete") == "list"
+                control.get("tag") == "INPUT" and control.get("type") == "text"
+                and tokens == ["off"] and not control.get("name") and not control.get("id")
+                and control.get("role") == "combobox" and control.get("aria_autocomplete") == "list"
             ):
                 # The hosted address search holds query state, not addressLine.
-                # A retained query value never satisfies billing completion.
+                # Explicit autocomplete or form identity remains authoritative.
+                # Only the retained unnamed query signature is separated.
                 field = "address_query"
             if frame_url and not field.startswith("card_"):
                 raise ValueError("The secure frame grants synthetic card fields only.")

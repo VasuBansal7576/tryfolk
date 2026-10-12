@@ -1,5 +1,6 @@
 """Invented SDK/control fixtures; no browser or provider success is measured."""
 
+import pytest
 from tryfolk.browser_policy import BrowserPolicy
 from tryfolk.checkout_discovery import discover_checkout_candidates
 
@@ -285,7 +286,7 @@ async def test_manual_mode_after_address_search_requires_the_real_billing_addres
     from tryfolk.manual_address import resolve_manual_address
 
     policy = BrowserPolicy("http://127.0.0.1:3300", "dodo")
-    query = {"present": True, "visible": True, "tag": "INPUT", "label": "Address Line",
+    query = {"present": True, "visible": True, "tag": "INPUT", "type": "text", "label": "Address Line",
              "placeholder": "Address Line", "autocomplete": "off", "name": "",
              "role": "combobox", "aria_autocomplete": "list", "destination": URL}
     search = policy.bind({"method": "fill", "selector": "xpath=/html[1]/body[1]/input[1]",
@@ -358,3 +359,43 @@ async def test_real_executed_billing_address_change_still_stops_manual_effect_ve
         )
     assert stopped.value.field == "address"
     assert stopped.value.observation_evidence["discovery"]["current_completion_conflicts"]["address"]
+
+
+@pytest.mark.parametrize("identity", [
+    {"autocomplete": "address-line1", "name": "", "id": ""},
+    {"autocomplete": "off", "name": "addressLine", "id": ""},
+    {"autocomplete": "off", "name": "", "id": "billingAddress"},
+])
+async def test_changed_executed_real_address_combobox_stops_before_pay(identity):
+    """An explicit billing field stays authoritative despite search-like ARIA."""
+    from tryfolk.checkout_discovery import ExecutedFieldChanged
+
+    reads = []
+    controls = {
+        "xpath=/html[1]/body[1]/input[1]": {
+            "present": True, "visible": True, "tag": "INPUT", "type": "text",
+            "label": "Address Line", "role": "combobox", "aria_autocomplete": "list",
+            "value": "private-changed-value", "destination": URL, **identity,
+        },
+        "xpath=/html[1]/body[1]/button[1]": {
+            "present": True, "visible": True, "tag": "BUTTON", "label": "Pay",
+            "destination": URL,
+        },
+    }
+
+    async def read_control(selector):
+        reads.append(selector)
+        return controls[selector]
+
+    with pytest.raises(ExecutedFieldChanged) as stopped:
+        await discover_checkout_candidates(
+            {"xpath_map": {str(i): s.removeprefix("xpath=") for i, s in enumerate(controls)}},
+            read_control, BrowserPolicy("http://127.0.0.1:3300", "dodo"), URL,
+            filled={"country", "address", "city", "state", "postal",
+                    "card_number", "card_expiry", "card_cvc"},
+            executed_fields={"address"}, completed_cards={}, clicked=set(), phase="primary_billing",
+        )
+    assert stopped.value.field == "address"
+    assert stopped.value.discovery.candidates == []
+    assert stopped.value.discovery.current_completion_conflicts == {"address"}
+    assert reads == ["xpath=/html[1]/body[1]/input[1]"]
