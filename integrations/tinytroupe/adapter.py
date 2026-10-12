@@ -245,8 +245,8 @@ def main():
                     )
                 data = {"population": population}
             elif command["op"] == "init":
-                if bulk_key and (bulk_key in people or len(people) >= 4 or command["persona"]["id"] != bulk_key[1]):
-                    raise RuntimeError("Distinct at-most-four owned persona memory sessions are required.")
+                if bulk_key and (bulk_key in people or len(people) >= 10 or command["persona"]["id"] != bulk_key[1]):
+                    raise RuntimeError("Distinct at-most-ten owned persona memory sessions are required.")
                 if bulk_key:
                     # Retain every actual episodic commit in this bulk service.
                     # Consolidation is disclosed as disabled, not simulated by a model.
