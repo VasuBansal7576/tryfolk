@@ -159,7 +159,9 @@ async def wait_for_billing_calculation(
                 if signature != previous:
                     previous, quiet_since = signature, loop.time()
                 pending = any(entry.get("completion") == "pending" for entry in calculations)
-                # The last validated fill timestamp is after the actual SDK input;
+                # Quiet/debounce starts after validated completion; the request
+                # window starts before that SDK input, so a calculation completed
+                # during a slow fill can still prove the current field's readiness.
                 # 600ms covers the source's 500ms debounce plus a task-turn margin.
                 debounce_elapsed = loop.time() - last_billing_completion[0] >= .6
                 current_calculated = any(
@@ -704,6 +706,7 @@ async def run(stack):
                     existing_files = set(downloads.iterdir())
                     sdk_action = {k: v for k, v in action.items() if k != "_tryfolk"}
                     boundary["call"] = "stagehand.act"
+                    sdk_action_started_at = time.time()
                     data = (await stagehand.act(sdk_action, page=page, timeout=10000)).model_dump(mode="json")
                     if not data.get("data", {}).get("success"):
                         raise RuntimeError("Stagehand did not execute the observed action successfully.")
@@ -767,7 +770,7 @@ async def run(stack):
                         completed_fields.add(action["_tryfolk"]["field"])
                         if action["_tryfolk"]["field"] in ("country", "address_query", "address", "city", "state", "postal"):
                             last_billing_completion = (
-                                asyncio.get_running_loop().time(), time.time(),
+                                asyncio.get_running_loop().time(), sdk_action_started_at,
                                 fresh_document["url"], fresh_document["generation"],
                             )
                         if action["_tryfolk"]["field"].startswith("card_"):

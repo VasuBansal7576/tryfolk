@@ -193,3 +193,16 @@ async def test_observation_deadline_is_not_extended_by_debounce_wait():
     with pytest.raises(NativeObservationGate, match="billing_calculation_deadline"):
         await f.run(timeout=0.02)
     assert asyncio.get_running_loop().time() - start < 0.1
+
+
+async def test_calculation_during_slow_sdk_fill_is_current_but_completion_still_starts_debounce_wait():
+    f = Fixture()
+    # The actual SDK input started before calculation; completion validation
+    # returned afterwards. A current200 response must not become stale merely
+    # because SDK/readback took longer than the source debounce.
+    f.marker = (asyncio.get_running_loop().time(), time.time() - 0.8, f.doc["url"], 100)
+    f.entries[0]["started_at"] = time.time() - 0.2
+    start = asyncio.get_running_loop().time()
+    checks = await f.run(timeout=0.8)
+    assert all(checks.values())
+    assert asyncio.get_running_loop().time() - start >= 0.6
