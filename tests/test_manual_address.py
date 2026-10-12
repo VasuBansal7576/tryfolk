@@ -99,6 +99,40 @@ async def test_residual_affordance_cannot_bypass_current_open_form_prerequisites
     assert stopped.value.reason == reason
 
 
+@pytest.mark.parametrize("change,failed_check", [
+    ({"document_stable": False}, "document_stable"),
+    ({"ready_state": "loading"}, "ready_state_supported"),
+    ({"body_present": False}, "body_present"),
+    ({"busy": True}, "not_busy"),
+])
+async def test_unstable_manual_read_retains_existing_closed_checks_without_an_extra_read(change, failed_check):
+    import json
+    state = observed()
+    state[1].update(change | {"control_signature": "private controls",
+                             "error_signature": "private error"})
+    reads = []
+
+    async def read():
+        reads.append("read")
+        return state
+
+    async def no_action(_):
+        raise AssertionError("Unstable observations must not act")
+
+    with pytest.raises(ManualAddressGate) as stopped:
+        await resolve_manual_address(
+            read, no_action, BrowserPolicy("http://127.0.0.1:3300", "dodo"),
+            deadline=asyncio.get_running_loop().time() + 1,
+        )
+    assert stopped.value.reason == "manual_document_unstable"
+    assert reads == ["read"]
+    expected = dict.fromkeys(("document_stable", "ready_state_supported", "body_present", "not_busy"), True)
+    expected[failed_check] = False
+    assert stopped.value.observation_evidence == {"manual_document_checks": expected}
+    retained = json.dumps(stopped.value.observation_evidence)
+    assert all(private not in retained for private in (URL, "private controls", "private error", "xpath="))
+
+
 @pytest.mark.parametrize("source,variant", [(None, "enter_manually"), (SOURCE, "enter_address_manually"),
                                            ("0" * 64, "enter_manually")])
 async def test_unreviewed_source_or_exact_control_never_repeats_a_successful_click(source, variant):

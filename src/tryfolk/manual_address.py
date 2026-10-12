@@ -57,13 +57,16 @@ async def resolve_manual_address(
         policy.check_url(document["url"])
         if policy.provider != "dodo" or exact_origin(document["url"]) != DODO_CHECKOUT:
             raise ManualAddressGate("manual_origin_unapproved")
-        if (
-            document.get("document_stable") is not True
-            or document.get("ready_state") not in ("interactive", "complete")
-            or document.get("body_present") is not True
-            or document.get("busy") is not False
-        ):
-            raise ManualAddressGate("manual_document_unstable")
+        document_checks = {
+            "document_stable": document.get("document_stable") is True,
+            "ready_state_supported": document.get("ready_state") in ("interactive", "complete"),
+            "body_present": document.get("body_present") is True,
+            "not_busy": document.get("busy") is False,
+        }
+        if not all(document_checks.values()):
+            raise ManualAddressGate(
+                "manual_document_unstable", observation_evidence={"manual_document_checks": document_checks},
+            )
         binding = document["url"], document.get("generation")
         if (not isinstance(binding[1], (int, float)) or isinstance(binding[1], bool)
                 or not math.isfinite(binding[1]) or binding[1] <= 0):
