@@ -428,3 +428,25 @@ def test_a_failed_private_receipt_write_cannot_persist_public_success(tmp_path):
     assert response.json()["detail"]["code"] == "checkpoint_evidence_unavailable"
     status = client.get(f"/runs/{run['id']}", headers={"Authorization": "Bearer unit-owner"}).json()
     assert status["repair"]["checkpoint_url"] is None and "checkpoint_access" not in status["repair"]
+
+
+def test_entire_0114_canonical_leading_slash_session_pointer_can_be_sealed(tmp_path):
+    # Official 0.11.4 root metadata uses /0/metadata.json; object lookup remains 0/metadata.json.
+    captured_repair(tmp_path, metadata_path="/0/metadata.json")
+
+
+@pytest.mark.parametrize(
+    "pointer",
+    [
+        "/1/metadata.json",
+        "x/0/metadata.json",
+        "../0/metadata.json",
+        "/0/../0/metadata.json",
+        "//0/metadata.json",
+    ],
+)
+def test_foreign_or_noncanonical_entire_pointer_cannot_be_sealed(tmp_path, pointer):
+    from tryfolk.checkpoint_access import CheckpointAccessError
+
+    with pytest.raises(CheckpointAccessError, match="checkpoint_capture_mismatch"):
+        captured_repair(tmp_path, metadata_path=pointer)

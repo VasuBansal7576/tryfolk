@@ -121,7 +121,7 @@ def seal_capture_binding(
     require(
         meta.get("checkpoint_id") == checkpoint
         and len(meta.get("sessions", [])) == 1
-        and meta["sessions"][0].get("metadata") == "0/metadata.json"
+        and meta["sessions"][0].get("metadata") in ("0/metadata.json", "/0/metadata.json")
         and not meta.get("tasks")
         and smeta.get("checkpoint_id") == checkpoint
         and smeta.get("session_id") == session
