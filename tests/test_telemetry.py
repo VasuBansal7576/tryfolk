@@ -455,3 +455,42 @@ def test_real_sdk_requires_valid_before_retry_lineage_for_population_reuse(otlp,
     receipt = json.loads(next(tmp_path.glob("*-trace.json")).read_text())
     assert receipt["delivery_flushed"] is False
     assert "baseline_population_binding" in receipt["payload_gates"]
+
+
+def conditional_plan_event():
+    plan = {"persona_id": "3" * 32, "profile_sha256": "c" * 64, "scenario_sha256": "d" * 64,
+            "purchase": True, "rationale": POISON, "max_steps": 24, "unexpected_state": "reconsider",
+            "source": "genuine_codex_batch_intent"}
+    run = {**RUN, "scenario_plan": {"assignments": [{"scenario_sha256": "d" * 64}]}}
+    event = {"plan": plan, "execution": POISON, "payment_outcome_inferred": False}
+    return run, event
+
+
+def test_real_sdk_exports_closed_conditional_plan_without_rationale_or_payment_claim(otlp, tmp_path):
+    run, event = conditional_plan_event()
+    telemetry = Telemetry()
+    with telemetry.run(run):
+        telemetry.event("conditional_purchase_plan", event, "3" * 32)
+    exported = next(s for s in spans(otlp) if s.name == "tryfolk.conditional_purchase_plan")
+    summary = json.loads(attrs(exported)["output.value"].string_value)
+    assert summary["purchase"] is True and summary["payment_outcome_inferred"] is False
+    assert summary["max_steps"] == 24 and summary["unexpected_state"] == "reconsider"
+    assert summary["profile_sha256"] == "c" * 64 and summary["scenario_sha256"] == "d" * 64
+    assert POISON.encode() not in b"".join(data for data, _ in otlp)
+    receipt = json.loads(next(tmp_path.glob("*-trace.json")).read_text())
+    assert receipt["delivery_flushed"] is True and receipt["payload_gates"] == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("persona_id", "9" * 32), ("scenario_sha256", "e" * 64), ("profile_sha256", "invalid"),
+    ("purchase", 1), ("max_steps", True), ("max_steps", 49), ("source", "invented_fixture"),
+])
+def test_real_sdk_rejects_unbound_or_invalid_conditional_plan(otlp, tmp_path, field, value):
+    run, event = conditional_plan_event()
+    event["plan"][field] = value
+    telemetry = Telemetry()
+    with telemetry.run(run):
+        telemetry.event("conditional_purchase_plan", event, "3" * 32)
+    assert not any(s.name == "tryfolk.conditional_purchase_plan" for s in spans(otlp))
+    receipt = json.loads(next(tmp_path.glob("*-trace.json")).read_text())
+    assert receipt["delivery_flushed"] is False and "conditional_plan_binding" in receipt["payload_gates"]

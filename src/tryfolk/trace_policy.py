@@ -22,7 +22,7 @@ KINDS = frozenset({
     "discovery", "persona_initialized", "scenario_fixture", "observation", "decision",
     "browser_action", "scenario_payment_condition", "capability", "persona_memory", "verification",
     "repair", "known_replay_action", "known_replay_capability", "known_failure_replay",
-    "held_out_checks", "connection_recovery", "baseline_population_reused",
+    "held_out_checks", "connection_recovery", "baseline_population_reused", "conditional_purchase_plan",
 })
 CLASSIFICATIONS = frozenset({
     "verification_unavailable", "correlation_mismatch", "payment_unsettled", "payment_and_entitlement",
@@ -156,6 +156,11 @@ class TracePolicy:
             }
         self._gates = set()
         self._lock = Lock()
+        assignments = mapping(run.get("scenario_plan")).get("assignments", [])
+        self._scenario_hashes = {
+            a["scenario_sha256"] for a in assignments if isinstance(a, dict)
+            and isinstance(a.get("scenario_sha256"), str) and HASH.fullmatch(a["scenario_sha256"])
+        } if isinstance(assignments, list) else set()
 
     @property
     def gates(self):
@@ -195,7 +200,15 @@ class TracePolicy:
                     "scenario_sha256", "saved_persona_sha256", "profile_sha256", "initial_memory_sha256",
                     "condition_fixture_sha256",
                 ))
-        if kind == "baseline_population_reused":
+        if kind == "conditional_purchase_plan":
+            plan = mapping(data.get("plan"))
+            copy_hashes(result, plan, ("profile_sha256", "scenario_sha256"))
+            copy_bool(result, plan, ("purchase",))
+            copy_count(result, plan, ("max_steps",))
+            copy_enum(result, plan, "unexpected_state", {"reconsider", "abandon"})
+            copy_enum(result, plan, "source", {"genuine_codex_batch_intent"})
+            copy_bool(result, data, ("payment_outcome_inferred",))
+        elif kind == "baseline_population_reused":
             copy_hashes(result, data, ("population_sha256",))
             copy_count(result, data, ("requested",))
             copy_enum(result, data, "initial_state", {"saved_initial_snapshot"})
@@ -218,6 +231,10 @@ class TracePolicy:
             choice = intent.get("target")
             if isinstance(choice, str) and re.fullmatch(r"[0-9]{1,2}:[0-9]{1,4}", choice):
                 result["action_choice"] = choice
+            copy_enum(result, data, "source", {
+                "saved_persona_conditional_plan", "disclosed_deterministic_guarded_plan_execution",
+                "actual_tinyperson_unexpected_state_decision",
+            })
             counters = {}
             copy_count(counters, mapping(data.get("cost_stats")), (
                 "input_tokens", "output_tokens", "total_tokens", "model_calls", "cached_calls",
@@ -336,6 +353,20 @@ class TracePolicy:
                 identity["persona_id"] = persona
             kind = name.removeprefix("tryfolk.")
             data = json_mapping(original.get("output.value"))
+            if kind == "conditional_purchase_plan":
+                plan = mapping(data.get("plan"))
+                if (
+                    self.context.get("provider") != "dodo" or not identity.get("persona_id")
+                    or plan.get("persona_id") != identity["persona_id"]
+                    or plan.get("scenario_sha256") not in self._scenario_hashes
+                    or not isinstance(plan.get("profile_sha256"), str) or not HASH.fullmatch(plan["profile_sha256"])
+                    or plan.get("source") != "genuine_codex_batch_intent" or type(plan.get("purchase")) is not bool
+                    or type(plan.get("max_steps")) is not int or not 1 <= plan["max_steps"] <= 48
+                    or plan.get("unexpected_state") not in {"reconsider", "abandon"}
+                    or data.get("payment_outcome_inferred") is not False
+                ):
+                    self.reject("conditional_plan_binding")
+                    return None
             if kind == "baseline_population_reused" and (
                 not self._baseline_reuse or type(data.get("requested")) is not int
                 or data.get("generation_performed") is not False
