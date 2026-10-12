@@ -40,11 +40,11 @@ from tryfolk.pre_submission import adapter_safety
 class PreActDocumentDrift(RuntimeError):
     """The SDK act was never entered; only closed comparison facts leave here."""
 
-    def __init__(self, comparison, *, retryable=False):
+    def __init__(self, comparison, *, retryable=False, manual_retryable=False):
         super().__init__(
             "Document changed after observation; no browser action was executed or retried."
         )
-        self.code = "nonfinancial_control_stale" if retryable else None
+        self.code = "nonfinancial_manual_control_stale" if manual_retryable else "nonfinancial_control_stale" if retryable else None
         self.data = comparison
         self.pre_act_comparison = comparison
 
@@ -783,6 +783,33 @@ async def run(stack):
                                 "executed": False,
                             }
                             metadata = action.get("_tryfolk") or {}
+                            manual_retryable = (
+                                comparison["same_url"] and comparison["same_generation"]
+                                and not comparison["same_control_signature"]
+                                and action in fresh_actions and action.get("method") == "click"
+                                and action.get("arguments") == []
+                                and metadata.get("diagnostic_manual") is True
+                                and metadata.get("manual_variant") == "enter_manually"
+                                and metadata.get("kind") == "click" and not metadata.get("field")
+                                and not metadata.get("frame_url") and "/iframe[" not in str(action.get("selector") or "")
+                                and "manual" not in clicked and "billing_continue" not in clicked
+                                and not financial_started
+                                and not (guard.card_attempt and (guard.card_attempt.armed_at is not None or guard.card_attempt.confirmed))
+                                and isinstance(current_document.get("generation"), (int, float))
+                                and not isinstance(current_document.get("generation"), bool)
+                                and 0 < current_document["generation"] < float("inf")
+                                and exact_origin(current_document["url"]) == DODO_CHECKOUT
+                                and current_document.get("body_present") is True
+                                and current_document.get("ready_state") in ("interactive", "complete")
+                                and current_document.get("busy") is False
+                            )
+                            if manual_retryable:
+                                # The old SDK click was never entered. Discard it;
+                                # only a newly observed same-document inner choice may execute.
+                                policy.validate(action, current_document["url"])
+                                comparison.update(nonfinancial=True, manual_variant="enter_manually")
+                                fresh_actions, fresh_document = [], None
+                                raise PreActDocumentDrift(comparison, manual_retryable=True)
                             retryable = (
                                 comparison["same_url"] and comparison["same_generation"]
                                 and not comparison["same_control_signature"]

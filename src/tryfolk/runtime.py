@@ -21,6 +21,7 @@ class FreshActionRetry:
     def __init__(self, *, timeout=180):
         self.deadline = time.monotonic() + timeout
         self.discarded = 0
+        self.manual_binding = None
 
     def remaining(self):
         left = self.deadline - time.monotonic()
@@ -28,21 +29,48 @@ class FreshActionRetry:
             raise RuntimeError("Original fresh action deadline exhausted; no action dispatched.")
         return left
 
-    def allow(self, error, action):
+    def allow(self, error, action, document=None):
         data = getattr(error, "sdk_data", None)
         metadata = action.get("_tryfolk") or {}
         expected = {"same_url": True, "same_generation": True,
                     "same_control_signature": False, "nonfinancial": True, "executed": False}
-        if (getattr(error, "sdk_code", None) != "nonfinancial_control_stale"
-                or not isinstance(data, dict) or set(data) != {*expected, "field"}
-                or any(data[k] is not value for k, value in expected.items())
+        if (not isinstance(data, dict) or any(data.get(k) is not value for k, value in expected.items())
+                or self.discarded >= 3 or time.monotonic() >= self.deadline):
+            return False
+        if getattr(error, "sdk_code", None) == "nonfinancial_manual_control_stale":
+            if (set(data) != {*expected, "manual_variant"} or data["manual_variant"] != "enter_manually"
+                    or not isinstance(document, dict) or metadata.get("url") != document.get("url")
+                    or not isinstance(document.get("generation"), (int, float))
+                    or isinstance(document.get("generation"), bool)
+                    or not 0 < document["generation"] < float("inf")
+                    or action.get("method") != "click" or action.get("arguments") != []
+                    or metadata.get("diagnostic_manual") is not True
+                    or metadata.get("manual_variant") != "enter_manually"
+                    or metadata.get("kind") != "click" or metadata.get("field") or metadata.get("frame_url")):
+                return False
+            binding = (document["url"], document["generation"], "enter_manually")
+            if self.manual_binding is not None and binding != self.manual_binding:
+                return False
+            self.manual_binding = binding
+        elif (getattr(error, "sdk_code", None) != "nonfinancial_control_stale"
+                or set(data) != {*expected, "field"}
                 or data["field"] not in ("address", "city", "state", "postal")
                 or data["field"] != metadata.get("field") or metadata.get("frame_url")
-                or metadata.get("kind") in ("pay", "confirm") or action.get("method") != "fill"
-                or self.discarded >= 3 or time.monotonic() >= self.deadline):
+                or metadata.get("kind") in ("pay", "confirm") or action.get("method") != "fill"):
             return False
         self.discarded += 1
         return True
+
+    def accepts_replacement(self, action, document):
+        if self.manual_binding is None:
+            return True
+        metadata = action.get("_tryfolk") or {}
+        return bool(isinstance(document, dict)
+                    and (document.get("url"), document.get("generation"), metadata.get("manual_variant")) == self.manual_binding
+                    and metadata.get("url") == document.get("url")
+                    and metadata.get("diagnostic_manual") is True and metadata.get("kind") == "click"
+                    and not metadata.get("field") and not metadata.get("frame_url")
+                    and action.get("method") == "click" and action.get("arguments") == [])
 
 
 class Runtime:
@@ -460,11 +488,13 @@ class Runtime:
                     policy=policy,
                 )
                 policy.validate(action, observation["url"])
+                if not fresh_retry.accepts_replacement(action, observation.get("document")):
+                    raise RuntimeError("Fresh inner manual choice must match the original document; no action executed.")
                 try:
                     result = await browser.request({"op": "act", "action": action},
                         timeout=fresh_retry.remaining())
                 except RuntimeError as error:
-                    if run["provider"] == "dodo" and fresh_retry.allow(error, action):
+                    if run["provider"] == "dodo" and fresh_retry.allow(error, action, observation.get("document")):
                         # The adapter cleared its stale action list. Return to a
                         # new observation and selection; never resend old action.
                         continue
