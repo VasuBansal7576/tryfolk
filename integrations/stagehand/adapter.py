@@ -31,7 +31,7 @@ from tryfolk.browser_events import EventCapture
 from tryfolk.payment_privacy import redact_payment
 from tryfolk.native_read_observation import NativeControlReads
 from tryfolk.checkout_discovery import discover_checkout_candidates
-from tryfolk.manual_address import ManualAddressGate, resolve_manual_address, wait_for_billing_initialization
+from tryfolk.manual_address import ManualAddressGate, read_current_manual_controls, resolve_manual_address, wait_for_billing_initialization
 
 
 def private_evidence(label, data):
@@ -62,15 +62,28 @@ async def control_state(page, selector, network_page=None, guard=None, *, diagno
         raise
 
 
-async def read_manual_current(page, network_page, guard, *, completed_fields=frozenset()):
+async def read_manual_current(
+    page, network_page, guard, *, completed_fields=frozenset(),
+    original_document=None, deadline=None, on_event=None,
+):
     """No inference/action; freshly resolve native controls and current generation."""
+    async def read_controls(before):
+        snapshot = (await page.snapshot(include_iframes=True, timeout=10000)).model_dump(mode="json")
+        return await discover_checkout_candidates(
+            snapshot, lambda selector: control_state(page, selector, network_page, guard),
+            guard.policy, before["url"], filled=completed_fields, completed_cards={}, clicked=set(),
+            executed_fields=completed_fields, phase="primary_billing",
+        )
+
+    if original_document is not None:
+        if deadline is None:
+            raise ValueError("Manual observation requires the original bounded deadline")
+        return await read_current_manual_controls(
+            lambda: page.evaluate(DOCUMENT_STATE), read_controls, guard.policy,
+            original_document=original_document, deadline=deadline, on_event=on_event,
+        )
     before = await page.evaluate(DOCUMENT_STATE)
-    snapshot = (await page.snapshot(include_iframes=True, timeout=10000)).model_dump(mode="json")
-    discovery = await discover_checkout_candidates(
-        snapshot, lambda selector: control_state(page, selector, network_page, guard),
-        guard.policy, before["url"], filled=completed_fields, completed_cards={}, clicked=set(),
-        executed_fields=completed_fields, phase="primary_billing",
-    )
+    discovery = await read_controls(before)
     after = await page.evaluate(DOCUMENT_STATE)
     return discovery, after | {"document_stable": same_document(before, after)}
 
@@ -352,12 +365,14 @@ async def run(stack):
                         async def forbidden_repeat(_):
                             raise RuntimeError("Unregistered native manual source cannot repeat an action.")
 
+                        manual_deadline = asyncio.get_running_loop().time() + 10
                         try:
                             _, verified_document = await resolve_manual_address(
                                 lambda: read_manual_current(
                                     page, network_page, guard, completed_fields=completed_fields,
+                                    original_document=fresh_document, deadline=manual_deadline, on_event=events.append,
                                 ), forbidden_repeat, policy, source_sha256=None,
-                                deadline=asyncio.get_running_loop().time() + 10,
+                                deadline=manual_deadline,
                                 executed=(action, fresh_document), on_event=events.append,
                             )
                         except ManualAddressGate as error:

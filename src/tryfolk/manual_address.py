@@ -10,6 +10,7 @@ a successful click with no effect. Purchase/login/Pay are never accepted here.
 import asyncio
 import math
 from .browser_policy import DODO_CHECKOUT, exact_origin
+from .browser_observation import same_document
 
 MANUAL_FIELDS = frozenset({"city", "state", "postal"})
 REVIEWED_OPENERS = {
@@ -22,6 +23,63 @@ class ManualAddressGate(RuntimeError):
         self.reason = reason
         self.observation_evidence = observation_evidence
         super().__init__("Manual address effect is unestablished: " + reason)
+
+
+async def read_current_manual_controls(
+    read_document, read_controls, policy, *, original_document, deadline, on_event=None,
+):
+    """Discard at most one control rerender on the exact original idle page.
+
+    Readiness and URL/generation failures stop immediately. Each pass reads
+    wholly fresh controls; the resolver still verifies country and fields.
+    No action capability or independent deadline is accepted here.
+    """
+    emit = on_event or (lambda event: None)
+
+    def validate(document):
+        policy.check_url(document["url"])
+        if policy.provider != "dodo" or exact_origin(document["url"]) != DODO_CHECKOUT:
+            raise ManualAddressGate("manual_origin_unapproved")
+        generation = document.get("generation")
+        if (not isinstance(generation, (int, float)) or isinstance(generation, bool)
+                or not math.isfinite(generation) or generation <= 0):
+            raise ManualAddressGate("manual_document_unstable")
+        if any(document.get(key) != original_document.get(key) for key in ("url", "generation")):
+            raise ManualAddressGate("manual_document_changed")
+        checks = {
+            "ready_state_supported": document.get("ready_state") in ("interactive", "complete"),
+            "body_present": document.get("body_present") is True,
+            "not_busy": document.get("busy") is False,
+            "control_signature_present": isinstance(document.get("control_signature"), str)
+            and bool(document["control_signature"]),
+        }
+        if not all(checks.values()):
+            raise ManualAddressGate("manual_document_unstable", observation_evidence={"manual_document_checks": checks})
+
+    validate(original_document)
+    loop = asyncio.get_running_loop()
+    if loop.time() >= deadline:
+        raise ManualAddressGate("original_deadline_exhausted")
+    try:
+        async with asyncio.timeout_at(deadline):
+            for attempt in (1, 2):
+                if loop.time() >= deadline:
+                    raise ManualAddressGate("original_deadline_exhausted")
+                before = await read_document()
+                validate(before)
+                controls = await read_controls(before)
+                after = await read_document()
+                validate(after)
+                if same_document(before, after):
+                    return controls, after | {"document_stable": True}
+                emit({"decision": "discard_manual_control_rerender", "attempt": attempt,
+                      "original_URL_current": True, "original_generation_current": True,
+                      "ready_body_not_busy": True})
+    except TimeoutError:
+        raise ManualAddressGate("original_deadline_exhausted") from None
+    raise ManualAddressGate("manual_document_unstable", observation_evidence={
+        "manual_document_checks": {"document_stable": False}, "control_passes": 2,
+    })
 
 
 async def resolve_manual_address(
