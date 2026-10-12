@@ -123,14 +123,23 @@ class Worker:
                 population = self.store.load(db, "populations", run["population_id"])
                 original = self.store.load(db, "runs", run["retry_of_run_id"])
             lineage = run.get("baseline_retry", {})
+            original_lineage = (
+                (original or {}).get("baseline_retry_next")
+                if lineage.get("cancelled_pre_submission_partial")
+                else (original or {}).get("baseline_retry")
+            )
             if (
                 not original
-                or original.get("baseline_retry") != lineage
+                or original_lineage != lineage
                 or lineage.get("retry_run_id") != run_id
                 or original["population_id"] != run["population_id"]
                 or len(population or []) != run["persona_count"]
                 or digest(population) != lineage.get("population_sha256")
                 or run.get("scenario_plan") != original.get("scenario_plan")
+                or (lineage.get("cancelled_pre_submission_partial") and (
+                    original["phase"] != "cancelled"
+                    or digest(original["outcomes"]) != lineage.get("historical_outcomes_sha256")
+                ))
             ):
                 raise RuntimeError(
                     "Retry requires the exact immutable original population and attempt lineage."

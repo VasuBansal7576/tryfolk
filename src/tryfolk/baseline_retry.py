@@ -21,9 +21,45 @@ def costs_for(service, count):
         raise DomainError(422, "cfo_export_invalid", str(error)) from error
 
 
+def prepayment_outcome(run, persona_id, outcome):
+    """Only independently correlated, unsubmitted Test purchases qualify."""
+    from .dodo import OWNERSHIP
+
+    try:
+        order, receipt, entitlement = (outcome[k] for k in ("order", "receipt", "entitlement"))
+        payment, checkout = receipt["payment"], receipt["checkout"]
+        owned = {k: order[k] for k in (*OWNERSHIP, "order_id", "expected_product_id")}
+        return (
+            outcome["outcome"] == "abandoned" and outcome["classification"] == "persona_abandoned"
+            and outcome["provider"] == "dodo" and outcome["measured"] is False
+            and outcome["payment_verified"] is False and outcome["entitlement_verified"] is False
+            and outcome.get("capability_checked") is False
+            and order["run_id"] == run["id"] and order["persona_id"] == persona_id
+            and order["target_revision"] == run["revision"]
+            and receipt["source"] == "dodo_test_api" and receipt["state"] == "pending"
+            and receipt["ownership"] == entitlement["ownership"] == owned
+            and all(isinstance(v, str) and bool(v) for v in owned.values())
+            and payment["status"] == checkout["payment_status"] == "requires_payment_method"
+            and receipt["checkout_session_id"] == checkout["id"] == payment["checkout_session_id"] == order["checkout_session_id"]
+            and bool(payment["payment_id"]) and checkout["payment_id"] == payment["payment_id"]
+            and all(payment["metadata"].get(k) == order[k] for k in (*OWNERSHIP, "order_id"))
+            and payment["metadata"].get("product_id") == order["expected_product_id"]
+            and payment["product_cart"] == [{"product_id": order["expected_product_id"], "quantity": 1}]
+            and payment["amount_minor"] == order["amount_minor"] and payment["currency"] == order["currency"]
+            and entitlement["source"] == "app_local_entitlement"
+            and entitlement["has_access"] is False and entitlement["order_has_grant"] is False
+            and entitlement["grant_count"] == entitlement["account_grant_count"] == 0
+            and type(entitlement["grant_count"]) is type(entitlement["account_grant_count"]) is int
+        )
+    except (KeyError, TypeError, AttributeError):
+        return False
+
+
 def snapshot(service, db, run_id):
     run = service.store.load(db, "runs", run_id)
-    if run.get("baseline_retry"):
+    partial = run["phase"] == "cancelled" and bool(run["outcomes"])
+    incoming = run.get("baseline_retry") or {}
+    if run.get("baseline_retry_next") or (incoming and incoming.get("original_run_id") == run_id):
         raise DomainError(409, "baseline_retry_exists", "This historical attempt already has a retry.")
     related = [
         json.loads(row[0])
@@ -33,9 +69,7 @@ def snapshot(service, db, run_id):
     if (
         run["provider"] != "dodo"
         or run["pass"] != "before"
-        or run["phase"] != "blocked"
-        or run.get("retry_of_run_id")
-        or run["outcomes"]
+        or (not partial and (run["phase"] != "blocked" or run.get("retry_of_run_id") or run["outcomes"]))
         or run.get("repair")
         or len(related) != 1
         or db.execute("SELECT 1 FROM findings WHERE run_id=?", (run_id,)).fetchone()
@@ -68,7 +102,8 @@ def snapshot(service, db, run_id):
     except ValueError as error:
         raise DomainError(409, "population_integrity", str(error)) from error
     money = db.execute("SELECT * FROM reservations WHERE id=?", (run["reservation_id"],)).fetchone()
-    if not money or money["released"] or money["after_started"] or money["reserved"] <= money["spent"]:
+    if (not money or money["after_started"] or money["reserved"] <= money["spent"]
+            or (money["released"] != money["reserved"] - money["spent"] if partial else bool(money["released"]))):
         raise DomainError(409, "baseline_retry_ineligible", "The original unspent hold must remain intact.")
     events = [
         {**dict(row), "data": json.loads(row["data"])}
@@ -76,10 +111,11 @@ def snapshot(service, db, run_id):
     ]
     # Positive/ambiguous verification is incompatible with the pre-submission approval.
     if any(
-        e["kind"] in ("verification", "capability", "scenario_payment_condition")
+        e["kind"] in (("capability", "scenario_payment_condition") if partial else ("verification", "capability", "scenario_payment_condition"))
         or (
             e["kind"] == "browser_action"
-            and e["data"].get("action", {}).get("_tryfolk", {}).get("kind") in ("pay", "confirm")
+            and (e["data"].get("action", {}).get("_tryfolk", {}).get("kind") in ("pay", "confirm")
+                 or str(e["data"].get("action", {}).get("_tryfolk", {}).get("field", "")).startswith("card_"))
         )
         for e in events
     ):
@@ -94,9 +130,23 @@ def snapshot(service, db, run_id):
         "source_digest": run.get("source_digest"),
         "events_sha256": digest(events),
         "historical_spent_microusd": money["spent"],
-        "release_microusd": money["reserved"] - money["spent"],
+        "release_microusd": money["reserved"] - money["spent"] - money["released"],
     }
-    receipt = run.get("baseline_retry_safety")
+    if partial:
+        ids = {p["id"] for p in population}
+        started = sorted(set(run["outcomes"]) | {e["persona_id"] for e in events if e["persona_id"]})
+        parent = service.store.load(db, "runs", run["retry_of_run_id"]) if run.get("retry_of_run_id") else None
+        parent_lineage = (parent or {}).get(
+            "baseline_retry_next" if incoming.get("cancelled_pre_submission_partial") else "baseline_retry"
+        )
+        if (not set(started) <= ids or not started
+                or (run.get("retry_of_run_id") and (not parent or parent_lineage != incoming))
+                or any(not prepayment_outcome(run, pid, result) for pid, result in run["outcomes"].items())
+                or any(e["kind"] == "verification" and e["data"] != run["outcomes"].get(e["persona_id"]) for e in events)):
+            raise DomainError(409, "baseline_retry_ineligible", "All historical results must be independently correlated unsubmitted Test purchases.")
+        state.update(historical_released_microusd=money["released"],
+                     outcomes_sha256=digest(run["outcomes"]), started_persona_ids=started)
+    receipt = None if partial else run.get("baseline_retry_safety")
     if receipt:
         from .pre_submission import verified_receipt
 
@@ -116,12 +166,21 @@ def snapshot(service, db, run_id):
                 )
             approval = json.loads(path.read_text())
             if (
-                approval.get("schema") != "tryfolk.baseline-retry-approval.v1"
+                approval.get("schema") != ("tryfolk.baseline-retry-approval.v2" if partial else "tryfolk.baseline-retry-approval.v1")
                 or approval.get("pre_submission_confirmed") is not True
                 or not re.fullmatch(r"[a-f0-9]{64}", approval.get("evidence_sha256", ""))
                 or any(approval.get(k) != v for k, v in state.items())
             ):
                 raise ValueError("Reviewed pre-submission evidence must bind the exact original state.")
+            if partial:
+                reviews = approval.get("provider_reviews")
+                if (path.is_symlink() or path.stat().st_mode & 0o777 != 0o600
+                        or not isinstance(reviews, list) or len(reviews) != len(started)
+                        or sorted(r.get("persona_id", "") for r in reviews) != started
+                        or any(r.get("payment_status") != "requires_payment_method"
+                               or r.get("provider_environment") != "test_mode"
+                               or not re.fullmatch(r"[a-f0-9]{64}", r.get("evidence_sha256", "")) for r in reviews)):
+                    raise ValueError("Every started persona, including unfinished ones, needs a new independent unsubmitted Test-payment review.")
         except (ValueError, TypeError, OSError, AttributeError) as error:
             raise DomainError(409, "baseline_retry_approval", str(error)) from error
     target = service.target(run["app_url"])
@@ -155,7 +214,7 @@ def snapshot(service, db, run_id):
 
 def budget_view(service, db, money, costs):
     available = service.available(db, costs)
-    release = money["reserved"] - money["spent"]
+    release = money["reserved"] - money["spent"] - money["released"]
     ledger = service.ledger(db)
     after_release = max(
         0, costs["limit"] - ledger["estimated_consumed_microusd"] - ledger["held_microusd"] + release
@@ -223,6 +282,9 @@ def quote_retry(service, run_id, token):
             population_id=run["population_id"],
             population_sha256=state["population_sha256"],
             persona_ids=[p["id"] for p in population],
+            historical_outcome_count=len(run["outcomes"]),
+            historical_outcomes_sha256=digest(run["outcomes"]),
+            retry_execution="full_saved_population_from_initial_state",
             retry_budget=retry_budget,
             retry_snapshot=state,
             affordable=costs["reserved"]
@@ -280,6 +342,10 @@ def accept_retry(service, run_id, quote_id, key, token):
             "accepted_at": now(),
             "retry_budget": budget,
             "history_excluded_from_retry_denominator": True,
+            "historical_outcome_count": len(original["outcomes"]),
+            "historical_outcomes_sha256": digest(original["outcomes"]),
+            "retry_execution": "full_saved_population_from_initial_state",
+            "cancelled_pre_submission_partial": original["phase"] == "cancelled",
             "payment_safety_basis": "server_recorded_pre_submission_evidence_not_provider_receipt"
             if original.get("baseline_retry_safety")
             else "owner_reviewed_pre_submission_evidence_not_provider_receipt",
@@ -314,7 +380,7 @@ def accept_retry(service, run_id, quote_id, key, token):
         db.execute("INSERT INTO reservations(id,reserved) VALUES (?,?)", (new_id, q["reserved_microusd"]))
         db.execute("INSERT INTO runs VALUES (?,?,?)", (new_id, json.dumps(run), access))
         db.execute("INSERT INTO jobs VALUES (?,?,?,?,?)", (identifier(), new_id, "run", "queued", now()))
-        original["baseline_retry"] = lineage
+        original["baseline_retry_next" if lineage["cancelled_pre_submission_partial"] else "baseline_retry"] = lineage
         service.store.save(db, "runs", original)
         for attempt in (run_id, new_id):
             db.execute(

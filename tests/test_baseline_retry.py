@@ -137,6 +137,165 @@ def test_owner_retry_releases_only_original_hold_and_reserves_both_passes_atomic
     assert client.get(f"/runs/{new['id']}/findings", headers=auth(new)).json()["findings"] == []
 
 
+def cancelled_partial_fixture(tmp_path):
+    client, first, population, approval = blocked_fixture(tmp_path)
+    previous = accept(client, first, retry_quote(client, first).json()).json()
+    service = client.app.state.service
+    identity = previous["id"]
+    order = {
+        "run_id": identity, "persona_id": "saved-persona", "account_id": "fixture-account",
+        "fixture_id": "fixture", "target_revision": previous["status"]["revision"],
+        "order_id": "fixture-order", "expected_product_id": "fixture-product",
+        "checkout_session_id": "fixture-checkout", "amount_minor": 100, "currency": "USD",
+    }
+    ownership = {k: order[k] for k in ("run_id", "persona_id", "account_id", "fixture_id", "target_revision", "order_id", "expected_product_id")}
+    outcome = {
+        "outcome": "abandoned", "classification": "persona_abandoned", "provider": "dodo",
+        "measured": False, "payment_verified": False, "entitlement_verified": False,
+        "capability_checked": False, "order": order,
+        "receipt": {"source": "dodo_test_api", "state": "pending", "ownership": ownership,
+                    "checkout_session_id": "fixture-checkout",
+                    "checkout": {"id": "fixture-checkout", "payment_id": "fixture-payment", "payment_status": "requires_payment_method"},
+                    "payment": {"payment_id": "fixture-payment", "status": "requires_payment_method",
+                                "checkout_session_id": "fixture-checkout", "metadata": {**ownership, "product_id": "fixture-product"},
+                                "amount_minor": 100, "currency": "USD", "product_cart": [{"product_id": "fixture-product", "quantity": 1}]}},
+        "entitlement": {"source": "app_local_entitlement", "ownership": ownership, "has_access": False,
+                        "order_has_grant": False, "grant_count": 0, "account_grant_count": 0},
+    }
+    with service.store.transaction() as db:
+        run = service.store.load(db, "runs", identity)
+        run.update(phase="blocked", outcomes={"saved-persona": outcome})
+        service.store.save(db, "runs", run)
+        db.execute("UPDATE jobs SET status='blocked' WHERE run_id=?", (identity,))
+        db.execute("UPDATE reservations SET spent=20000 WHERE id=?", (identity,))
+        db.execute("INSERT INTO events(run_id,persona_id,kind,created_at,data) VALUES (?,?,?,?,?)",
+                   (identity, "saved-persona", "persona_initialized", "fixture-date", "{}"))
+    assert client.post(f"/runs/{identity}/cancel", headers=OWNER).status_code == 200
+    with service.store.transaction() as db:
+        run = service.store.load(db, "runs", identity)
+        events = [{**dict(r), "data": json.loads(r["data"])} for r in db.execute("SELECT * FROM events WHERE run_id=? ORDER BY id", (identity,))]
+    approval.write_text(json.dumps({
+        "schema": "tryfolk.baseline-retry-approval.v2", "run_id": identity,
+        "population_id": run["population_id"], "population_sha256": digest(population),
+        "source_commit": run["source_commit"], "source_digest": run["source_digest"],
+        "events_sha256": digest(events), "historical_spent_microusd": 20000, "release_microusd": 0,
+        "historical_released_microusd": 100000, "outcomes_sha256": digest(run["outcomes"]),
+        "started_persona_ids": ["saved-persona"], "pre_submission_confirmed": True,
+        "evidence_sha256": "d" * 64,
+        "provider_reviews": [{"persona_id": "saved-persona", "payment_status": "requires_payment_method",
+                              "provider_environment": "test_mode", "evidence_sha256": "e" * 64}],
+    }))
+    return client, previous, population, approval
+
+
+def test_cancelled_pre_payment_retry_keeps_partial_history_and_reserves_a_full_new_pair(tmp_path):
+    client, old, population, _ = cancelled_partial_fixture(tmp_path)
+    prior = client.get(f"/runs/{old['id']}", headers=OWNER).json()
+    response = retry_quote(client, old)
+    assert response.status_code == 200, response.text
+    q = response.json()
+    assert q["retry_budget"]["release_microusd"] == 0
+    assert q["retry_budget"]["available_after_reserve_microusd"] == 30000
+    restarted = accept(client, old, q, "partial-full-restart")
+    assert restarted.status_code == 201, restarted.text
+    new = restarted.json()
+    assert new["status"]["personas"] == population
+    assert new["status"]["counts"]["executed"] == 0
+    assert new["status"]["budget"]["reserved_microusd"] == 120000
+    assert new["status"]["after_reserve_microusd"] == 36000
+    historical = client.get(f"/runs/{old['id']}", headers=OWNER).json()
+    assert historical["phase"] == "cancelled"
+    assert historical["counts"] == prior["counts"]
+    assert historical["baseline_retry"] == prior["baseline_retry"]
+    assert historical["budget"] == prior["budget"]
+    assert historical["baseline_retry_next"]["retry_run_id"] == new["id"]
+    assert new["status"]["baseline_retry"]["historical_outcome_count"] == 1
+    assert accept(client, old, q, "partial-full-restart").json() == new
+    assert accept(client, old, q, "another-restart").status_code == 409
+
+
+@pytest.mark.parametrize("metadata", [{"kind": "pay"}, {"kind": "confirm"}, {"field": "card_number"}])
+def test_partial_retry_rejects_any_historical_financial_action(tmp_path, metadata):
+    client, old, _, _ = cancelled_partial_fixture(tmp_path)
+    with client.app.state.service.store.transaction() as db:
+        db.execute("INSERT INTO events(run_id,persona_id,kind,created_at,data) VALUES (?,?,?,?,?)",
+                   (old["id"], "saved-persona", "browser_action", "fixture-date", json.dumps({"action": {"_tryfolk": metadata}})))
+    response = retry_quote(client, old)
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "baseline_retry_ineligible"
+
+
+@pytest.mark.parametrize("mutation", ["settled", "processing", "wrong_checkout", "access", "missing_receipt"])
+def test_partial_retry_rejects_settlement_uncertainty_or_unmatched_account(tmp_path, mutation):
+    client, old, _, _ = cancelled_partial_fixture(tmp_path)
+    service = client.app.state.service
+    with service.store.transaction() as db:
+        run = service.store.load(db, "runs", old["id"])
+        e = run["outcomes"]["saved-persona"]
+        if mutation in ("settled", "processing"):
+            e["receipt"]["payment"]["status"] = "succeeded" if mutation == "settled" else "processing"
+        elif mutation == "wrong_checkout":
+            e["receipt"]["payment"]["checkout_session_id"] = "another-checkout"
+        elif mutation == "access":
+            e["entitlement"]["has_access"] = True
+        else:
+            del e["receipt"]
+        service.store.save(db, "runs", run)
+    response = retry_quote(client, old)
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "baseline_retry_ineligible"
+
+
+@pytest.mark.parametrize("mutation", ["missing_review", "processing", "live", "unbound_outcomes", "public_file"])
+def test_partial_retry_requires_new_private_review_of_every_started_persona(tmp_path, mutation):
+    client, old, _, path = cancelled_partial_fixture(tmp_path)
+    a = json.loads(path.read_text())
+    if mutation == "missing_review":
+        a["provider_reviews"] = []
+    elif mutation == "processing":
+        a["provider_reviews"][0]["payment_status"] = "processing"
+    elif mutation == "live":
+        a["provider_reviews"][0]["provider_environment"] = "live_mode"
+    elif mutation == "unbound_outcomes":
+        a["outcomes_sha256"] = "0" * 64
+    else:
+        path.chmod(0o644)
+    path.write_text(json.dumps(a))
+    response = retry_quote(client, old)
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "baseline_retry_approval"
+
+
+@pytest.mark.asyncio
+async def test_full_restart_worker_restores_all_saved_personas_and_keeps_historical_outcomes(tmp_path):
+    client, old, population, _ = cancelled_partial_fixture(tmp_path)
+    new = accept(client, old, retry_quote(client, old).json(), "full-restart").json()
+
+    class NoGeneration:
+        def __init__(self):
+            self.received = []
+
+        async def discover(self, run):
+            raise AssertionError("Saved population must not be rediscovered")
+
+        async def generate(self, brief, count):
+            raise AssertionError("Saved identities must not be regenerated")
+
+        async def journey(self, run, persona, cancelled, emit):
+            self.received.append(json.loads(json.dumps(persona)))
+            return {"outcome": "pending", "classification": "fixture_unsettled", "measured": False,
+                    "provider": "dodo", "payment_verified": False}
+
+    io = NoGeneration()
+    await Worker(client.app.state.service, io).tick()
+    assert io.received == population
+    status = client.get(f"/runs/{new['id']}", headers=OWNER).json()
+    assert status["phase"] == "completed" and status["counts"]["executed"] == len(population)
+    assert status["personas"] == population
+    historical = client.get(f"/runs/{old['id']}", headers=OWNER).json()
+    assert historical["phase"] == "cancelled" and historical["counts"]["abandoned"] == 1
+
+
 @pytest.mark.asyncio
 async def test_retry_worker_reuses_exact_initial_population_without_generation_or_known_replay(tmp_path):
     client, old, population, _ = blocked_fixture(tmp_path)
