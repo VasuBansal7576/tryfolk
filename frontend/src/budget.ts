@@ -40,11 +40,11 @@ export function quoteBudget(quote: Quote, accepted = false): string {
 export function affordabilityMessage(quote: Quote): string {
   if (quote.affordable) return '';
   if (quote.kind === 'baseline_retry') return `The complete ${money(quote.reserved_microusd)} new reservation must fit the quote cap and ${money(quote.retry_budget.available_after_release_microusd)} lifetime allowance after releasing only the original unused hold. All ${number(quote.persona_count)} saved customers remain selected. Resolve the reported budget limit before reviewing another quote.`;
-  if (!hasBudgetDetails(quote)) return 'This request exceeds the available allowance. Review the budget or deliberately change the requested count. Your count has not been changed.';
+  if (!hasBudgetDetails(quote)) return 'This request exceeds the available allowance. Resolve the reported budget limit before reviewing another quote. The requested population has not changed.';
   const reasons = [];
   if (quote.reserved_microusd > quote.quote_limit_microusd) reasons.push(`the ${money(quote.quote_limit_microusd)} customer quote cap`);
   if (quote.reserved_microusd > quote.lifetime_available_microusd) reasons.push(`the ${money(quote.lifetime_available_microusd)} lifetime remaining`);
-  return `The ${money(quote.reserved_microusd)} full reservation exceeds ${reasons.join(' and ') || 'the service’s available budget'}. All ${number(quote.persona_count)} requested customers remain selected. Review the budget or deliberately choose another count.`;
+  return `The ${money(quote.reserved_microusd)} full reservation exceeds ${reasons.join(' and ') || 'the service’s available budget'}. All ${number(quote.persona_count)} requested customers remain selected. Resolve the reported budget limit before reviewing another quote.`;
 }
 
 export function forecastSource(quote: Quote, pendingPage: string | null = null): string {

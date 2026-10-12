@@ -1,9 +1,10 @@
-import { createdRunSchema, findingsSchema, ownerLogoutSchema, ownerSessionSchema, quoteSchema, readinessSchema, repairSchema, runSchema, scenarioCatalogSchema } from './contracts';
+import { createdRunSchema, findingsSchema, ownerLogoutSchema, ownerSessionSchema, readinessSchema, repairSchema, runSchema, scenarioCatalogSchema } from './contracts';
 
 import { createTransport } from './transport';
 import { createConnectionApi } from './connections';
 import { createCheckpointApi } from './checkpoint-access';
 import { createBaselineRetryApi } from './baseline-retry';
+import { createLaunchApi } from './launch';
 export { ApiError } from './transport';
 
 const base = String(import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
@@ -14,12 +15,12 @@ export const api = {
   ...createConnectionApi(request),
   ...createCheckpointApi(request),
   ...createBaselineRetryApi(request),
+  ...createLaunchApi(request),
   owner: async () => { const session = await request('/owner/session', ownerSessionSchema); csrfToken = session.csrf_token; return session; },
   connectOwner: async (secret: string) => { const session = await request('/owner/session', ownerSessionSchema, { body: { secret } }); csrfToken = session.csrf_token; return session; },
   disconnectOwner: async () => { const session = await request('/owner/session', ownerLogoutSchema, { method: 'DELETE' }); csrfToken = null; return session; },
   readiness: () => request('/readiness', readinessSchema),
   scenarios: (app_url: string) => request(`/scenarios?${new URLSearchParams({ app_url })}`, scenarioCatalogSchema),
-  quote: (app_url: string, persona_count: number) => request('/quotes', quoteSchema, { body: { app_url, persona_count } }),
   createRun: (quote_id: string, key: string) => request('/runs', createdRunSchema, { body: { quote_id }, key }),
   run: (id: string, token: string) => request(`/runs/${encodeURIComponent(id)}`, runSchema, { token }),
   findings: (id: string, token: string) => request(`/runs/${encodeURIComponent(id)}/findings`, findingsSchema, { token }),

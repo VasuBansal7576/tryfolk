@@ -17,7 +17,7 @@ const readiness = readinessSchema.parse(await call('/readiness'));
 const target = process.env.TRYFOLK_TEST_TARGET || readiness.target_url;
 assert.ok(target, 'Register an owned local target before verifying quotes.');
 const quotes = [];
-for (const count of [1, 8, 10]) {
+for (const count of [4]) {
   const quote = quoteSchema.parse(await call('/quotes', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ app_url: target, persona_count: count }),
@@ -33,7 +33,7 @@ for (const count of [1, 8, 10]) {
     assert.ok(quoteBudget(quote).includes('Two independent budget checks'));
   }
   if (quote.cfo_plan_status === 'missing') assert.ok(forecastSource(quote).includes('No validated native forecast is active'));
-  if (!quote.affordable) assert.ok(affordabilityMessage(quote).includes('count'));
+  if (!quote.affordable) assert.ok(affordabilityMessage(quote).includes('budget limit'));
   quotes.push(quote);
 }
 const proof = { verified_at: new Date().toISOString(), scope: 'Actual local API quotes only; no run/model/payment jobs', target, quotes, passed: true };

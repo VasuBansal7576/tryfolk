@@ -66,6 +66,7 @@ export function renderPersonaDetail(current: Run, person: Persona): string {
   const saved = person.assigned_scenario ?? coverage?.assigned_scenario;
   const assignment = saved?.persona_index === person.index && saved.scenario_id === saved.scenario_snapshot.id ? saved : null;
   const scenario = assignment?.scenario_snapshot;
+  const challenge = assignment?.buyer_challenge ?? person.buyer_challenge;
   const observed = coverage?.observed_scenario_result;
   const result = observed ?? null;
   const preferences = Object.fromEntries(Object.entries(person.profile).filter(([key]) => /prefer|patience|constraint/i.test(key)));
@@ -96,6 +97,7 @@ export function renderPersonaDetail(current: Run, person: Persona): string {
     condition_fixture_sha256: assignment.condition_fixture_sha256,
     condition_fixture_snapshot: assignment.condition_fixture_snapshot,
     saved_persona_sha256: assignment.saved_persona_sha256,
+    buyer_challenge: challenge, buyer_challenge_sha256: assignment.buyer_challenge_sha256 ?? person.buyer_challenge_sha256,
   })}${canonicalScenario(assignment.scenario_snapshot_json)}</details>` : '';
   const observedVerification = result ? section('Reported journey and scenario verification', `
     <p class="small muted">${result.measured ? 'Measured provider evidence' : 'Fixture or unmeasured evidence'} · ${escape(humanize(result.classification))}</p>
@@ -118,16 +120,17 @@ export function renderPersonaDetail(current: Run, person: Persona): string {
     <div class="persona-inputs">
       <h2>Saved profile and assigned test</h2>
       <p class="small muted">These describe the synthetic customer and test inputs. They do not establish what happened in the browser.</p>
+      ${challenge ? section('Buyer challenge', `<p class="hypothetical-label">Hypothetical test input · not proof of exercise or an observed failure</p>${readable({ title: challenge.title, buyer_constraint: challenge.buyer_constraint, check_emphasis: challenge.check_emphasis })}`) : ''}
       ${section('Why this customer and case were selected', assignment?.profile_relevance_rationale ? readable(assignment.profile_relevance_rationale) : unknown)}
       ${choice}
       ${section('Seed source and provenance', renderSeedProvenance(assignment?.seed))}
       ${section('Background and profile', Object.keys(person.profile).length ? readable(person.profile) : unknown)}
       ${section('Payment context', Object.keys(payment).length ? readable(payment) : unknown)}
-      ${section('Saved preferences', Object.keys(preferences).length ? readable(preferences) : unknown)}
-      ${section('Customer goal', goal === undefined ? unknown : readable(goal))}
-      ${section('Assigned hypothetical problem', scenario ? `<p class="hypothetical-label">Hypothetical input · not an observed failure</p><p>${escape(scenario.hypothetical_problem)}</p>` : unknown)}
-      ${section('Expected behavior', scenario ? readable(scenario.expected_behavior) : unknown)}
-      ${scenario ? section('Assigned customer context', readable(scenario.customer_context)) : ''}
+      ${section('Buyer preferences and constraints', Object.keys(preferences).length ? readable(preferences) : unknown)}
+      ${section('Buyer goal', goal === undefined ? unknown : readable(goal))}
+      ${section('Hypothetical payment risk', scenario ? `<p class="hypothetical-label">Hypothetical input · not an observed failure</p><p>${escape(scenario.hypothetical_problem)}</p>` : unknown)}
+      ${section('Measurable check', scenario ? readable(scenario.expected_behavior) : unknown)}
+      ${scenario ? section('Buyer context and constraints', readable(scenario.customer_context)) : ''}
       ${section('Assigned starting conditions', Object.keys(person.conditions).length ? readable(person.conditions) : unknown)}
       ${section('Saved initial memory', person.initial_semantic_memory === undefined ? unknown : readable(person.initial_semantic_memory))}
       ${person.memory.length ? section('Other saved memory records', `<p class="small muted">The service did not identify these as the original initial memory.</p>${readable(person.memory)}`) : ''}

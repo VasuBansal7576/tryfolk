@@ -74,7 +74,18 @@ export const seedBindingSchema = z.object({
   record_snapshot: seedRecordSchema,
   source: z.object({ dataset: z.string(), url: z.string(), revision: z.string(), license: z.literal('CC-BY-4.0'), attribution: z.string() }).passthrough(),
 });
+export const buyerChallengeSchema = z.object({
+  version: z.union([z.string().min(1), z.number().int().nonnegative()]),
+  id: z.string().min(1), title: z.string().min(1), buyer_constraint: z.string(),
+  check_emphasis: z.union([z.string(), z.array(z.string())]),
+  hypothetical_problem_is_unobserved: z.literal(true),
+});
+const buyerChallengeFields = {
+  buyer_challenge: buyerChallengeSchema.optional(),
+  buyer_challenge_sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+};
 const scenarioAssignmentSchema = z.object({
+  ...buyerChallengeFields,
   persona_index: count, catalog_version: z.string(), catalog_sha256: z.string(),
   scenario_id: z.string(), scenario_sha256: z.string(), scenario_snapshot: scenarioSchema,
   scenario_snapshot_json: z.string().optional(), source_refs_snapshot: z.array(z.unknown()).optional(),
@@ -194,6 +205,7 @@ export const countsSchema = z.object({
   failed: count, abandoned: count, pending: count, blocked: count,
 });
 export const personaSchema = z.object({
+  ...buyerChallengeFields,
   id: z.string(), index: count, name: z.string(), profile: z.record(z.string(), z.unknown()),
   conditions: z.record(z.string(), z.unknown()), memory: z.array(z.unknown()),
   initial_semantic_memory: z.array(z.unknown()).optional(), initial_snapshot: z.unknown().optional(),

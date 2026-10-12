@@ -17,17 +17,17 @@ async function call(path, options = {}) {
 const readiness = readinessSchema.parse((await call('/readiness')).body);
 const target = process.env.TRYFOLK_TEST_TARGET || readiness.target_url;
 assert.ok(target, 'Register an owned local test target before verification.');
-const invalidCount = await call('/quotes', { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ app_url: target, persona_count: 1001 }) });
+const invalidCount = await call('/quotes', { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ app_url: target, persona_count: 5 }) });
 assert.equal(invalidCount.response.status, 422, 'Invalid count must be rejected without reduction.');
-const unknownTarget = await call('/quotes', { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ app_url: 'https://unconnected.invalid', persona_count: 1 }) });
+const unknownTarget = await call('/quotes', { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ app_url: 'https://unconnected.invalid', persona_count: 4 }) });
 assert.equal(unknownTarget.response.status, 422, 'Unconnected origins must be rejected.');
-const quoteResponse = await call('/quotes', { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ app_url: target, persona_count: 1 }) });
+const quoteResponse = await call('/quotes', { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ app_url: target, persona_count: 4 }) });
 assert.equal(quoteResponse.response.status, 200);
 const quote = quoteSchema.parse(quoteResponse.body);
-assert.equal(quote.persona_count, 1);
+assert.equal(quote.persona_count, 4);
 assert.ok(quote.provider || quote.provenance, 'The quote must identify its payment source.');
 assert.equal(quote.reserved_microusd, quote.before_microusd + quote.after_microusd + quote.overhead_microusd + (quote.contingency_microusd ?? 0), 'Reserve must cover both passes, overhead and the original explicit contingency.');
-assert.ok(quote.affordable, 'Verification needs enough local allowance for N=1.');
+assert.ok(quote.affordable, 'Verification needs enough local allowance for N=4.');
 
 const key = crypto.randomUUID();
 const createOptions = { method: 'POST', headers: { ...jsonHeaders, 'Idempotency-Key': key }, body: JSON.stringify({ quote_id: quote.id }) };
@@ -47,8 +47,8 @@ try {
   const guestReplay = await call(`/runs/${created.id}/replay`, { method: 'POST', headers: { ...jsonHeaders, 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ repair_id: 'not-a-repair' }) });
   assert.equal(guestReplay.response.status, 403, 'Guests cannot start a retest.');
   const run = runSchema.parse((await call(`/runs/${created.id}`, { headers: auth })).body);
-  assert.equal(run.persona_count, 1);
-  assert.equal(run.counts.requested, 1);
+  assert.equal(run.persona_count, 4);
+  assert.equal(run.counts.requested, 4);
   if (quote.revision) assert.equal(run.revision, quote.revision, 'The quoted target revision must be pinned to the run.');
   if (quote.fault) assert.equal(run.fault, quote.fault, 'The quoted fault configuration must be preserved.');
   if (quote.provenance && run.provenance) assert.equal(run.provenance.payment_truth, quote.provenance.payment_truth, 'Payment-source provenance must be preserved.');
@@ -57,7 +57,7 @@ try {
     assert.equal(run.phase, 'blocked');
     assert.equal(run.counts.generated, 0);
     assert.equal(run.counts.executed, 0);
-    assert.equal(run.counts.blocked, 1);
+    assert.equal(run.counts.blocked, 4);
     assert.equal(run.personas.length, 0, 'Blocked setup must not invent people.');
   }
   const findings = findingsSchema.parse((await call(`/runs/${created.id}/findings`, { headers: auth })).body);
