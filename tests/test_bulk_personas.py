@@ -241,3 +241,15 @@ def test_full_population_chunks_retain_exact_ids_indices_and_frozen_replay_bindi
     population[37]["purchase_plan"]["purchase"] = not population[37]["purchase_plan"]["purchase"]
     with pytest.raises(ValueError):
         validate_population(population, plan)
+
+
+def test_oversized_source_chunk_stops_before_sdk_construction_or_model():
+    value=command()
+    for assignment in value['brief']['generation_plan']['assignments']:
+        seed=assignment['seed']['record_snapshot']
+        seed['profile']['interests']=['x'*260_000]
+        assignment['seed']['record_sha256']=digest(seed)
+    def forbidden(*args,**kwargs):
+        raise AssertionError('Oversized exact source must stop before construction/inference')
+    with pytest.raises(ValueError,match='input bound'):
+        adapter().generate_bulk(value,forbidden,forbidden)

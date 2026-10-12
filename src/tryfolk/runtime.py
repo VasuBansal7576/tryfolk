@@ -7,7 +7,7 @@ import signal
 from pathlib import Path
 import httpx
 from .codex_bridge import clean_env
-from .process import SDKProcess, PersonaChannel, ROOT
+from .process import SDKProcess, PersonaChannel, BrowserLease, ROOT
 from .verification import Payment, Entitlement, verify
 from .worker import Cancelled
 from .browser_policy import BrowserPolicy
@@ -28,16 +28,43 @@ class Runtime:
         self.bulk_execution = bool(getattr(settings, "bulk_execution", False))
         self.journey_concurrency = getattr(settings, "browser_concurrency", 2) if self.bulk_execution else 1
         self.bulk_minds = {}
+        self.browser_pools = {}
+        self.browser_hosts = {}
 
     def bulk_mind(self, run_id):
         if run_id not in self.bulk_minds:
             self.bulk_minds[run_id] = SDKProcess("tinytroupe", lambda: self.cancelled(run_id), evidence_root=self.evidence)
         return self.bulk_minds[run_id]
 
+    async def lease_browser(self, run_id, cancelled, frame_verify):
+        if run_id not in self.browser_pools:
+            pool = asyncio.Queue()
+            hosts = [SDKProcess("stagehand", cancelled, reuse_browser=True, evidence_root=self.evidence)
+                     for _ in range(self.journey_concurrency)]
+            for host in hosts:
+                pool.put_nowait(host)
+            self.browser_pools[run_id], self.browser_hosts[run_id] = pool, hosts
+        pool = self.browser_pools[run_id]
+        host = await pool.get()
+        host.frame_verify = frame_verify
+        def release(closed_host, reusable):
+            if reusable:
+                pool.put_nowait(closed_host)
+            else:
+                # A fresh SDK object has no stale process, context or callback.
+                replacement = SDKProcess("stagehand", cancelled, reuse_browser=True, evidence_root=self.evidence)
+                self.browser_hosts[run_id].append(replacement)
+                pool.put_nowait(replacement)
+
+        return BrowserLease(host, release)
+
     async def close_run(self, run_id):
         mind = self.bulk_minds.pop(run_id, None)
         if mind:
             await mind.close()
+        hosts = self.browser_hosts.pop(run_id, [])
+        self.browser_pools.pop(run_id, None)
+        await asyncio.gather(*(host.close() for host in hosts))
 
     def cancelled(self, run_id):
         with self.service.store.transaction() as db:
@@ -139,16 +166,25 @@ class Runtime:
             mind = self.bulk_mind(self.active_run_id)
             population = []
             try:
-                for index in range(0, count, 64):
-                    chunk_count = min(64, count - index)
-                    value = await mind.request(
-                        {"op": "generate_bulk", "brief": brief, "count": chunk_count,
-                         "start_index": index, "run_id": self.active_run_id}, timeout=600,
-                    )
+                index, capacity = 0, 64
+                while index < count:
+                    chunk_count = min(capacity, count - index)
+                    try:
+                        value = await mind.request(
+                            {"op": "generate_bulk", "brief": brief, "count": chunk_count,
+                             "start_index": index, "run_id": self.active_run_id}, timeout=600,
+                        )
+                    except RuntimeError as error:
+                        if (getattr(error, "sdk_code", None) == "bulk_input_bound"
+                            and getattr(error, "model_invoked", None) is False and chunk_count > 1):
+                            capacity = max(1, chunk_count // 2)
+                            continue  # No model/browser/payment call happened; split exact inputs.
+                        raise
                     chunk = value["population"]
                     if len(chunk) != chunk_count or [p["index"] for p in chunk] != list(range(index, index + chunk_count)):
                         raise RuntimeError("Bulk generation must retain every exact assigned persona index; N cannot shrink.")
                     population.extend(chunk)
+                    index += chunk_count
                     if len({p["id"] for p in population}) != len(population):
                         raise RuntimeError("Bulk generation returned duplicate persona IDs.")
                     # Persist actual generation progress. Requested N and accepted
@@ -256,17 +292,18 @@ class Runtime:
 
             return await DodoTarget(run["preview_url"]).frame_context(context, run, fixture)
 
-        browser = SDKProcess(
-            "stagehand", cancelled, frame_verify=frame_verify if run["provider"] == "dodo" else None,
-            evidence_root=self.evidence,
-        )
         bulk = self.bulk_execution and run["provider"] == "dodo" and bool(persona.get("purchase_plan"))
         if bulk:
             from .bulk_personas import validated_purchase_plan
 
             plan = validated_purchase_plan(persona)
             mind = PersonaChannel(self.bulk_mind(run["id"]), run["id"], persona["id"])
+            browser = await self.lease_browser(run["id"], cancelled, frame_verify)
         else:
+            browser = SDKProcess(
+                "stagehand", cancelled,
+                frame_verify=frame_verify if run["provider"] == "dodo" else None, evidence_root=self.evidence,
+            )
             mind = SDKProcess("tinytroupe", cancelled, evidence_root=self.evidence)
         actions_executed = []
         capability = None

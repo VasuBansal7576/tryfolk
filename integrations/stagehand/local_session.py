@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from playwright.async_api import async_playwright
 from stagehand import Stagehand, local_browser
+from stagehand.extension_assets import extension_directory
 
 from tryfolk.browser_network import ResourceGuard
 from tryfolk.response_boundary import ResponseBoundary
@@ -41,7 +42,7 @@ def chrome_executable():
     raise RuntimeError("Install a supported local Chrome executable; no hosted session is substituted.")
 
 
-async def open_routed_browser(stack, *, model, logging, downloads):
+async def open_routed_browser(stack, *, model, logging, downloads, session_stack=None, pooled=False):
     playwright = await async_playwright().start()
     stack.push_async_callback(playwright.stop)
     profile = Path(tempfile.mkdtemp(prefix="stagehand-profile-", dir=downloads.parent))
@@ -61,19 +62,68 @@ async def open_routed_browser(stack, *, model, logging, downloads):
               "--remote-allow-origins=*"],
     )
     stack.push_async_callback(context.close)
-    await context.add_init_script(observer_script())
-    guard = ResourceGuard()
-    # The SDK's own chrome-extension://.../blank.html is an internal runtime
-    # document, not an HTTP resource. Keep all actual HTTP(S) traffic gated.
-    await context.route(re.compile(r"^https?://"), guard.route)
-    await context.route_web_socket("**/*", lambda ws: ws.close(code=1008, reason="Unapproved socket"))
+    # The host's normal profile is owned and never used for customer traffic.
+    await context.route(re.compile(r"^https?://"), lambda route: route.abort())
+    connection = None
+    if pooled:
+        connection = context.browser
+        if connection is None:
+            raise RuntimeError("Owned persistent Chrome host does not expose context creation.")
+        cdp = await connection.new_browser_cdp_session()
+        # Only the genuine SDK extension in this disposable profile receives
+        # incognito access. No personal profile or installed extension is touched.
+        loaded = await cdp.send("Extensions.loadUnpacked", {
+            "path": str(extension_directory()), "enableInIncognito": True,
+        })
+        if not loaded.get("id"):
+            raise RuntimeError("Owned Stagehand extension lacks incognito registration.")
+        await cdp.detach()
     browser = await local_browser.connect(cdp_url=f"http://127.0.0.1:{port}")
     stack.push_async_callback(browser.close)
     stagehand = await Stagehand.create(browser=browser, model=model, self_heal=False, logging=logging)
     stack.push_async_callback(stagehand.close)
-    page = await browser.context.new_page()
+
+    async def new_session(owned_stack, owned_downloads):
+        isolated = await connection.new_context(
+            locale="en-US", viewport={"width":1280, "height":800}, has_touch=False,
+            accept_downloads=True, service_workers="block",
+        )
+        owned_stack.push_async_callback(isolated.close)
+        return await routed_context(browser, isolated, pooled=True)
+
+    if pooled:
+        session = await new_session(session_stack, downloads)
+    else:
+        await context.unroute(re.compile(r"^https?://"))
+        session = await routed_context(browser, context, pooled=False)
+    if pooled:
+        return browser, stagehand, *session, new_session
+    return browser, stagehand, *session
+
+
+async def routed_context(browser, context, *, pooled):
+    await context.add_init_script(observer_script())
+    guard = ResourceGuard()
+    await context.route(re.compile(r"^https?://"), guard.route)
+    await context.route_web_socket("**/*", lambda ws: ws.close(code=1008, reason="Unapproved socket"))
     marker = "about:blank#tryfolk-" + uuid4().hex
-    await page.goto(marker)
+    if pooled:
+        network_page = await context.new_page()
+        await network_page.goto(marker)
+        deadline = asyncio.get_running_loop().time() + 10
+        while True:
+            candidates = [p for p in await browser.context.pages() if await p.url() == marker]
+            if len(candidates) == 1:
+                page = candidates[0]
+                # Require genuine SDK extension-world helpers before any fixture URL.
+                await page.snapshot(include_iframes=True, timeout=5000)
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                raise RuntimeError("Fresh isolated context is unavailable to actual Stagehand.")
+            await asyncio.sleep(.05)
+    else:
+        page = await browser.context.new_page()
+        await page.goto(marker)
     deadline = asyncio.get_running_loop().time() + 5
     while True:
         candidates = [p for p in context.pages if p.url == marker]
@@ -103,4 +153,4 @@ async def open_routed_browser(stack, *, model, logging, downloads):
     boundary = ResponseBoundary(context, guard)
     await boundary.cover(network_page)
     guard.response_guard = boundary.cover
-    return browser, stagehand, page, context, network_page, guard
+    return page, context, network_page, guard

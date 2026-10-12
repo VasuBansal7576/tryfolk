@@ -16,6 +16,11 @@ MAX_MODEL_INPUT = 256_000
 MAX_RESPONSE = 2_000_000
 
 
+class BulkInputBound(ValueError):
+    code = "bulk_input_bound"
+    model_invoked = False
+
+
 def generate_bulk(command, TinyPerson, generate):
     created = []
     try:
@@ -52,6 +57,16 @@ def _generate_bulk(command, TinyPerson, generate, created):
     if len({a.get("seed", {}).get("id") for a in assignments}) != len(assignments):
         raise ValueError("Distinct accepted seeds required across every chunk of the saved population.")
     selected = assignments[start : start + count]
+    # Conservative capacity check before allocating any TinyPerson. Complete
+    # profiles/cases remain intact; the controller can split this uninvoked batch.
+    source_bytes = len(json.dumps({
+        "product_context": {k:v for k,v in brief.items() if k != "generation_plan"},
+        "requests": [{"profile": a.get("seed", {}).get("record_snapshot", {}).get("profile"),
+                      "scenario": a.get("scenario_snapshot"),
+                      "conditions": a.get("condition_fixture_snapshot")} for a in selected],
+    }, ensure_ascii=False).encode())
+    if source_bytes + 4096 * count > MAX_MODEL_INPUT:
+        raise BulkInputBound("Complete source chunk exceeds model input bound; split without truncation.")
     people, requests, used_seeds = [], [], set()
     # Validate the whole chunk before constructing any SDK person or invoking a model.
     for offset, assignment in enumerate(selected):
@@ -148,7 +163,7 @@ def _generate_bulk(command, TinyPerson, generate, created):
         },
     ]
     if len(json.dumps(messages, ensure_ascii=False).encode()) > MAX_MODEL_INPUT:
-        raise ValueError("Complete chunk exceeds model input bound; use smaller chunks without truncation.")
+        raise BulkInputBound("Complete chunk exceeds model input bound; use smaller chunks without truncation.")
     schema = {
         "type": "object",
         "properties": {p["id"]: PurchaseIntent.model_json_schema() for _, p in people},

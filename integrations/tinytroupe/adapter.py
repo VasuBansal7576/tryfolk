@@ -177,6 +177,7 @@ def main():
             if command["op"] == "generate_bulk":
                 from bulk_adapter import generate_bulk
 
+                config_manager.update_multiple({"enable_memory_consolidation": False})
                 data = generate_bulk(command, TinyPerson, generate)
             elif command["op"] == "generate":
                 product_context = {k: v for k, v in command["brief"].items() if k != "generation_plan"}
@@ -239,6 +240,10 @@ def main():
             elif command["op"] == "init":
                 if bulk_key and (bulk_key in people or len(people) >= 4 or command["persona"]["id"] != bulk_key[1]):
                     raise RuntimeError("Distinct at-most-four owned persona memory sessions are required.")
+                if bulk_key:
+                    # Retain every actual episodic commit in this bulk service.
+                    # Consolidation is disclosed as disabled, not simulated by a model.
+                    config_manager.update_multiple({"enable_memory_consolidation": False})
                 person, faculty = build(command["persona"])
                 if bulk_key:
                     people[bulk_key] = person, faculty
@@ -282,7 +287,9 @@ def main():
 
             traceback.print_exc(file=sys.stderr)
             print(
-                json.dumps({"ok": False, "error": type(error).__name__ + ": " + str(error)[:500]}),
+                json.dumps({"ok": False, "error": type(error).__name__ + ": " + str(error)[:500],
+                            "code": getattr(error, "code", None),
+                            "model_invoked": getattr(error, "model_invoked", None)}),
                 file=protocol,
                 flush=True,
             )

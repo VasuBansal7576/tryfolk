@@ -187,3 +187,46 @@ for line in sys.stdin:
     finally:
         await service.close()
     assert children[0].returncode is not None
+
+
+@pytest.mark.parametrize('failed_operation', ['begin_session','end_session'])
+async def test_browser_lease_failure_quarantines_host_before_release(failed_operation):
+    from types import SimpleNamespace
+    from tryfolk.process import BrowserLease
+    releases=[]
+    class Host:
+        process=SimpleNamespace(returncode=None)
+        frame_verify='fixture-binding'
+        closed=False
+        async def request(self,data,timeout):
+            if data['op']==failed_operation:
+                raise RuntimeError('invented lifecycle failure')
+            return {'fresh_context_closed':True}
+        async def close(self):
+            self.closed=True
+            self.process.returncode=0
+    host=Host()
+    lease=BrowserLease(host,lambda host,reusable: releases.append((host,reusable,host.closed)))
+    if failed_operation=='begin_session':
+        with pytest.raises(RuntimeError):await lease.request({'op':'goto'})
+        await lease.close()
+    else:
+        await lease.request({'op':'goto'})
+        with pytest.raises(RuntimeError):await lease.close()
+    assert releases==[(host,False,True)] and host.frame_verify is None
+
+
+async def test_browser_lease_success_requires_actual_context_close_receipt():
+    from types import SimpleNamespace
+    from tryfolk.process import BrowserLease
+    releases=[]
+    class Host:
+        process=SimpleNamespace(returncode=None)
+        frame_verify=None
+        closed=False
+        async def request(self,data,timeout):return {}
+        async def close(self):self.closed=True
+    host=Host();lease=BrowserLease(host,lambda host,reusable: releases.append(reusable))
+    await lease.request({'op':'goto'})
+    with pytest.raises(RuntimeError,match='context close'):await lease.close()
+    assert releases==[False] and host.closed

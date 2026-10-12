@@ -13,10 +13,11 @@ RESPONSE_LIMIT = 2_000_000
 
 
 class SDKProcess:
-    def __init__(self, name, cancelled=lambda: False, *, frame_verify=None, evidence_root=None):
+    def __init__(self, name, cancelled=lambda: False, *, frame_verify=None, evidence_root=None, reuse_browser=False):
         self.name = name
         self.cancelled = cancelled
         self.frame_verify = frame_verify
+        self.reuse_browser = reuse_browser
         self.evidence_root = Path(
             evidence_root or os.environ.get("TRYFOLK_EVIDENCE_ROOT", "runtime/evidence")
         ).resolve()
@@ -30,6 +31,7 @@ class SDKProcess:
             "BROWSER_USE_TELEMETRY": "false",
             "TRYFOLK_EVIDENCE_ROOT": str(self.evidence_root),
         }
+        env["TRYFOLK_STAGEHAND_REUSE"] = "true" if self.reuse_browser else "false"
         working = ROOT / "runtime" / "sdk"
         working.mkdir(parents=True, exist_ok=True)
         self.log = (working / f"{self.name}.log").open("a")
@@ -107,6 +109,8 @@ class SDKProcess:
             if not result["ok"]:
                 error = RuntimeError(f"{self.name}: {result['error']}")
                 error.evidence_path = result.get("error_evidence_path")
+                error.sdk_code = result.get("code")
+                error.model_invoked = result.get("model_invoked")
                 if self.name == "stagehand":
                     error.pre_submission_evidence = result.get("pre_submission_evidence")
                 raise error
@@ -150,3 +154,43 @@ class PersonaChannel:
         if self.initialized and self.process and self.process.returncode is None:
             await self.request({"op": "release"})
             self.initialized = False
+
+
+class BrowserLease:
+    """One persona's fresh context; failed lifecycle hosts are quarantined."""
+
+    def __init__(self, service, release):
+        self.service, self.release = service, release
+        self.started = False
+        self.broken = False
+        self.closed = False
+
+    async def request(self, data, timeout=180):
+        if self.closed:
+            raise RuntimeError("Owned browser lease is already closed.")
+        if data["op"] == "goto":
+            data = {**data, "op": "begin_session"}
+            # The adapter may allocate a context before goto/guard settlement.
+            self.started = True
+        try:
+            return await self.service.request(data, timeout)
+        except BaseException:
+            self.broken = True
+            raise
+
+    async def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        reusable = False
+        try:
+            if self.started and not self.broken and self.service.process and self.service.process.returncode is None:
+                receipt = await self.service.request({"op": "end_session"}, timeout=20)
+                if receipt.get("fresh_context_closed") is not True:
+                    raise RuntimeError("Actual owned context close receipt is required before host reuse.")
+                reusable = True
+        finally:
+            self.service.frame_verify = None
+            if not reusable:
+                await self.service.close()
+            self.release(self.service, reusable)

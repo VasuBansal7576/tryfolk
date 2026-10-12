@@ -173,6 +173,34 @@ async def model(request):
     )
 
 
+async def install_session(context, network_page, page, guard, downloads, capture, verify_frame):
+    """All callbacks close over this exact fresh context and guard, never a later persona."""
+    guard.frame_verify = verify_frame
+    timing = CheckoutTiming(network_page)
+    context.on("request", timing.started)
+    context.on("response", timing.response)
+    context.on("response", guard.bootstrap_response)
+    context.on("requestfinished", timing.finished)
+
+    def failed_request(request):
+        guard.record(request, "request_failed", failure=request.failure)
+        timing.failed(request)
+
+    context.on("requestfailed", failed_request)
+
+    async def download(item):
+        if item.suggested_filename.endswith(".svg"):
+            if guard.card_attempt and guard.card_attempt.confirmed:
+                try:
+                    await guard.admit_owned_download(item)
+                except ValueError:
+                    return
+            await item.save_as(downloads / (uuid4().hex + ".svg"))
+
+    network_page.on("download", download)
+    return timing, await page.on("console", capture.console)
+
+
 async def main():
     async with AsyncExitStack() as stack:
         await run(stack)
@@ -209,36 +237,23 @@ async def run(stack):
     downloads = Path(
         tempfile.mkdtemp(prefix="stagehand-download-", dir=os.environ.get("TRYFOLK_EVIDENCE_ROOT"))
     )
-    browser, stagehand, page, network_context, network_page, guard = await open_routed_browser(
-        stack,
-        model=model,
-        logging={"level": "debug", "on_log": capture.network_log},
-        downloads=downloads,
+    session_stack = AsyncExitStack()
+    pooled = os.environ.get("TRYFOLK_STAGEHAND_REUSE") == "true"
+    opened = await open_routed_browser(
+        stack, model=model,
+        logging={"level": "debug", "on_log": capture.network_log}, downloads=downloads,
+        session_stack=session_stack, pooled=pooled,
     )
-    guard.frame_verify = verify_frame
-    checkout_timing = CheckoutTiming(network_page)
-    network_context.on("request", checkout_timing.started)
-    network_context.on("response", checkout_timing.response)
-    network_context.on("response", guard.bootstrap_response)
-    network_context.on("requestfinished", checkout_timing.finished)
-
-    def failed_request(request):
-        guard.record(request, "request_failed", failure=request.failure)
-        checkout_timing.failed(request)
-
-    network_context.on("requestfailed", failed_request)
-
-    async def download(item):
-        if item.suggested_filename.endswith(".svg"):
-            if guard.card_attempt and guard.card_attempt.confirmed:
-                try:
-                    await guard.admit_owned_download(item)
-                except ValueError:
-                    return  # Guard retained the closed denial; no file evidence.
-            await item.save_as(downloads / (uuid4().hex + ".svg"))
-
-    network_page.on("download", download)
-    console_subscription = await page.on("console", capture.console)
+    if pooled:
+        browser, stagehand, page, network_context, network_page, guard, session_factory = opened
+    else:
+        browser, stagehand, page, network_context, network_page, guard = opened
+        session_factory = None
+    checkout_timing, console_subscription = await install_session(
+        network_context, network_page, page, guard, downloads, capture, verify_frame,
+    )
+    session_open = True
+    expiries = []
     policy = None
     fresh_actions = []
     fresh_document = None
@@ -252,6 +267,36 @@ async def run(stack):
             boundary = {"op": command.get("op"), "call": "dispatch"}
             try:
                 op = command["op"]
+                if op == "end_session":
+                    if not pooled or not session_open:
+                        raise RuntimeError("No owned pooled context can be closed.")
+                    for expiry in expiries:
+                        expiry.cancel()
+                    await asyncio.gather(*expiries, return_exceptions=True)
+                    expiries = []
+                    await console_subscription.unsubscribe()
+                    console_subscription = None
+                    await session_stack.aclose()
+                    session_open = False
+                    print(json.dumps({"ok": True, "data": {"fresh_context_closed": True}}), flush=True)
+                    continue
+                if op == "begin_session":
+                    if not pooled:
+                        raise RuntimeError("Browser reuse was not explicitly enabled by the controller.")
+                    if not session_open:
+                        downloads = Path(tempfile.mkdtemp(prefix="stagehand-download-", dir=os.environ.get("TRYFOLK_EVIDENCE_ROOT")))
+                        session_stack = AsyncExitStack()
+                        page, network_context, network_page, guard = await session_factory(session_stack, downloads)
+                        checkout_timing, console_subscription = await install_session(
+                            network_context, network_page, page, guard, downloads, capture, verify_frame,
+                        )
+                        session_open = True
+                    completed_fields, completed_cards, clicked = set(), {}, set()
+                    fresh_actions, fresh_document = [], None
+                    billing_initialized_binding, financial_started, pay_actions = None, False, 0
+                    blocked_domains.clear()
+                    console_events.clear()
+                    op = "goto"
                 if op == "goto":
                     parsed = urlsplit(command["url"])
                     policy = NetworkPolicy(
@@ -388,6 +433,7 @@ async def run(stack):
 
                         expiry = asyncio.create_task(expire_card())
                         stack.callback(expiry.cancel)
+                        expiries.append(expiry)
                     existing_files = set(downloads.iterdir())
                     sdk_action = {k: v for k, v in action.items() if k != "_tryfolk"}
                     boundary["call"] = "stagehand.act"
@@ -539,6 +585,7 @@ async def run(stack):
                         "observation_evidence": getattr(error, "observation_evidence", None),
                         "settlement_diagnostics": getattr(error, "settlement_diagnostics", None),
                         "checkout_request_timing": checkout_timing.snapshot(),
+                        "resource_guard": guard.events,
                     },
                 )
                 print(
@@ -550,7 +597,14 @@ async def run(stack):
                     flush=True,
                 )
     finally:
-        await console_subscription.unsubscribe()
+        for expiry in expiries:
+            expiry.cancel()
+        await asyncio.gather(*expiries, return_exceptions=True)
+        try:
+            if console_subscription:
+                await console_subscription.unsubscribe()
+        finally:
+            await session_stack.aclose()
 
 
 if __name__ == "__main__":
