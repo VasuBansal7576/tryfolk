@@ -189,6 +189,98 @@ async def wait_for_billing_calculation(
     raise NativeObservationGate("billing_calculation_deadline")
 
 
+async def settle_owned_native_parent(
+    network_page, guard, *, original_document, completed_cards, deadline, on_event,
+):
+    """Establish the acknowledged, independently owned SPA transition once.
+
+    No native control is exposed before this binding. After it is established,
+    the existing observation/action guards forbid URL or generation drift.
+    """
+    if completed_cards or guard.card_attempt is not None:
+        raise NativeObservationGate("native_changed_after_executed_card")
+    navigation = guard.checkout_navigation
+    generation = original_document.get("generation")
+    if (
+        navigation is None or navigation.source_generation != generation
+        or navigation.continue_generation != generation
+        or type(generation) not in (int, float) or not 0 < generation < float("inf")
+    ):
+        raise NativeObservationGate("native_parent_source_or_generation")
+    try:
+        async with asyncio.timeout_at(deadline):
+            while asyncio.get_running_loop().time() < deadline:
+                document = await guard.parent_document()
+                guard.policy.check_url(document["url"])
+                already_generated = await guard.read_parent(
+                    "/Payment with the given checkout session has already been generated/i.test(document.body?.innerText||'')"
+                )
+                if already_generated is True:
+                    raise NativeObservationGate("hosted_checkout_session_already_generated")
+                if exact_origin(document["url"]) != DODO_CHECKOUT or document.get("generation") != generation:
+                    raise NativeObservationGate("native_parent_document_changed")
+                transition = navigation.transition or {}
+                source_current = bool(transition) and (
+                    transition.get("generation") == generation == navigation.source_generation
+                    == navigation.continue_generation == (navigation.submission or {}).get("generation")
+                )
+                normalized = all(navigation.normalization_checks(document).values())
+                if document["url"] not in (
+                    navigation.entry_url, transition.get("parent_url"), transition.get("payment_link"),
+                ) and not normalized:
+                    raise NativeObservationGate("native_parent_unapproved_alias")
+                children = [frame for frame in network_page.frames
+                            if frame.parent_frame == network_page.main_frame
+                            and guard.frame_context(frame.url, frame.parent_frame.url)]
+                if len(children) > 1:
+                    raise NativeObservationGate("single_current_native_child")
+                checks = {
+                    "acknowledged_owned_source_transition": source_current,
+                    "final_source_normalization_or_exact_payment_link": normalized
+                        or bool(transition.get("payment_link")) and document["url"] == transition["payment_link"],
+                    "current_parent_ready": document.get("ready_state") in ("interactive", "complete")
+                        and document.get("body_present") is True and document.get("busy") is False,
+                    "single_current_native_child": len(children) == 1,
+                    "independent_Test_payment_checkout_customer": False,
+                    "independent_owned_order": False,
+                    "exact_independent_parent": False,
+                }
+                if len(children) == 1 and source_current:
+                    frame = children[0]
+                    context = guard.frame_context(frame.url, frame.parent_frame.url) or {}
+                    identity = await guard.frame_verify(context) if context.get("approved") is True else {}
+                    checks["independent_Test_payment_checkout_customer"] = (
+                        identity.get("approved") is True and identity.get("provider_environment") == "test_mode"
+                        and identity.get("payment_correlated") is True and identity.get("customer_correlated") is True
+                        and bool(context.get("payment_id")) and context["payment_id"] == identity.get("payment_id")
+                        and context.get("checkout_session_id") == identity.get("checkout_session_id") == navigation.checkout_id
+                    )
+                    owned = guard.owned_checkout_checks(identity)
+                    checks["independent_owned_order"] = bool(owned) and all(owned.values())
+                    # Re-read the exact owned map after independent identity I/O;
+                    # no pre-navigation/private map is returned to the caller.
+                    after = await guard.parent_document()
+                    checks["current_parent_ready"] = checks["current_parent_ready"] and (
+                        after.get("ready_state") in ("interactive", "complete")
+                        and after.get("body_present") is True and after.get("busy") is False
+                    )
+                    checks["exact_independent_parent"] = (
+                        identity.get("payment_link") == transition.get("payment_link")
+                        and document.get("url") == after.get("url")
+                        and document.get("generation") == after.get("generation")
+                        and document.get("control_signature") == after.get("control_signature")
+                        and all(navigation.parent_checks(identity.get("payment_link"), after).values())
+                    )
+                on_event({"decision": "owned_native_parent_settlement", "checks": checks})
+                if all(checks.values()):
+                    return {"document": {key: value for key, value in document.items() if not key.startswith("_")},
+                            "checks": checks}
+                await asyncio.sleep(min(.1, max(0, deadline - asyncio.get_running_loop().time())))
+    except TimeoutError:
+        raise NativeObservationGate("original_deadline_exhausted") from None
+    raise NativeObservationGate("original_deadline_exhausted")
+
+
 async def read_production_native_controls(
     page, network_page, guard, read_controls, *, original_document,
     completed_cards, deadline, on_event,
@@ -450,6 +542,7 @@ async def run(stack):
     completed_fields, completed_cards = set(), {}
     billing_initialized_binding = None
     last_billing_completion = None
+    native_parent_binding = None
     financial_started = False
     clicked = set()
     pay_actions = 0
@@ -486,6 +579,7 @@ async def run(stack):
                     fresh_actions, fresh_document = [], None
                     billing_initialized_binding, financial_started, pay_actions = None, False, 0
                     last_billing_completion = None
+                    native_parent_binding = None
                     blocked_domains.clear()
                     console_events.clear()
                     op = "goto"
@@ -526,6 +620,27 @@ async def run(stack):
                             lambda: page.evaluate(DOCUMENT_STATE), policy, deadline=observation_deadline,
                         )
                         billing_initialized_binding = initialized["url"], initialized.get("generation")
+
+                    if (
+                        op == "observe_native" and policy.provider == "dodo"
+                        and "billing_continue" in clicked and pay_actions == 0 and not financial_started
+                        and exact_origin(current_document["url"]) == DODO_CHECKOUT
+                    ):
+                        if native_parent_binding is None:
+                            def parent_event(event):
+                                events = boundary.setdefault("native_parent_events", [])
+                                events.append(event)
+                                del events[:-32]
+
+                            settled_parent = await settle_owned_native_parent(
+                                network_page, guard, original_document=current_document,
+                                completed_cards=completed_cards, deadline=observation_deadline, on_event=parent_event,
+                            )
+                            current_document = settled_parent["document"]
+                            native_parent_binding = current_document["url"], current_document["generation"]
+                            boundary["native_parent_settlement"] = settled_parent["checks"]
+                        elif native_parent_binding != (current_document["url"], current_document["generation"]):
+                            raise NativeObservationGate("native_parent_document_changed")
 
                     async def infer():
                         if op == "observe_native":
@@ -616,6 +731,8 @@ async def run(stack):
                             data["billing_readiness"] = boundary["billing_readiness"]
                         if "native_read_events" in boundary:
                             data["native_read_events"] = boundary["native_read_events"]
+                        if "native_parent_settlement" in boundary:
+                            data["native_parent_settlement"] = boundary["native_parent_settlement"]
                         for field in data["field_evidence"]:
                             if field["approved_value_present"]:
                                 completed_fields.add(field["field"])
