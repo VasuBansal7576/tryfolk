@@ -114,6 +114,54 @@ class OwnedSource:
             raise ValueError("Source snapshot requires the exact authorized Git root.")
         self.target = self.worktree / "dodo-target"
 
+    def baseline_provenance(self, manifest, contract):
+        """Bind the actual exporter to the immutable measured target source.
+
+        A backend-only repository commit may differ from the measured build.
+        Accept that difference only when the entire tracked target Git tree and
+        actual runnable fingerprint match. Never rewrite either commit identity.
+        """
+        head = git(self.worktree, "--no-replace-objects", "rev-parse", "HEAD")
+        measured = manifest.get("source_commit", "")
+        expected = manifest.get("source_sha256", "")
+        if not re.fullmatch(r"[a-f0-9]{40}", measured) or not re.fullmatch(r"[a-f0-9]{64}", expected):
+            raise ValueError("Measured target commit and source digest are required.")
+        if (
+            contract.get("source_commit") != head
+            or contract.get("source_clean") is not True
+            or git(self.worktree, "status", "--porcelain", "--untracked-files=all", "--", "dodo-target")
+            or self.target.is_symlink()
+            or not self.target.is_dir()
+        ):
+            raise ValueError("Actual clean owned exporter HEAD is required.")
+        measured_tree = git(self.worktree, "--no-replace-objects", "rev-parse", measured + ":dodo-target")
+        exporter_tree = git(self.worktree, "--no-replace-objects", "rev-parse", head + ":dodo-target")
+        if git(self.worktree, "--no-replace-objects", "cat-file", "-t", measured_tree) != "tree" or git(self.worktree, "--no-replace-objects", "cat-file", "-t", exporter_tree) != "tree":
+            raise ValueError("Both measured and exporter targets must be tracked Git trees.")
+        actual = source_fingerprint(self.target)
+        if measured_tree != exporter_tree or actual != expected or contract.get("source_sha256") != expected:
+            raise ValueError("Full tracked target tree and runnable digest must match the measured build.")
+        import hashlib
+
+        seam = subprocess.run(
+            ["git", "--no-replace-objects", "-C", str(self.worktree), "show", measured + ":dodo-target/" + SOURCE_FILE],
+            check=True, capture_output=True, env=clean_env(), timeout=10,
+        ).stdout
+        seam_digest = hashlib.sha256(seam).hexdigest()
+        if contract.get("seam_sha256") != seam_digest:
+            raise ValueError("Protected baseline fulfillment seam differs from the measured tree.")
+        return {
+            "schema": "tryfolk.dodo-baseline-provenance.v1",
+            "exporter_commit": head,
+            "original_contract_source_commit": contract["source_commit"],
+            "measured_build_commit": measured,
+            "tracked_target_tree": measured_tree,
+            "measured_source_sha256": expected,
+            "exported_source_sha256": actual,
+            "fulfillment_seam_sha256": seam_digest,
+            "exporter_differs_from_build": head != measured,
+        }
+
     def snapshot(self, workspace, *, expected_digest, contract=None):
         workspace = Path(workspace)
         if workspace.exists():

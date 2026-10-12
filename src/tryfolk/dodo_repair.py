@@ -111,15 +111,13 @@ async def repair(runtime, run, emit, *, reconcile_only=False):
                 timeout=20,
             )
         )
-        if (
-            original["source_commit"] != manifest["source_commit"]
-            or original["source_sha256"] != manifest["source_sha256"]
-        ):
-            raise ValueError("Exported source contract differs from the running measured baseline.")
+        provenance = owned.baseline_provenance(manifest, original)
         pin = owned.snapshot(workspace, expected_digest=manifest["source_sha256"], contract=original)
         pin.update(run_id=run["id"], repair_id=saved["id"], mode=manifest["mode"], original_manifest=manifest)
+        pin["baseline_provenance"] = provenance
         write_pin(workspace, pin)
         metadata(contract_file, original)
+        metadata(folder / "baseline-provenance.json", provenance)
         # Local metadata is excluded through Git's private info/exclude, without
         # modifying any protected export file or copying provider credentials.
         await checked(
