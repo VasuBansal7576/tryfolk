@@ -24,6 +24,11 @@ class RunRequest(BaseModel):
     quote_id: str
 
 
+class BaselineRetryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    quote_id: str
+
+
 class OwnerLogin(BaseModel):
     secret: str
 
@@ -196,6 +201,19 @@ def create_app(settings=None, *, checkpoint_transport=None):
     @app.post("/runs", status_code=201)
     def create_run(body: RunRequest, idempotency_key: str = Header(min_length=1, max_length=200)):
         return service.create_run(body.quote_id, idempotency_key)
+
+    @app.post("/runs/{run_id}/baseline-retry/quote")
+    def baseline_retry_quote(run_id: str, body: CheckpointAccessRequest, request: Request):
+        return service.baseline_retry_quote(run_id, credential(request))
+
+    @app.post("/runs/{run_id}/baseline-retry", status_code=201)
+    def baseline_retry(
+        run_id: str,
+        body: BaselineRetryRequest,
+        request: Request,
+        idempotency_key: str = Header(min_length=1, max_length=200),
+    ):
+        return service.baseline_retry(run_id, body.quote_id, idempotency_key, credential(request))
 
     @app.get("/runs/{run_id}")
     def get_run(run_id: str, request: Request, response: Response):

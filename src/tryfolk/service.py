@@ -150,63 +150,75 @@ class Service:
             costs = allowance(self.settings, count)
         except (ValueError, KeyError, TypeError, OSError) as error:
             raise DomainError(422, "cfo_export_invalid", str(error)) from error
-        before, after, overhead = costs["before"], costs["after"], costs["overhead"]
         with self.store.transaction() as db:
-            lifetime_available = self.available(db, costs)
-            available = min(lifetime_available, costs["quote_limit"])
-            q = {
-                "id": identifier(),
-                **({"scenario_plan": scenario_plan} if scenario_plan else {}),
-                "app_url": url,
-                "persona_count": count,
-                "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
-                "affordable": costs["reserved"] <= available,
-                "ready": not gates,
-                "before_microusd": before,
-                "after_microusd": after,
-                "overhead_microusd": overhead,
-                "subtotal_microusd": costs["subtotal"],
-                "contingency_microusd": costs["contingency"],
-                "contingency_basis_points": costs["contingency_basis_points"],
-                "after_contingency_microusd": costs["after_contingency"],
-                "after_reserve_microusd": costs["after_reserve"],
-                "after_reserve_includes_known_replay": costs["after_reserve_includes_known_replay"],
-                "reserved_microusd": costs["reserved"],
-                "quote_limit_microusd": costs["quote_limit"],
-                "lifetime_limit_microusd": costs["limit"],
-                "lifetime_available_microusd": lifetime_available,
-                "ledger": self.ledger(db),
-                "forecast_comparison": costs["forecast_comparison"],
-                "execution_allowances": costs["caps"],
-                "available_microusd": available,
-                "currency": "USD",
-                "cost_basis": "estimate",
-                "cfo_plan_status": "imported"
-                if self.settings.cfo_plan_path and self.settings.cfo_plan_path.exists()
-                else "missing",
-                "gates": gates,
-                "revision": target.revision,
-                "fault": target.fault,
-                "provider": target.provider,
-                "target_provenance": target.target_provenance,
-                "estimate_basis": costs["basis"],
-                "cfo_plan": costs["plan"],
-                "scheduler_event_limit_microusd": costs["limit"],
-                "provenance": {
-                    "provider_mode": "local_fixture" if target.provider == "local-fixture" else "dodo_test",
-                    "payment_truth": "local_fixture"
-                    if target.provider == "local-fixture"
-                    else "dodo_sandbox",
-                    "cost_basis": "non_cfo_estimate" if not costs["plan"] else "cfo_forecast",
-                    "cfo_plan_status": costs["status"],
-                    "cfo_plan_url": costs["plan"]["source_url"] if costs["plan"] else None,
-                    "model": "gpt-6.1-sol",
-                    "model_billing": "existing_codex_allowance",
-                    "cash_charged_microusd": 0,
-                },
-            }
+            q = self.quote_payload(db, url, count, target, scenario_plan, gates, costs)
             db.execute("INSERT INTO quotes(id,payload) VALUES (?,?)", (q["id"], json.dumps(q)))
         return q
+
+    def quote_payload(self, db, url, count, target, scenario_plan, gates, costs):
+        before, after, overhead = costs["before"], costs["after"], costs["overhead"]
+        lifetime_available = self.available(db, costs)
+        available = min(lifetime_available, costs["quote_limit"])
+        q = {
+            "id": identifier(),
+            **({"scenario_plan": scenario_plan} if scenario_plan else {}),
+            "app_url": url,
+            "persona_count": count,
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+            "affordable": costs["reserved"] <= available,
+            "ready": not gates,
+            "before_microusd": before,
+            "after_microusd": after,
+            "overhead_microusd": overhead,
+            "subtotal_microusd": costs["subtotal"],
+            "contingency_microusd": costs["contingency"],
+            "contingency_basis_points": costs["contingency_basis_points"],
+            "after_contingency_microusd": costs["after_contingency"],
+            "after_reserve_microusd": costs["after_reserve"],
+            "after_reserve_includes_known_replay": costs["after_reserve_includes_known_replay"],
+            "reserved_microusd": costs["reserved"],
+            "quote_limit_microusd": costs["quote_limit"],
+            "lifetime_limit_microusd": costs["limit"],
+            "lifetime_available_microusd": lifetime_available,
+            "ledger": self.ledger(db),
+            "forecast_comparison": costs["forecast_comparison"],
+            "execution_allowances": costs["caps"],
+            "available_microusd": available,
+            "currency": "USD",
+            "cost_basis": "estimate",
+            "cfo_plan_status": "imported"
+            if self.settings.cfo_plan_path and self.settings.cfo_plan_path.exists()
+            else "missing",
+            "gates": gates,
+            "revision": target.revision,
+            "fault": target.fault,
+            "provider": target.provider,
+            "target_provenance": target.target_provenance,
+            "estimate_basis": costs["basis"],
+            "cfo_plan": costs["plan"],
+            "scheduler_event_limit_microusd": costs["limit"],
+            "provenance": {
+                "provider_mode": "local_fixture" if target.provider == "local-fixture" else "dodo_test",
+                "payment_truth": "local_fixture" if target.provider == "local-fixture" else "dodo_sandbox",
+                "cost_basis": "non_cfo_estimate" if not costs["plan"] else "cfo_forecast",
+                "cfo_plan_status": costs["status"],
+                "cfo_plan_url": costs["plan"]["source_url"] if costs["plan"] else None,
+                "model": "gpt-6.1-sol",
+                "model_billing": "existing_codex_allowance",
+                "cash_charged_microusd": 0,
+            },
+        }
+        return q
+
+    def baseline_retry_quote(self, run_id, token):
+        from .baseline_retry import quote_retry
+
+        return quote_retry(self, run_id, token)
+
+    def baseline_retry(self, run_id, quote_id, key, token):
+        from .baseline_retry import accept_retry
+
+        return accept_retry(self, run_id, quote_id, key, token)
 
     def create_run(self, quote_id, key):
         with self.store.transaction() as db:
@@ -223,6 +235,10 @@ class Service:
             q = self.store.load(db, "quotes", quote_id)
             if not q:
                 raise DomainError(404, "quote_missing", "Quote not found.")
+            if q.get("kind") == "baseline_retry":
+                raise DomainError(
+                    409, "owner_required", "Use the owner baseline retry endpoint for this quote."
+                )
             if datetime.fromisoformat(q["expires_at"]) < datetime.now(timezone.utc):
                 raise DomainError(409, "quote_expired", "Request a fresh quote.")
             if db.execute("SELECT consumed FROM quotes WHERE id=?", (quote_id,)).fetchone()[0]:
@@ -592,7 +608,12 @@ class Service:
 
     def finalize_checkpoint_access(self, run_id, repair_id, token):
         from .checkpoint_access import (
-            CheckpointAccessError, load_capture_binding, verify_public_access, private_write, encoded, digest
+            CheckpointAccessError,
+            load_capture_binding,
+            verify_public_access,
+            private_write,
+            encoded,
+            digest,
         )
 
         def registered(db):
@@ -600,9 +621,13 @@ class Service:
             run = self.store.load(db, "runs", run_id)
             repair = self.store.load(db, "repairs", repair_id)
             if (
-                not repair or repair["run_id"] != run_id or (run.get("repair") or {}).get("id") != repair_id
-                or run["phase"] != "completed" or repair["status"] != "completed"
-                or run["provider"] != "dodo" or repair.get("provider") != "dodo"
+                not repair
+                or repair["run_id"] != run_id
+                or (run.get("repair") or {}).get("id") != repair_id
+                or run["phase"] != "completed"
+                or repair["status"] != "completed"
+                or run["provider"] != "dodo"
+                or repair.get("provider") != "dodo"
             ):
                 raise DomainError(
                     409, "checkpoint_not_registered", "A completed genuine captured Dodo repair is required."
@@ -614,34 +639,45 @@ class Service:
         try:
             binding, binding_digest, repository = load_capture_binding(self.settings, run, repair)
             existing = repair.get("checkpoint_access")
-            if existing and existing["binding_sha256"] == binding_digest and existing["repository"] == repository:
+            if (
+                existing
+                and existing["binding_sha256"] == binding_digest
+                and existing["repository"] == repository
+            ):
                 return repair
-            access = verify_public_access(binding, binding_digest, repository, transport=self.checkpoint_transport)
+            access = verify_public_access(
+                binding, binding_digest, repository, transport=self.checkpoint_transport
+            )
         except CheckpointAccessError as error:
             raise DomainError(
-                409, str(error), "Public checkpoint access is unverified; inspect the bound capture and approved repository."
+                409,
+                str(error),
+                "Public checkpoint access is unverified; inspect the bound capture and approved repository.",
             ) from None
         access["verified_at"] = now()
         receipt = encoded(access)
         access["receipt_sha256"] = digest(receipt)
         with self.store.transaction() as db:
             current_run, current_repair = registered(db)
-            if any(current_repair.get(key) != repair.get(key) for key in (
-                "head_revision", "checkpoint_id", "source_digest"
-            )):
+            if any(
+                current_repair.get(key) != repair.get(key)
+                for key in ("head_revision", "checkpoint_id", "source_digest")
+            ):
                 raise DomainError(
                     409, "checkpoint_capture_changed", "Registered source changed during access verification."
                 )
             if current_repair.get("checkpoint_access") == existing:
                 try:
                     private_write(
-                        self.settings.checkpoint_evidence_root / (
-                            repair_id + "-checkpoint-public-access-" + access["receipt_sha256"] + ".json"
-                        ), receipt
+                        self.settings.checkpoint_evidence_root
+                        / (repair_id + "-checkpoint-public-access-" + access["receipt_sha256"] + ".json"),
+                        receipt,
                     )
                 except (CheckpointAccessError, OSError):
                     raise DomainError(
-                        409, "checkpoint_evidence_unavailable", "Private access evidence could not be retained."
+                        409,
+                        "checkpoint_evidence_unavailable",
+                        "Private access evidence could not be retained.",
                     ) from None
                 current_repair.update(checkpoint_url=access["url"], checkpoint_access=access)
                 self.store.save(db, "repairs", current_repair)

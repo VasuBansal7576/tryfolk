@@ -100,6 +100,8 @@ class SDKProcess:
             if not result["ok"]:
                 error = RuntimeError(f"{self.name}: {result['error']}")
                 error.evidence_path = result.get("error_evidence_path")
+                if self.name == "stagehand":
+                    error.pre_submission_evidence = result.get("pre_submission_evidence")
                 raise error
             return result["data"]
         await self.close()

@@ -44,6 +44,7 @@ class Settings:
             },
         )
     )
+    baseline_retry_approval_path: Path | None = None
     checkpoint_repository: str | None = None
     checkpoint_evidence_root: Path = field(
         default_factory=lambda: Path(os.environ.get("TRYFOLK_EVIDENCE_ROOT", "runtime/evidence"))
@@ -83,6 +84,9 @@ class Settings:
             db_path=Path(os.environ.get("TRYFOLK_DB", "runtime/tryfolk.sqlite")),
             budget_microusd=int(os.environ.get("TRYFOLK_BUDGET_MICROUSD", "1000000")),
             owner_token=os.environ.get("TRYFOLK_OWNER_TOKEN"),
+            baseline_retry_approval_path=Path(os.environ["TRYFOLK_BASELINE_RETRY_APPROVAL"])
+            if os.environ.get("TRYFOLK_BASELINE_RETRY_APPROVAL")
+            else None,
             checkpoint_repository=os.environ.get("TRYFOLK_CHECKPOINT_REPOSITORY"),
             targets=targets,
             scenario_catalog_path=Path(os.environ["TRYFOLK_SCENARIO_CATALOG"])

@@ -105,13 +105,51 @@ class Worker:
                     else:
                         run.update(phase="blocked", updated_at=now())
                         run["gates"].append(gate)
+                        from .pre_submission import seal_failure
+
+                        receipt = seal_failure(self.service, db, run, error)
+                        if receipt:
+                            run["baseline_retry_safety"] = receipt
                     self.store.save(db, "runs", run)
                     db.execute("UPDATE jobs SET status='blocked',updated_at=? WHERE id=?", (now(), job["id"]))
         return True
 
     async def execute(self, run, emit):
         run_id = run["id"]
-        if run["pass"] == "before":
+        if run["pass"] == "before" and run.get("retry_of_run_id"):
+            from .scenarios import digest, validate_population
+
+            with self.store.transaction() as db:
+                population = self.store.load(db, "populations", run["population_id"])
+                original = self.store.load(db, "runs", run["retry_of_run_id"])
+            lineage = run.get("baseline_retry", {})
+            if (
+                not original
+                or original.get("baseline_retry") != lineage
+                or lineage.get("retry_run_id") != run_id
+                or original["population_id"] != run["population_id"]
+                or len(population or []) != run["persona_count"]
+                or digest(population) != lineage.get("population_sha256")
+                or run.get("scenario_plan") != original.get("scenario_plan")
+            ):
+                raise RuntimeError(
+                    "Retry requires the exact immutable original population and attempt lineage."
+                )
+            validate_population(population, run.get("scenario_plan"))
+            # A fresh journey restores each saved initial snapshot. No discovery,
+            # generation, population overwrite or known-replay debit occurs here.
+            await emit(
+                "baseline_population_reused",
+                {
+                    "original_run_id": original["id"],
+                    "population_id": run["population_id"],
+                    "population_sha256": lineage["population_sha256"],
+                    "requested": run["persona_count"],
+                    "initial_state": "saved_initial_snapshot",
+                    "generation_performed": False,
+                },
+            )
+        elif run["pass"] == "before":
             self.phase(run_id, "discovering")
             self.debit(run_id, self.estimate(run, "discovery_microusd", 10_000))
             brief = await self.io.discover(run)

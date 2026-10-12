@@ -32,6 +32,7 @@ from tryfolk.payment_privacy import redact_payment
 from tryfolk.native_read_observation import NativeControlReads
 from tryfolk.checkout_discovery import discover_checkout_candidates
 from tryfolk.manual_address import ManualAddressGate, read_current_manual_controls, resolve_manual_address, wait_for_billing_initialization
+from tryfolk.pre_submission import adapter_safety
 
 
 def private_evidence(label, data):
@@ -241,6 +242,7 @@ async def run(stack):
     fresh_document = None
     completed_fields, completed_cards = set(), {}
     billing_initialized_binding = None
+    financial_started = False
     try:
         while command := await commands.get():
             boundary = {"op": command.get("op"), "call": "dispatch"}
@@ -312,6 +314,8 @@ async def run(stack):
                     current_url = await page.url()
                     policy.check_url(current_url)
                     action = command["action"]
+                    if action.get("_tryfolk", {}).get("kind") in ("pay", "confirm"):
+                        financial_started = True
                     boundary.update(call="control_state.pre_act", selector=action["selector"])
                     control = await control_state(page, action["selector"], network_page, guard)
                     if policy.provider == "dodo":
@@ -478,6 +482,8 @@ async def run(stack):
                     raise RuntimeError("Unsupported bounded browser operation.")
                 print(json.dumps(redact_frame_config({"ok": True, "data": data})), flush=True)
             except Exception as error:
+                safety = adapter_safety(error, boundary, policy, fresh_document,
+                    financial_started=financial_started, card_attempt=guard.card_attempt)
                 fresh_actions = []
                 fresh_document = None
                 error_path = private_evidence(
@@ -485,6 +491,7 @@ async def run(stack):
                     {
                         "boundary": boundary,
                         "error_type": type(error).__name__,
+                        "pre_submission_evidence": safety,
                         "message": str(error),
                         "code": getattr(error, "code", None),
                         "data": getattr(error, "data", None),
@@ -497,7 +504,7 @@ async def run(stack):
                 print(
                     json.dumps(
                         redact_frame_config(
-                            {"ok": False, "error": str(error)[:500], "error_evidence_path": error_path}
+                            {"ok": False, "error": str(error)[:500], "error_evidence_path": error_path, "pre_submission_evidence": safety}
                         )
                     ),
                     flush=True,

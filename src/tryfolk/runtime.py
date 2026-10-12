@@ -134,6 +134,7 @@ class Runtime:
             from .dodo import DodoTarget
 
             fixture = await DodoTarget(run["preview_url"]).provision(run, persona)
+            fixture["_retry_target_manifest"] = manifest
             if persona.get("assigned_scenario"):
                 fixture["_scenario_source_manifest"] = {
                     key: manifest[key]
@@ -357,6 +358,13 @@ class Runtime:
                 "actions": actions_executed,
                 "step_limit": True,
             }
+        except Exception as error:
+            from .pre_submission import runtime_gate
+
+            gate = runtime_gate(error, run, persona, fixture, self.evidence)
+            if gate:
+                raise gate from error
+            raise
         finally:
             try:
                 if mind_initialized and not cancelled() and mind.process and mind.process.returncode is None:
