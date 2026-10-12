@@ -8,10 +8,11 @@ import hashlib
 import tempfile
 import traceback
 import re
+import time
 from uuid import uuid4
 from pathlib import Path
 from contextlib import AsyncExitStack
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, quote
 from stagehand import (
     LLMStructuredGenerateParams,
     LLMStructuredGenerateResult,
@@ -102,6 +103,88 @@ async def read_manual_current(
     discovery = await read_controls(before)
     after = await page.evaluate(DOCUMENT_STATE)
     return discovery, after | {"document_stable": same_document(before, after)}
+
+
+async def wait_for_billing_calculation(
+    page, guard, timing, *, original_document, last_billing_completion, deadline, on_event,
+):
+    """Drain the reviewed 500ms postal debounce before exposing fresh Continue.
+
+    Passive existing-request metadata only. Source SHA594824... in
+    CheckoutNavigation binds this debounce to this exact current entry document.
+    Foreign/stale/failed calculations cannot authorize a checkout transition.
+    """
+    loop = asyncio.get_running_loop()
+    bound = min(deadline, loop.time() + 10)
+    navigation = guard.checkout_navigation
+    binding = original_document.get("url"), original_document.get("generation")
+    if (
+        not navigation or not last_billing_completion
+        or exact_origin(binding[0]) != DODO_CHECKOUT
+        or binding[0] != navigation.entry_url
+        or navigation.source_generation != binding[1]
+        or tuple(last_billing_completion[2:]) != binding
+    ):
+        raise NativeObservationGate("billing_calculation_source_or_generation")
+    if navigation.continue_generation is not None:
+        raise NativeObservationGate("billing_confirm_already_started")
+    calculation_path = "/api/checkout/sessions/" + quote(navigation.checkout_id, safe="") + "/calculate"
+    confirm_path = calculation_path.removesuffix("/calculate") + "/confirm"
+    initiator = DODO_CHECKOUT + urlsplit(navigation.entry_url).path
+    previous, quiet_since = None, loop.time()
+    try:
+        async with asyncio.timeout_at(bound):
+            while loop.time() < bound:
+                document = await page.evaluate(DOCUMENT_STATE)
+                guard.policy.check_url(document["url"])
+                if (
+                    (document.get("url"), document.get("generation")) != binding
+                    or navigation.source_generation != document.get("generation")
+                    or navigation.continue_generation is not None
+                ):
+                    raise NativeObservationGate("billing_calculation_document_changed")
+                entries = [entry for entry in timing.snapshot()
+                           if entry.get("origin") == DODO_CHECKOUT and entry.get("initiator") == initiator
+                           and entry.get("method") == "POST"]
+                if any(entry.get("path") == confirm_path for entry in entries):
+                    raise NativeObservationGate("billing_confirm_already_started")
+                calculations = [entry for entry in entries if entry.get("path") == calculation_path]
+                if any(entry.get("completion") not in ("pending", "finished")
+                       or entry.get("completion") == "finished" and (
+                           type(entry.get("status")) is not int or entry["status"] != 200
+                       ) for entry in calculations):
+                    raise NativeObservationGate("billing_calculation_not_successful")
+                signature = tuple((entry.get("id"), entry.get("status"), entry.get("completion"))
+                                  for entry in calculations)
+                if signature != previous:
+                    previous, quiet_since = signature, loop.time()
+                pending = any(entry.get("completion") == "pending" for entry in calculations)
+                # The last validated fill timestamp is after the actual SDK input;
+                # 600ms covers the source's 500ms debounce plus a task-turn margin.
+                debounce_elapsed = loop.time() - last_billing_completion[0] >= .6
+                current_calculated = any(
+                    type(entry.get("started_at")) in (int, float)
+                    and entry["started_at"] >= last_billing_completion[1]
+                    and entry.get("completion") == "finished" and entry.get("status") == 200
+                    for entry in calculations
+                )
+                checks = {
+                    "current_source_and_generation_bound": True,
+                    "source_debounce_elapsed": debounce_elapsed,
+                    "current_checkout_calculation_complete": current_calculated,
+                    "all_current_calculations_drained": not pending,
+                    "bounded_quiet_tail": loop.time() - quiet_since >= .1,
+                    "current_document_ready": document.get("ready_state") in ("interactive", "complete")
+                        and document.get("body_present") is True and document.get("busy") is False,
+                }
+                on_event({"decision": "billing_calculation_readiness", "pending_calculation": pending,
+                          "checks": checks})
+                if all(checks.values()):
+                    return checks
+                await asyncio.sleep(min(.05, max(0, bound - loop.time())))
+    except TimeoutError:
+        raise NativeObservationGate("billing_calculation_deadline") from None
+    raise NativeObservationGate("billing_calculation_deadline")
 
 
 async def read_production_native_controls(
@@ -364,6 +447,7 @@ async def run(stack):
     fresh_document = None
     completed_fields, completed_cards = set(), {}
     billing_initialized_binding = None
+    last_billing_completion = None
     financial_started = False
     clicked = set()
     pay_actions = 0
@@ -399,6 +483,7 @@ async def run(stack):
                     completed_fields, completed_cards, clicked = set(), {}, set()
                     fresh_actions, fresh_document = [], None
                     billing_initialized_binding, financial_started, pay_actions = None, False, 0
+                    last_billing_completion = None
                     blocked_domains.clear()
                     console_events.clear()
                     op = "goto"
@@ -445,6 +530,23 @@ async def run(stack):
                             # Stagehand snapshots and read-only current DOM identify controls.
                             # There is no inference, selector caching or action in this pass.
                             boundary["call"] = "stagehand.snapshot.native_candidates"
+                            navigation = guard.checkout_navigation
+                            if (
+                                policy.provider == "dodo" and navigation is not None
+                                and current_document["url"] == navigation.entry_url
+                                and "billing_continue" not in clicked and not financial_started
+                                and {"country", "address", "city", "state", "postal"} <= completed_fields
+                            ):
+                                def billing_event(event):
+                                    events = boundary.setdefault("billing_read_events", [])
+                                    events.append(event)
+                                    del events[:-32]
+
+                                boundary["billing_readiness"] = await wait_for_billing_calculation(
+                                    page, guard, checkout_timing, original_document=current_document,
+                                    last_billing_completion=last_billing_completion,
+                                    deadline=observation_deadline, on_event=billing_event,
+                                )
                             async def read_candidates():
                                 snapshot = (await page.snapshot(include_iframes=True, timeout=10000)).model_dump(mode="json")
                                 discovery = await discover_checkout_candidates(
@@ -508,6 +610,10 @@ async def run(stack):
                     if op == "observe_native":
                         data["execution_policy"] = "conditional_persona_plan_native_stagehand_controls_v1"
                         data["model_inference"] = False
+                        if "billing_readiness" in boundary:
+                            data["billing_readiness"] = boundary["billing_readiness"]
+                        if "native_read_events" in boundary:
+                            data["native_read_events"] = boundary["native_read_events"]
                         for field in data["field_evidence"]:
                             if field["approved_value_present"]:
                                 completed_fields.add(field["field"])
@@ -659,6 +765,11 @@ async def run(stack):
                         )
                         data["field_completed"] = action["_tryfolk"]["field"]
                         completed_fields.add(action["_tryfolk"]["field"])
+                        if action["_tryfolk"]["field"] in ("country", "address_query", "address", "city", "state", "postal"):
+                            last_billing_completion = (
+                                asyncio.get_running_loop().time(), time.time(),
+                                fresh_document["url"], fresh_document["generation"],
+                            )
                         if action["_tryfolk"]["field"].startswith("card_"):
                             completed_cards[action["_tryfolk"]["field"]] = (
                                 action["_tryfolk"].get("frame_config_id"), action["_tryfolk"].get("frame_generation")
