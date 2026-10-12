@@ -19,9 +19,10 @@ import type { CatalogState } from './scenario-coverage';
 import { captureRefreshState, restoreRefreshState } from './refresh-state';
 import type { RefreshState } from './refresh-state';
 import { customerStatus, phaseCopy, renderRunProgress } from './run-progress';
+import { canVerifyCheckpoint, renderCheckpointAccess } from './checkpoint-access';
 
 type View = { kind: 'start' } | { kind: 'setup' } | { kind: 'quote'; quote: Quote } | { kind: 'run'; id: string };
-type Modal = { kind: 'people'; query: string; page: number } | { kind: 'person'; selection: PersonaSelection } | { kind: 'person-trace'; selection: PersonaSelection } | { kind: 'finding'; id: string } | { kind: 'trace' } | { kind: 'history' } | { kind: 'cancel' } | { kind: 'repair'; findingId: string } | { kind: 'replay' } | { kind: 'pending' } | { kind: 'screenshot'; eventId: number } | { kind: 'about' };
+type Modal = { kind: 'people'; query: string; page: number } | { kind: 'person'; selection: PersonaSelection } | { kind: 'person-trace'; selection: PersonaSelection } | { kind: 'finding'; id: string } | { kind: 'trace' } | { kind: 'history' } | { kind: 'cancel' } | { kind: 'repair'; findingId: string } | { kind: 'replay' } | { kind: 'checkpoint-access'; runId: string; repairId: string } | { kind: 'pending' } | { kind: 'screenshot'; eventId: number } | { kind: 'about' };
 const main = document.querySelector('#main');
 const context = document.querySelector('#context');
 const dialog = document.querySelector('#dialog');
@@ -183,7 +184,7 @@ function renderRepair(current: Run): string {
   if (!repair) return `<section class="repair-section"><h2>A repair starts with evidence.</h2>${current.phase === 'blocked' ? '<p>This run’s blocker needs review. A stopped browser action is not yet a recorded customer defect.</p>' : ''}<p>${repairable ? 'A recorded defect is ready for owner review. Local fixture observations remain separate from measured provider payments.' : 'A completed initial run with a measured or disclosed local fixture defect and an authorized source connection is needed before repair.'}</p><button class="secondary" data-action="repair-review" data-id="${escape(repairable?.id || '')}" ${!repairable ? 'disabled' : ''}>Review repair approval</button><p class="small muted">${owner ? 'Owner session connected.' : 'Guests can inspect evidence. An owner session is required to approve a repair or retest.'}</p><h3>Before same-customer retest</h3><p>${escape(currentReplayBlocker(current) || 'Review the exact registered repair and original reservation before approving a retest.')}</p><p class="small muted">The retest keeps all ${number(current.persona_count)} original customers and their starting conditions. It cannot use a smaller or newly generated crowd.</p></section>`;
   const replayReason = currentReplayBlocker(current);
   const replayable = !replayReason && !pendingRequest();
-  return `<section class="repair-section"><h2>The repair</h2><p>${escape(humanize(repair.status))}. ${repair.status === 'completed' ? 'A prepared repair is not proof of recovery. Retest its exact preview.' : 'The existing run evidence remains available.'}</p>${gates(repair.gates)}${owner && ['local-fixture', 'dodo'].includes(current.provider || '') && current.pass === 'before' && current.phase === 'completed' && repair.status === 'blocked' ? '<p class="small muted">Verify the saved repair checkpoint and source. Recovery preserves this population and reservation and starts no new code repair or checkout.</p><button class="secondary" data-action="recover-repair">Recover saved repair checkpoint</button>' : ''}<div class="evidence-row"><strong>Base revision</strong><span>${escape(repair.base_revision)}</span></div><div class="evidence-row"><strong>Repair head</strong><span>${escape(repair.head_revision || 'Not available yet')}</span></div><div class="evidence-row"><strong>Repair checkpoint</strong><span>${escape(repair.checkpoint_id || 'Not recorded')}</span></div><p class="small muted">${repair.checkpoint_id && !repair.checkpoint_url ? 'Saved local checkpoint · public link not available.' : !repair.checkpoint_id ? 'Checkpoint evidence has not been reported.' : 'Saved checkpoint linked below.'}</p><div class="evidence-links">${link(repair.preview_url, 'Registered repair preview')}${link(repair.checkpoint_url, 'Repair checkpoint')}</div><button class="primary" data-action="replay-review" ${!replayable ? 'disabled' : ''}>Review same-customer retest</button>${replayReason ? `<p class="small muted">${escape(replayReason)}</p>` : pendingRequest() ? '<p class="small muted">Recover the original saved request before approving a retest.</p>' : ''}<p class="same-population">All ${number(current.persona_count)} saved personas will return under equivalent starting conditions. A changed preview revision must be retested.</p></section>`;
+  return `<section class="repair-section"><h2>The repair</h2><p>${escape(humanize(repair.status))}. ${repair.status === 'completed' ? 'A prepared repair is not proof of recovery. Retest its exact preview.' : 'The existing run evidence remains available.'}</p>${gates(repair.gates)}${owner && ['local-fixture', 'dodo'].includes(current.provider || '') && current.pass === 'before' && current.phase === 'completed' && repair.status === 'blocked' ? '<p class="small muted">Verify the saved repair checkpoint and source. Recovery preserves this population and reservation and starts no new code repair or checkout.</p><button class="secondary" data-action="recover-repair">Recover saved repair checkpoint</button>' : ''}<div class="evidence-row"><strong>Base revision</strong><span>${escape(repair.base_revision)}</span></div><div class="evidence-row"><strong>Repair head</strong><span>${escape(repair.head_revision || 'Not available yet')}</span></div><div class="evidence-row"><strong>Repair checkpoint</strong><span>${escape(repair.checkpoint_id || 'Not recorded')}</span></div>${renderCheckpointAccess(repair)}${!repair.checkpoint_access ? `<button class="secondary" data-action="checkpoint-access-review" ${!canVerifyCheckpoint(current, owner) || busy ? 'disabled' : ''}>Review public checkpoint verification</button><p class="small muted">${!owner ? 'Owner authorization is required.' : 'Requires a completed registered repair and server-approved repository and capture. Publication is reviewed separately.'}</p>` : ''}<div class="evidence-links">${link(repair.preview_url, 'Registered repair preview')}</div><button class="primary" data-action="replay-review" ${!replayable ? 'disabled' : ''}>Review same-customer retest</button>${replayReason ? `<p class="small muted">${escape(replayReason)}</p>` : pendingRequest() ? '<p class="small muted">Recover the original saved request before approving a retest.</p>' : ''}<p class="same-population">All ${number(current.persona_count)} saved personas will return under equivalent starting conditions. A changed preview revision must be retested.</p></section>`;
 }
 function renderComparison(current: Run): string {
   const comparison = current.comparison;
@@ -268,6 +269,11 @@ function renderModal(): void {
     case 'repair': {
       const finding = findings.find(item => item.id === state.findingId);
       modalFrame('Approve a local repair', `<p>${escape(finding?.summary || 'No eligible recorded defect selected.')}</p><p class="lead">This approves investigation and a repair in the authorized connected source. Review the prepared patch and exact preview before accepting its outcome.</p><p>No code is pushed, published, merged or deployed to production.</p>${finding && !finding.measured ? '<p class="provider-notice">This approval uses a disclosed local fixture defect. It does not verify a Dodo payment.</p>' : ''}<p class="small muted">${owner ? 'Owner session connected.' : 'An owner must connect a session before approval is available.'}</p><div class="actions dialog-actions"><button class="primary" data-action="confirm-repair" ${busy || !owner || !finding || !current || !repairableFinding(finding, current) ? 'disabled' : ''}>Approve local repair</button><button class="secondary" data-action="setup">Owner connection</button></div>`); break;
+    }
+    case 'checkpoint-access': {
+      const matches = current?.id === state.runId && current.repair?.id === state.repairId;
+      modalFrame('Verify public checkpoint access', `<p>The local service will anonymously read the approved repository’s immutable checkpoint, transcript and repair source, then retain an access receipt.</p><p>Publication and privacy review happen separately. This action does not publish, repair, retest or reserve another budget.</p><p class="small muted">Hosted Entire UI access remains unverified. A repeated successful request returns the original historical receipt.</p>${current?.repair ? `<div class="evidence-row"><strong>Saved checkpoint</strong><span>${escape(current.repair.checkpoint_id)}</span></div>` : ''}${banner(error)}<div class="actions dialog-actions"><button class="primary" data-action="confirm-checkpoint-access" ${busy || !matches || !current || !canVerifyCheckpoint(current, owner) ? 'disabled' : ''}>Verify approved public checkpoint</button><button class="secondary" data-action="setup">Owner connection</button></div>`);
+      break;
     }
     case 'replay': if (current) {
       const reason = currentReplayBlocker(current);
@@ -513,6 +519,21 @@ async function action(name: string, id: string): Promise<void> {
       const current = run;
       await mutate(async () => { current.repair = await api.recoverRepair(current.id); stopPolling(); await pollRun(pollEpoch); }); break;
     }
+    case 'checkpoint-access-review': {
+      if (!run?.repair || !canVerifyCheckpoint(run, owner)) break;
+      error = ''; openModal({ kind: 'checkpoint-access', runId: run.id, repairId: run.repair.id }); break;
+    }
+    case 'confirm-checkpoint-access': {
+      if (!run?.repair || modal?.kind !== 'checkpoint-access' || run.id !== modal.runId
+        || run.repair.id !== modal.repairId || !canVerifyCheckpoint(run, owner)) break;
+      const current = run; const repair = run.repair;
+      await mutate(async () => {
+        const updated = await api.verifyCheckpointAccess(current.id, repair);
+        current.repair = updated;
+        closeModal();
+        if (view.kind === 'run' && view.id === current.id) { stopPolling(); await pollRun(pollEpoch); }
+      }); break;
+    }
     case 'replay-review': {
       if (pendingRequest()) { openModal({ kind: 'pending' }); break; }
       if (!run) break;
@@ -544,7 +565,7 @@ document.addEventListener('click', event => {
   if (!(event.target instanceof Element)) return;
   const target = event.target.closest('[data-action]');
   if (!(target instanceof HTMLElement) || target instanceof HTMLButtonElement && target.disabled) return;
-  if (busy && ['confirm-quote', 'confirm-cancel', 'confirm-repair', 'confirm-replay', 'recover-request', 'dismiss-declined'].includes(target.dataset.action || '')) return;
+  if (busy && ['confirm-quote', 'confirm-cancel', 'confirm-repair', 'confirm-replay', 'confirm-checkpoint-access', 'recover-request', 'dismiss-declined'].includes(target.dataset.action || '')) return;
   void action(target.dataset.action || '', target.dataset.id || '');
 });
 document.addEventListener('submit', event => {

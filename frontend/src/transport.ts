@@ -15,7 +15,7 @@ export class ApiError extends Error {
 }
 
 export function createTransport(base: string, csrf: () => string | null, fetcher: typeof fetch = fetch) {
-  return async function request<T>(path: string, schema: z.ZodType<T>, options: { body?: unknown; token?: string; key?: string; method?: string } = {}): Promise<T> {
+  return async function request<T>(path: string, schema: z.ZodType<T>, options: { body?: unknown; token?: string; key?: string; method?: string; timeoutMs?: number } = {}): Promise<T> {
     const headers = new Headers({ Accept: 'application/json' });
     if (options.body !== undefined) headers.set('Content-Type', 'application/json');
     if (options.token) headers.set('Authorization', `Bearer ${options.token}`);
@@ -28,7 +28,7 @@ export function createTransport(base: string, csrf: () => string | null, fetcher
       response = await fetcher(`${base}${path}`, {
         method,
         headers, credentials: 'include', cache: 'no-store', body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-        signal: AbortSignal.timeout(20_000),
+        signal: AbortSignal.timeout(options.timeoutMs ?? 20_000),
       });
     } catch {
       throw new ApiError('The local service could not be reached. Check that it is running, then try again. Saved results remain available.', 0, 'unreachable');

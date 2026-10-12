@@ -2,6 +2,7 @@ import { createdRunSchema, findingsSchema, ownerLogoutSchema, ownerSessionSchema
 
 import { createTransport } from './transport';
 import { createConnectionApi } from './connections';
+import { createCheckpointApi } from './checkpoint-access';
 export { ApiError } from './transport';
 
 const base = String(import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
@@ -10,6 +11,7 @@ const request = createTransport(base, () => csrfToken);
 
 export const api = {
   ...createConnectionApi(request),
+  ...createCheckpointApi(request),
   owner: async () => { const session = await request('/owner/session', ownerSessionSchema); csrfToken = session.csrf_token; return session; },
   connectOwner: async (secret: string) => { const session = await request('/owner/session', ownerSessionSchema, { body: { secret } }); csrfToken = session.csrf_token; return session; },
   disconnectOwner: async () => { const session = await request('/owner/session', ownerLogoutSchema, { method: 'DELETE' }); csrfToken = null; return session; },

@@ -182,12 +182,36 @@ export const eventSchema = z.object({
   id: z.number().int(), persona_id: z.string().nullable(), kind: z.string(), created_at: z.string(),
   data: z.record(z.string(), z.unknown()), trace_url: z.string().nullable(),
 });
+const checkpointResourceSchema = z.object({
+  object: z.string().regex(/^[a-f0-9]{40}$/), path: z.string().min(1),
+  bytes: count, sha256: z.string().regex(/^[a-f0-9]{64}$/),
+});
+const checkpointAccessSchema = z.object({
+  kind: z.literal('github_git_checkpoint'), status: z.literal('anonymous_verified'),
+  repository: z.string().min(1), checkpoint_id: z.string().min(1), checkpoint_ref: z.string().min(1),
+  checkpoint_object: z.string().regex(/^[a-f0-9]{40}$/), source_commit: z.string().regex(/^[a-f0-9]{40}$/),
+  url: z.string(), transcript_url: z.string(), source_url: z.string(),
+  binding_sha256: z.string().regex(/^[a-f0-9]{64}$/), receipt_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  verified_at: z.iso.datetime({ offset: true }), resource_digests: z.array(checkpointResourceSchema).length(4),
+  hosted_entire_url: z.null(), hosted_entire_status: z.literal('unverified'),
+}).refine(access => {
+  const raw = (object: string, path: string) => `https://raw.githubusercontent.com/${access.repository}/${object}/${path}`;
+  return /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(access.repository)
+    && access.url === raw(access.checkpoint_object, 'metadata.json')
+    && ['0/full.jsonl', '0/transcript.jsonl'].some(path => access.transcript_url === raw(access.checkpoint_object, path))
+    && access.source_url === raw(access.source_commit, 'lib/fulfillment-policy.ts');
+}, 'Checkpoint links must match the recorded immutable repository and objects');
 export const repairSchema = z.object({
   id: z.string(), status: z.enum(['queued', 'running', 'completed', 'blocked', 'failed']),
   base_revision: z.string(), head_revision: z.string().nullable(), preview_url: z.string().nullable(),
   checkpoint_id: z.string().nullable(), checkpoint_url: z.string().nullable(), gates: z.array(gateSchema),
   target_revision: z.string().nullable().optional(), source_digest: z.string().nullable().optional(),
-});
+  checkpoint_access: checkpointAccessSchema.nullable().optional(),
+}).refine(repair => !repair.checkpoint_access || (
+  repair.checkpoint_access.checkpoint_id === repair.checkpoint_id
+  && repair.checkpoint_access.source_commit === repair.head_revision
+  && repair.checkpoint_access.url === repair.checkpoint_url
+), 'Checkpoint access must belong to this registered repair');
 export const comparisonSchema = z.object({
   before_run_id: z.string(), after_run_id: z.string(), population_id: z.string(), requested: count,
   before_counts: countsSchema, after_counts: countsSchema, same_personas: z.boolean(),
