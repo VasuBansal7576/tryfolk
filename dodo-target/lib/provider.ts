@@ -37,7 +37,7 @@ function client(key:string, webhookKey?:string) {
     fetch:async (input,init)=>{
       const url=new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
       if (url.origin !== PROVIDER_ORIGIN) throw new Error('provider_origin_forbidden');
-      return fetch(input,{...init,redirect:'error'});
+      return fetch(input,{...init,redirect:'error',cache:'no-store'});
     },
   });
 }

@@ -86,7 +86,8 @@ export function createTarget(options: {env: Env; databasePath: string; provider?
     store.put('fulfillments',current.order_id,entry);
     return {...entry,state,grant_applied:grantApplied};
   }
-  async function receipt(order:Order,browserParent=false) {
+  async function readProviderReceipt(order:Order) {
+    const readStartedAt=new Date().toISOString();
     const ownership={...Ownership.parse(order),order_id:order.order_id,expected_product_id:order.expected_product_id};
     const source=options.provider?.source || 'dodo_test_api';
     let result:Observation;
@@ -123,9 +124,65 @@ export function createTarget(options: {env: Env; databasePath: string; provider?
       }
     }
     const data={...result,source,ownership,checkout_session_id:order.checkout_session_id};
-    // Routing authority crosses only the controller's private callback read.
-    // Neither normalized receipts nor persisted evidence contain the link.
-    const evidenceId=evidence({...data,...(privateReadDiagnostic ? {provider_read_diagnostics:privateReadDiagnostic} : {})});
+    return {data,privatePaymentLink,privateReadDiagnostic,readStartedAt,readFinishedAt:new Date().toISOString()};
+  }
+  type ProviderReceipt=Awaited<ReturnType<typeof readProviderReceipt>>;
+  const prePaymentCache=new Map<string,{observation:ProviderReceipt;expires:number}>();
+  const prePaymentReads=new Map<string,Promise<ProviderReceipt>>();
+  const receiptEpochs=new Map<string,number>();
+  const cacheKey=(order:Order)=>JSON.stringify({source:config.manifest.source_sha256,
+    mode:config.manifest.mode,order});
+  function currentPrePaymentOrder(order:Order) {
+    const current=store.get('orders',order.order_id,Order);
+    const account=store.get('accounts',order.account_id,Account);
+    const run=store.get('runs',order.run_id,Run);
+    return !!current?.active && !current.granted && current.state === 'ready'
+      && !!account?.active && !!run?.active && account.target_revision === order.target_revision
+      && run.target_revision === order.target_revision && order.target_revision === config.manifest.target_revision
+      && cacheKey(current) === cacheKey(order);
+  }
+  async function receipt(order:Order,browserParent=false,purpose:'fresh'|'pre_payment_identity'='fresh') {
+    const key=cacheKey(order),epoch=receiptEpochs.get(order.order_id) || 0;
+    let cacheHit=false,coalesced=false;
+    let observation:ProviderReceipt;
+    const prePaymentAllowed=purpose === 'pre_payment_identity' && currentPrePaymentOrder(order);
+    if (prePaymentAllowed) {
+      const cached=prePaymentCache.get(key);
+      if (cached && cached.expires > Date.now()) {observation=cached.observation;cacheHit=true;}
+      else {
+        prePaymentCache.delete(key);
+        const pending=prePaymentReads.get(key);
+        coalesced=!!pending;
+        const read=pending || readProviderReceipt(order);
+        if (!pending) prePaymentReads.set(key,read);
+        try {observation=await read;} finally {
+          if (prePaymentReads.get(key) === read) prePaymentReads.delete(key);
+        }
+        const data=observation.data;
+        if (data.source === 'dodo_test_api' && data.state === 'pending'
+            && data.reason === 'requires_payment_method' && data.payment?.status === 'requires_payment_method'
+            && data.checkout?.payment_status === 'requires_payment_method'
+            && currentPrePaymentOrder(order) && (receiptEpochs.get(order.order_id) || 0) === epoch) {
+          prePaymentCache.set(key,{observation,expires:Date.parse(observation.readFinishedAt)+3000});
+        }
+      }
+    } else {
+      // A financial read never joins an in-flight pre-payment read or uses its
+      // observation. Its epoch also prevents older reads repopulating the cache.
+      receiptEpochs.set(order.order_id,epoch+1);
+      prePaymentCache.delete(key);prePaymentReads.delete(key);
+      observation=await readProviderReceipt(order);
+    }
+    if (prePaymentAllowed && !currentPrePaymentOrder(order)) {
+      prePaymentCache.delete(key);
+      observation=await readProviderReceipt(order);cacheHit=false;coalesced=false;
+    }
+    const {data,privatePaymentLink,privateReadDiagnostic,readStartedAt,readFinishedAt}=observation;
+    const evidenceId=evidence({...data,
+      provider_read_observation:{purpose,cache_hit:cacheHit,coalesced,
+        provider_read_started_at:readStartedAt,provider_read_finished_at:readFinishedAt,
+        age_ms:Math.max(0,Date.now()-Date.parse(readFinishedAt)),maximum_pre_payment_age_ms:3000},
+      ...(privateReadDiagnostic ? {provider_read_diagnostics:privateReadDiagnostic} : {})});
     return {...data,evidence_id:evidenceId,...(browserParent ? {private_payment_link:privatePaymentLink} : {})};
   }
   async function body<T>(request:Request,schema:z.ZodType<T>):Promise<T> {
@@ -308,7 +365,10 @@ export function createTarget(options: {env: Env; databasePath: string; provider?
       controller(request);
       const browserParent=url.searchParams.get('browser_parent');
       if (browserParent !== null && browserParent !== '1') throw new HttpError(400,'invalid_browser_parent');
-      return Response.json(await receipt(orderFor(url.searchParams.get('order_id')),browserParent === '1'));
+      const purpose=url.searchParams.get('read_purpose') || 'fresh';
+      if (purpose !== 'fresh' && purpose !== 'pre_payment_identity') throw new HttpError(400,'invalid_read_purpose');
+      if (purpose === 'pre_payment_identity' && browserParent !== '1') throw new HttpError(400,'private_identity_purpose_required');
+      return Response.json(await receipt(orderFor(url.searchParams.get('order_id')),browserParent === '1',purpose));
     }
     if (path === '/api/target/reconcile' && request.method === 'POST') {
       const account=accountFor(request);

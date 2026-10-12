@@ -194,8 +194,8 @@ test('a bad raw webhook signature is rejected before any entitlement can be gran
   app.close();
 });
 
-async function settledFixture(app:ReturnType<typeof createTarget>,provider:ExternalProviderFixture) {
-  const {fixture,cookie}=await customer(app);
+async function settledFixture(app:ReturnType<typeof createTarget>,provider:ExternalProviderFixture,persona_id='p1') {
+  const {fixture,cookie}=await customer(app,'r1',persona_id);
   const checkout=await (await call(app,'/api/target/checkouts',{}, {'Cookie':cookie})).json();
   const stored=await (await call(app,`/api/target/orders?account_id=${fixture.account_id}`)).json();
   const order=stored.orders.find((item:{order_id:string})=>item.order_id === checkout.order_id);
@@ -644,4 +644,85 @@ test('manifest names the fulfillment-only repair seam and its effective decision
     assert.deepEqual(manifest.repair,{source_file:'lib/fulfillment-policy.ts',disposition:'granted'});
     assert.equal(manifest.fault,null);
   } finally {app.close();}
+});
+
+// Real official SDK transport with disclosed external HTTP response fixtures.
+// These tests measure actual SDK GET dispatch, never claim live provider proof.
+async function receiptCacheFixture(body:(context:{app:ReturnType<typeof createTarget>;fixture:ExternalProviderFixture;gets:string[]})=>Promise<void>) {
+  const env=sandboxEnv(),fixture=new ExternalProviderFixture(),sdk=dodoProvider(configuration(env,process.cwd()));
+  const provider:Provider={source:sdk.source,
+    createCustomer:input=>fixture.createCustomer(input),createCheckout:input=>fixture.createCheckout(input),
+    getCheckout:id=>sdk.getCheckout(id),getPayment:id=>sdk.getPayment(id)};
+  const app=createTarget({env,databasePath:':memory:',provider}),original=globalThis.fetch,gets:string[]=[];
+  globalThis.fetch=async(input,init)=>{
+    const request=new Request(input,init),url=new URL(request.url);
+    assert.equal(url.origin,'https://test.dodopayments.com');assert.equal(request.method,'GET');
+    assert.equal(request.cache,'no-store');gets.push(url.pathname);
+    await new Promise(resolve=>setTimeout(resolve,20));
+    const value=url.pathname.startsWith('/checkouts/') ? fixture.checkouts.get(url.pathname.split('/').at(-1) || '')
+      : fixture.payments.get(url.pathname.split('/').at(-1) || '');
+    return Response.json(value);
+  };
+  try {await body({app,fixture,gets});} finally {globalThis.fetch=original;app.close();}
+}
+function pendingReceiptFixture(fixture:ExternalProviderFixture,value:Awaited<ReturnType<typeof settledFixture>>) {
+  value.payment.status='requires_payment_method';
+  fixture.checkouts.set(value.checkout.checkout_session_id,{id:value.checkout.checkout_session_id,
+    payment_id:value.payment.payment_id,payment_status:'requires_payment_method'});
+  return `/api/target/receipts?order_id=${value.checkout.order_id}&browser_parent=1&read_purpose=pre_payment_identity`;
+}
+test('pre-payment receipt coalesces actual SDK GETs and caches only within the three-second bound', async()=>{
+  await receiptCacheFixture(async({app,fixture,gets})=>{
+    const value=await settledFixture(app,fixture),path=pendingReceiptFixture(fixture,value);
+    const receipts=await Promise.all(Array.from({length:4},async()=>await(await call(app,path)).json()));
+    assert.equal(gets.length,2);assert.ok(receipts.every(r=>r.state==='pending'));
+    assert.equal(new Set(receipts.map(r=>r.evidence_id)).size,4);
+    const hit=await(await call(app,path)).json();assert.equal(gets.length,2);
+    const evidence=await(await call(app,`/api/target/evidence?evidence_id=${hit.evidence_id}`)).json();
+    assert.equal(evidence.provider_read_observation.cache_hit,true);
+    assert.ok(evidence.provider_read_observation.age_ms<=3000);
+    assert.ok(!JSON.stringify(evidence).includes('private_payment_link'));
+    await new Promise(resolve=>setTimeout(resolve,3050));
+    await call(app,path);assert.equal(gets.length,4);
+  });
+});
+test('financial reads force fresh SDK identity and invalidate a cached pending receipt on provider mismatch', async()=>{
+  await receiptCacheFixture(async({app,fixture,gets})=>{
+    const value=await settledFixture(app,fixture),path=pendingReceiptFixture(fixture,value);
+    await call(app,path);assert.equal(gets.length,2);
+    value.payment.total_amount+=1;
+    const fresh=await(await call(app,`/api/target/receipts?order_id=${value.checkout.order_id}&browser_parent=1&read_purpose=fresh`)).json();
+    assert.equal(fresh.state,'mismatch');assert.equal(gets.length,4);
+    const next=await(await call(app,path)).json();assert.equal(next.state,'mismatch');assert.equal(gets.length,6);
+    await call(app,path);assert.equal(gets.length,8); // Mismatches are never cached.
+  });
+});
+test('a financial SDK read never joins pre-payment inflight work or allows it to repopulate the cache', async()=>{
+  await receiptCacheFixture(async({app,fixture,gets})=>{
+    const value=await settledFixture(app,fixture),path=pendingReceiptFixture(fixture,value);
+    await Promise.all([call(app,path),call(app,`/api/target/receipts?order_id=${value.checkout.order_id}`)]);
+    assert.equal(gets.length,4);
+    await call(app,path);assert.equal(gets.length,6);
+  });
+});
+test('pre-payment cache cannot cross persona/account/order boundaries', async()=>{
+  await receiptCacheFixture(async({app,fixture,gets})=>{
+    const a=await settledFixture(app,fixture,'persona_a'),b=await settledFixture(app,fixture,'persona_b');
+    const pathA=pendingReceiptFixture(fixture,a),pathB=pendingReceiptFixture(fixture,b);
+    const receipts=await Promise.all([call(app,pathA),call(app,pathB)]);
+    const [ra,rb]=await Promise.all(receipts.map(r=>r.json()));
+    assert.equal(gets.length,4);assert.notEqual(ra.ownership.persona_id,rb.ownership.persona_id);
+    assert.notEqual(ra.ownership.account_id,rb.ownership.account_id);
+    await Promise.all([call(app,pathA),call(app,pathB)]);assert.equal(gets.length,4);
+  });
+});
+test('only private controller identity purposes can request a pre-payment cache and reset cannot reuse it', async()=>{
+  await receiptCacheFixture(async({app,fixture,gets})=>{
+    const value=await settledFixture(app,fixture),path=pendingReceiptFixture(fixture,value);
+    assert.equal((await call(app,path.replace('&browser_parent=1',''))).status,400);
+    assert.equal((await call(app,path.replace('pre_payment_identity','untrusted'))).status,400);
+    assert.equal(gets.length,0);await call(app,path);assert.equal(gets.length,2);
+    await call(app,'/api/target/reset',{run_id:'r1',target_revision:value.fixture.target_revision});
+    await call(app,path);assert.equal(gets.length,4);
+  });
 });
