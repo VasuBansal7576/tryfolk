@@ -30,8 +30,13 @@ class Memory:
 
 
 class Person:
+    all_agents = {}
+
     def __init__(self, name, mental_faculties):
+        if name in self.all_agents:
+            raise ValueError("SDK name already registered")
         self.name = name
+        self.all_agents[name] = self
         self.profile = {"name": name}
         self.semantic_memory, self.episodic_memory = Memory(), Memory()
 
@@ -104,6 +109,26 @@ def inferred(messages, schema, **kwargs):
         }
         for index, pid in enumerate(schema["properties"])
     }
+
+
+def test_generation_unregisters_only_owned_temporaries_on_success_and_model_error():
+    active = Person("active independent journey", [])
+    try:
+        first = adapter().generate_bulk(command(), Person, inferred)
+        assert Person.all_agents == {active.name: active}
+        # Restoring a serialized person in the same service must not collide.
+        restored = Person(first["population"][0]["name"], [])
+        Person.all_agents.pop(restored.name)
+        assert adapter().generate_bulk(command(), Person, inferred) == first
+
+        def failed(*args, **kwargs):
+            raise RuntimeError("invented inference failure")
+
+        with pytest.raises(RuntimeError, match="invented inference failure"):
+            adapter().generate_bulk(command(), Person, failed)
+        assert Person.all_agents == {active.name: active}
+    finally:
+        Person.all_agents.pop(active.name, None)
 
 
 def test_chunk_preserves_distinct_individual_plans_and_real_sdk_memory_seam():

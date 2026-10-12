@@ -17,6 +17,21 @@ MAX_RESPONSE = 2_000_000
 
 
 def generate_bulk(command, TinyPerson, generate):
+    created = []
+    try:
+        return _generate_bulk(command, TinyPerson, generate, created)
+    finally:
+        # Journey initialization restores these exact snapshots in this same
+        # loaded service. Retain serialized memories, not duplicate registered
+        # SDK instances; never remove another active persona's registration.
+        registry = getattr(TinyPerson, "all_agents", None)
+        if isinstance(registry, dict):
+            for person in created:
+                if registry.get(person.name) is person:
+                    registry.pop(person.name)
+
+
+def _generate_bulk(command, TinyPerson, generate, created):
     count, start = command.get("count"), command.get("start_index", 0)
     if type(count) is not int or not 1 <= count <= MAX_CHUNK or type(start) is not int or start < 0:
         raise ValueError("Exact chunk requires count 1..64 and a nonnegative start_index.")
@@ -76,6 +91,7 @@ def generate_bulk(command, TinyPerson, generate):
         index = start + offset
         persona_id = uuid5(NAMESPACE_URL, f"tryfolk:{run_id}:{index}:{seed['id']}").hex
         person = TinyPerson("Tryfolk customer " + persona_id, mental_faculties=[])
+        created.append(person)
         for key, value in seed["profile"].items():
             person.define(key, deepcopy(value))
         person.define("seed_adult_verified", True)
