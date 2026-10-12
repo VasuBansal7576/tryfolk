@@ -82,7 +82,7 @@ export function eventSummary(event: RunEvent): string {
   return '';
 }
 export function eventList(events: RunEvent[]): string {
-  return events.length ? `<ol class="timeline">${events.map(event => `<li data-focus-scope="event-${number(event.id)}"><strong>${escape(humanize(event.kind))}</strong><p>${escape(eventSummary(event))}</p><small>${escape(timestamp(event.created_at))}</small><details class="record" data-record="event-details"><summary>Recorded details</summary>${evidence(event.data)}</details>${link(event.trace_url, 'Open full trace')}</li>`).join('')}</ol>` : '<p class="empty">No steps have been recorded yet. A queued customer has not started a browser session.</p>';
+  return events.length ? `<ol class="timeline">${events.map(event => `<li data-focus-scope="event-${number(event.id)}"><strong>${escape(humanize(event.kind))}</strong><p>${escape(eventSummary(event))}</p><small>${escape(timestamp(event.created_at))}</small><details class="record" data-record="event-details"><summary>Recorded details</summary>${evidence(event.data)}</details>${link(event.trace_url, 'Open full trace')}</li>`).join('')}</ol>` : '<p class="empty">No steps were included in this saved record.</p>';
 }
 export const outcomeRows: { key: keyof Counts; label: string }[] = [
   { key: 'completed', label: 'Passed' }, { key: 'failed', label: 'Failed' },
@@ -92,5 +92,5 @@ export function outcomes(counts: Counts, requested: number): string {
   return `<div class="outcomes">${outcomeRows.map(({ key, label }) => `<div class="outcome"><strong>${number(counts[key])}<small> / ${number(requested)}</small></strong>${label}</div>`).join('')}</div>`;
 }
 export function comparisonTable(before: Counts, after: Counts, requested: number): string {
-  return `<table class="report-table comparison-table"><thead><tr><th scope="col">Outcome</th><th scope="col">Initial run</th><th scope="col">After repair</th></tr></thead><tbody>${outcomeRows.map(({ key, label }) => `<tr><th scope="row">${label}</th><td>${number(before[key])} / ${number(requested)}</td><td>${number(after[key])} / ${number(requested)}</td></tr>`).join('')}<tr><th scope="row">Executed</th><td>${number(before.executed)} / ${number(requested)}</td><td>${number(after.executed)} / ${number(requested)}</td></tr></tbody></table>`;
+  return `<table class="report-table comparison-table"><thead><tr><th scope="col">Outcome</th><th scope="col">Initial run</th><th scope="col">After repair</th></tr></thead><tbody>${outcomeRows.map(({ key, label }) => `<tr><th scope="row">${label}</th><td>${number(before[key])} / ${number(requested)}</td><td>${number(after[key])} / ${number(requested)}</td></tr>`).join('')}<tr><th scope="row">Recorded customer outcomes</th><td>${number(before.executed)} / ${number(requested)}</td><td>${number(after.executed)} / ${number(requested)}</td></tr></tbody></table>`;
 }

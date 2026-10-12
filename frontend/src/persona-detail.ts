@@ -1,5 +1,6 @@
 import type { Persona, Run, RunEvent, SavedScenario } from './contracts';
 import { escape, eventList, evidence, humanize, json, link, number, redact } from './presentation.ts';
+import { recordedPersonaOutcome } from './run-progress.ts';
 
 export type PersonaSelection = { runId: string; populationId: string; epoch: number; personaId: string };
 
@@ -48,11 +49,7 @@ function canonicalScenario(value: string | undefined): string {
 }
 
 export function personaOutcome(events: RunEvent[]): string {
-  for (const event of [...events].reverse()) {
-    if (typeof event.data.outcome === 'string') return humanize(event.data.outcome);
-    if (['completed', 'failed', 'abandoned', 'pending', 'blocked'].includes(event.kind)) return humanize(event.kind);
-  }
-  return 'Unknown · no outcome recorded';
+  return recordedPersonaOutcome(events) ?? 'Unknown · no outcome recorded';
 }
 
 function records(events: RunEvent[], keys: RegExp): string {
@@ -140,7 +137,7 @@ export function renderPersonaDetail(current: Run, person: Persona): string {
     <p class="same-population">The after pass must restore this original saved profile, scenario, starting conditions and initial memory. New isolated accounts and payment identifiers are separate from the customer identity.</p>
     <div class="persona-observed">
       <h2>Observed in this run</h2>
-      ${section('Recorded outcome', `<p>${escape(personaOutcome(events))}</p>`)}
+      ${section('Recorded outcome', `<p>${escape(personaOutcome(events))}</p>${recordedPersonaOutcome(events) === null ? '<p class="small muted">This saved customer has no recorded result. A run blocker or a saved browser action does not establish that the customer passed or failed.</p>' : ''}`)}
       ${observedVerification}
       ${section('Payment evidence', records(events, /^(payment|receipt|checkout|provider|measured|payment_status|payment_id|payment_truth|payment_verified)$/i))}
       ${section('Account access evidence', records(events, /^(entitlement|app_entitlement|entitlement_verified|access|account_id|classification)$/i))}
