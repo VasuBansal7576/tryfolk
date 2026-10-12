@@ -2,7 +2,7 @@ import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { CHECKOUT_ORIGIN, configuration, type Env } from './config';
 import { Store } from './store';
 import { Account, Event, FixtureRequest, Fulfillment, Id, Login, Order, Ownership, ResetRequest, Run, Session } from './model';
-import { CheckoutCreated, CheckoutStatus, CustomerCreated, dodoProvider, orderMetadata, Payment, paymentMismatches, sanitizedPayment, SucceededEvent, unwrapWebhook, type Observation, type Provider } from './provider';
+import { CheckoutCreated, CheckoutStatus, CustomerCreated, dodoProvider, orderMetadata, Payment, paymentMismatches, providerReadDiagnostic, sanitizedPayment, SucceededEvent, unwrapWebhook, type Observation, type Provider } from './provider';
 import { z } from 'zod';
 import { ARTWORKS, sampleArtwork } from './artworks';
 import { specialDownloadsDisposition } from './fulfillment-policy';
@@ -91,6 +91,8 @@ export function createTarget(options: {env: Env; databasePath: string; provider?
     const source=options.provider?.source || 'dodo_test_api';
     let result:Observation;
     let privatePaymentLink:string|null=null;
+    let providerReadStage:'checkout'|'payment'='checkout';
+    let privateReadDiagnostic:ReturnType<typeof providerReadDiagnostic>|null=null;
     if (config.errors.length) result={state:'setup_required',errors:config.errors};
     else if (!order.checkout_session_id) result=order.state === 'creation_error' ? {state:'provider_error',reason:order.state} : {state:'pending',reason:order.state,checkout:null,payment:null};
     else {
@@ -100,6 +102,7 @@ export function createTarget(options: {env: Env; databasePath: string; provider?
         if (checkout.id !== order.checkout_session_id) result={state:'mismatch',mismatches:['checkout.id'],checkout,payment:null};
         else if (!checkout.payment_id) result={state:'pending',reason:'checkout_details_unsettled',checkout,payment:null};
         else {
+          providerReadStage='payment';
           const payment=Payment.parse(await api.getPayment(checkout.payment_id));
           privatePaymentLink=payment.payment_link ?? null;
           const mismatches=paymentMismatches(order,payment);
@@ -116,12 +119,14 @@ export function createTarget(options: {env: Env; databasePath: string; provider?
         }
       } catch(error) {
         result={state:'provider_error',reason:error instanceof z.ZodError ? 'invalid_provider_response' : 'provider_read_failed'};
+        privateReadDiagnostic=providerReadDiagnostic(error,providerReadStage);
       }
     }
     const data={...result,source,ownership,checkout_session_id:order.checkout_session_id};
     // Routing authority crosses only the controller's private callback read.
     // Neither normalized receipts nor persisted evidence contain the link.
-    return {...data,evidence_id:evidence(data),...(browserParent ? {private_payment_link:privatePaymentLink} : {})};
+    const evidenceId=evidence({...data,...(privateReadDiagnostic ? {provider_read_diagnostics:privateReadDiagnostic} : {})});
+    return {...data,evidence_id:evidenceId,...(browserParent ? {private_payment_link:privatePaymentLink} : {})};
   }
   async function body<T>(request:Request,schema:z.ZodType<T>):Promise<T> {
     const raw=await request.text();

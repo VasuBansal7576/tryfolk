@@ -1,6 +1,41 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTarget } from '../lib/target';
+import { APIError, APIConnectionTimeoutError } from 'dodopayments';
+import { providerReadDiagnostic } from '../lib/provider';
+
+test('provider diagnostics accept only known SDK numeric status and closed categories', () => {
+  for (const [status,kind] of [[401,'sdk_authentication_error'],[403,'sdk_authentication_error'],
+    [429,'sdk_rate_limit_error'],[503,'sdk_server_error'],[404,'sdk_client_error']]) {
+    const error=APIError.generate(Number(status),{message:'private response body'},'private message',new Headers({'authorization':'private key'}));
+    const diagnostic=providerReadDiagnostic(error,'checkout');
+    assert.deepEqual(diagnostic,{stage:'checkout',kind,http_status:status});
+    assert.ok(!JSON.stringify(diagnostic).includes('private'));
+  }
+  assert.deepEqual(providerReadDiagnostic(new APIConnectionTimeoutError({message:'private'}),'payment'),
+    {stage:'payment',kind:'sdk_timeout',http_status:null});
+  assert.deepEqual(providerReadDiagnostic({status:429,message:'private'},'payment'),
+    {stage:'payment',kind:'unrecognized_error',http_status:null});
+});
+
+test('failed receipt persists closed request-stage diagnostics privately without exposing SDK data', async () => {
+  for (const stage of ['checkout','payment'] satisfies ('checkout'|'payment')[]) {
+    const provider=new ExternalProviderFixture(),app=createTarget({env:sandboxEnv(),databasePath:':memory:',provider});
+    const {checkout}=await settledFixture(app,provider);
+    const failure=APIError.generate(429,{message:'private body'},'private message',new Headers({'authorization':'private key'}));
+    if (stage === 'checkout') provider.getCheckout=async()=>{throw failure;};
+    else provider.getPayment=async()=>{throw failure;};
+    const receipt=await (await call(app,`/api/target/receipts?order_id=${checkout.order_id}`)).json();
+    assert.equal(receipt.state,'provider_error');assert.equal(receipt.reason,'provider_read_failed');
+    assert.equal(receipt.provider_read_diagnostics,undefined);
+    const evidence=await (await call(app,`/api/target/evidence?evidence_id=${receipt.evidence_id}`)).json();
+    assert.deepEqual(evidence.provider_read_diagnostics,{stage,kind:'sdk_rate_limit_error',http_status:429});
+    assert.ok(!JSON.stringify(evidence).includes('private'));
+    assert.equal((await call(app,`/api/target/evidence?evidence_id=${receipt.evidence_id}`,undefined,
+      {'Authorization':'Bearer wrong'})).status,401);
+    app.close();
+  }
+});
 
 test('missing sandbox configuration is an actionable setup gate', async () => {
   const app = createTarget({ env: {}, databasePath: ':memory:' });
