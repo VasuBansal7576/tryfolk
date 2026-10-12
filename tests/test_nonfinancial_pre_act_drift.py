@@ -230,3 +230,44 @@ async def test_untrusted_or_unsafe_current_control_is_not_retryable(invalid):
         )
     assert getattr(caught.value, "code", None) is None
     assert caught.value.data["nonfinancial"] is False
+
+
+def test_error_protocol_exports_closed_comparison_only_not_arbitrary_provider_data():
+    source = Path(__file__).parents[1] / "integrations/stagehand/adapter.py"
+    tree = ast.parse(source.read_text())
+    payload = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Dict)
+        and {"error_evidence_path", "pre_submission_evidence", "code", "data"}
+        <= {k.value for k in n.keys if isinstance(k, ast.Constant)}
+    )
+    _, Drift = preparation()
+    provider_error = RuntimeError("invented provider failure")
+    provider_error.data = {"private_provider_payload": "invented fixture, never real"}
+    provider_error.code = "provider_specific_code"
+
+    def encode(error):
+        return eval(
+            compile(ast.Expression(payload), str(source), "eval"),
+            {
+                "error": error,
+                "error_path": "private-evidence-path",
+                "safety": None,
+                "PreActDocumentDrift": Drift,
+            },
+        )
+
+    assert encode(provider_error)["data"] is None
+    assert encode(provider_error)["code"] is None
+    comparison = {
+        "same_url": True,
+        "same_generation": True,
+        "same_control_signature": False,
+        "nonfinancial": True,
+        "executed": False,
+        "field": "address",
+    }
+    typed = encode(Drift(comparison, retryable=True))
+    assert typed["code"] == "nonfinancial_control_stale"
+    assert typed["data"] == comparison
