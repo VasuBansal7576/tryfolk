@@ -14,8 +14,9 @@ def observation_initialization():
     # before SDK inference. External page reads alone are invented.
     source = Path(__file__).resolve().parents[1] / "integrations/stagehand/adapter.py"
     tree = ast.parse(source.read_text(), filename=str(source))
+    dispatch = ast.parse('op in ("observe", "observe_native")', mode="eval").body
     branch = next(n for n in ast.walk(tree) if isinstance(n, ast.If)
-                  and ast.dump(n.test) == ast.dump(ast.parse('op == "observe"', mode="eval").body))
+                  and ast.dump(n.test) == ast.dump(dispatch))
     stop = next(i for i, n in enumerate(branch.body)
                 if isinstance(n, ast.AsyncFunctionDef) and n.name == "infer")
     wrapper = ast.parse("async def initialize(page, policy, billing_initialized_binding, guard):\n    return billing_initialized_binding\n")
