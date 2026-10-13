@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit, quote
 
 import pytest
+import httpx
 from tryfolk.browser_policy import DODO_CHECKOUT, exact_origin
 from tryfolk.browser_settlement import DOCUMENT_STATE
 from tryfolk.native_read_observation import NativeObservationGate
@@ -206,3 +207,51 @@ async def test_calculation_during_slow_sdk_fill_is_current_but_completion_still_
     checks = await f.run(timeout=0.8)
     assert all(checks.values())
     assert asyncio.get_running_loop().time() - start >= 0.6
+
+
+async def test_one_delayed_http_calculation_can_drain_without_request_replay():
+    """Unit-only provider metadata; completion is driven by an actual HTTP read.
+
+    The owned local test socket supplies a response after eleven seconds. This
+    is a timeout regression, never a Dodo payment or live sponsor proof.
+    """
+    f = Fixture()
+    f.entries[0].update(completion="pending", status=None)
+    requests = []
+    received = asyncio.Event()
+
+    async def serve(reader, writer):
+        request = await reader.readuntil(b"\r\n\r\n")
+        requests.append(request.split(b"\r\n", 1)[0])
+        received.set()
+        try:
+            await asyncio.sleep(11)
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+
+    async def already_issued_calculation():
+        async with httpx.AsyncClient(trust_env=False, timeout=20) as client:
+            response = await client.post(f"http://127.0.0.1:{port}/unit-calculate", json={})
+            f.entries[0].update(completion="finished", status=response.status_code)
+
+    task = asyncio.create_task(already_issued_calculation())
+    try:
+        await received.wait()
+        started = asyncio.get_running_loop().time()
+        checks = await f.run(timeout=30)
+        await task
+        assert all(checks.values())
+        assert 11 <= asyncio.get_running_loop().time() - started < 15
+        assert requests == [b"POST /unit-calculate HTTP/1.1"]
+        assert any(e.get("pending_calculation") is True for e in f.events)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        server.close()
+        await server.wait_closed()

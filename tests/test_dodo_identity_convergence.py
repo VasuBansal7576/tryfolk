@@ -18,7 +18,9 @@ def records():
 
 
 def identity_fixture(monkeypatch, records, *, mismatch_reads=1, mutation=None, after_first=None,
-                     slow_stage=None, origin='http://127.0.0.1:3338'):
+                     slow_stage=None, origin='http://127.0.0.1:3338', provider_error_reads=0,
+                     provider_error_reason='provider_read_failed', provider_error_mutation=None,
+                     expected_read_purpose=None):
     order, receipt, _ = copy.deepcopy(records)
     order['customer_id'] = receipt['payment']['customer_id'] = 'closed_fixture_customer'
     receipt['private_payment_link'] = 'https://test.checkout.dodopayments.com/Private1'
@@ -41,6 +43,8 @@ def identity_fixture(monkeypatch, records, *, mismatch_reads=1, mutation=None, a
         if request.url.path == '/api/target/orders':
             return httpx.Response(200, json={'orders': [order]})
         assert request.url.path == '/api/target/receipts' and request.url.params['browser_parent'] == '1'
+        if expected_read_purpose is not None:
+            assert request.url.params['read_purpose'] == expected_read_purpose
         if mutation == 'HTTP_error':
             return httpx.Response(503, content=b'not JSON')
         if mutation == 'malformed':
@@ -71,6 +75,11 @@ def identity_fixture(monkeypatch, records, *, mismatch_reads=1, mutation=None, a
             body.update(state='provider_error', reason='provider_read_failed')
         elif mutation == 'different_status_pair':
             body['payment']['status'] = 'processing'
+        if len(reads) < provider_error_reads:
+            body = {key: body[key] for key in ('source', 'ownership', 'checkout_session_id')}
+            body.update(state='provider_error', reason=provider_error_reason, private_payment_link=None)
+            if provider_error_mutation:
+                provider_error_mutation(body)
         reads.append(body)
         return httpx.Response(200, json=body)
 
@@ -82,6 +91,29 @@ def identity_fixture(monkeypatch, records, *, mismatch_reads=1, mutation=None, a
         'sandbox_key': True, 'parent_matches': True, 'operation': 'poll',
         'identity_stage': 'native_response_capture'}
     return DodoTarget(origin), observed, {key: order[key] for key in OWNERSHIP}, calls, reads
+
+
+@pytest.mark.parametrize('operation,identity_stage,purpose', [
+    ('bootstrap', None, 'pre_payment_identity'),
+    ('session_tokens', None, 'pre_payment_identity'),
+    ('bootstrap', 'native_response_capture', 'fresh'),
+    ('session_tokens', 'native_response_capture', 'fresh'),
+    ('confirm', None, 'fresh'),
+    ('poll', None, 'fresh'),
+    ('poll', 'native_response_capture', 'fresh'),
+    ('unknown_operation', None, 'fresh'),
+])
+async def test_only_pre_payment_identity_operations_request_bounded_reuse(
+    monkeypatch, records, operation, identity_stage, purpose
+):
+    target, observed, fixture, calls, reads = identity_fixture(
+        monkeypatch, records, mismatch_reads=0, expected_read_purpose=purpose)
+    observed.update(operation=operation, identity_stage=identity_stage)
+    result = await target.frame_context(observed, {'id': 'r', 'revision': 'rev'}, fixture)
+    assert len(reads) == 1 and all(method == 'GET' for method, _ in calls)
+    # A fixture showing an already succeeded payment remains inadmissible before
+    # Pay. Choosing the cache purpose cannot relax the independent status guard.
+    assert result['approved'] is (operation == 'poll')
 
 
 async def test_native_capture_identity_converges_only_after_independent_checkout_status_matches(
@@ -196,8 +228,9 @@ async def test_in_flight_identity_deadline_retains_stage_without_inventing_HTTP_
 
 
 @pytest.mark.parametrize('document_changes', [False, True])
+@pytest.mark.parametrize('provider_unavailable', [False, True])
 async def test_native_response_capture_waits_for_same_identity_and_denies_document_change_during_retry(
-    monkeypatch, records, document_changes
+    monkeypatch, records, document_changes, provider_unavailable
 ):
     from test_native_card import confirmation
     from test_return_navigation import return_fixture
@@ -216,7 +249,9 @@ async def test_native_response_capture_waits_for_same_identity_and_denies_docume
             state['generation'] += 1
 
     target, _, fixture, calls, reads = identity_fixture(monkeypatch, (order, receipt, entitlement),
-        after_first=change_document, origin=guard.policy.origin)
+        after_first=change_document, origin=guard.policy.origin,
+        mismatch_reads=0 if provider_unavailable else 1,
+        provider_error_reads=1 if provider_unavailable else 0)
     run = {'id': fixture['run_id'], 'revision': fixture['target_revision']}
 
     async def verify(observed):
@@ -282,3 +317,98 @@ async def test_matching_admitted_source_pins_use_existing_readiness_cycle_only(m
         observed, {"id": "r", "revision": "rev", "source_commit": "a" * 40, "source_digest": "b" * 64}, fixture
     )
     assert result["approved"] is True and len(calls) == 3
+
+
+async def test_closed_provider_read_error_retries_same_gets_and_requires_fresh_complete_identity(monkeypatch, records):
+    target, observed, fixture, calls, reads = identity_fixture(
+        monkeypatch, records, mismatch_reads=0, provider_error_reads=1)
+    result = await target.frame_context(observed, {'id': 'r', 'revision': 'rev'}, fixture)
+    assert result['approved'] is True and len(reads) == 2
+    assert calls == [('GET', path) for _ in range(2) for path in
+        ('/api/target/readiness', '/api/target/orders', '/api/target/receipts')]
+    facts = result['identity_diagnostics']['reads']
+    assert facts[0]['outcome'] == 'provider_read_pending'
+    assert facts[0]['provider_error_reason'] == 'provider_read_failed'
+    assert facts[0]['provider_HTTP_status_available'] is False
+    assert facts[1]['outcome'] == 'approved' and all(facts[1]['checks'].values())
+    assert not any(secret in json.dumps(facts) for secret in ('Private1', 'closed_fixture_customer', BROWSER_API))
+
+
+async def test_persistent_provider_error_exhausts_existing_read_bound_without_approval(monkeypatch, records):
+    target, observed, fixture, calls, reads = identity_fixture(
+        monkeypatch, records, mismatch_reads=0, provider_error_reads=10)
+    result = await target.frame_context(observed, {'id': 'r', 'revision': 'rev'}, fixture)
+    assert result['approved'] is False and len(reads) == 3 and len(calls) == 9
+    assert result['identity_diagnostics']['retry_bound_exhausted'] is True
+
+
+@pytest.mark.parametrize('reason', ['invalid_provider_response', 'creation_error', 'authentication_failed', 'unknown'])
+async def test_provider_error_other_reasons_never_retry(monkeypatch, records, reason):
+    target, observed, fixture, calls, reads = identity_fixture(
+        monkeypatch, records, mismatch_reads=0, provider_error_reads=1, provider_error_reason=reason)
+    result = await target.frame_context(observed, {'id': 'r', 'revision': 'rev'}, fixture)
+    assert result['approved'] is False and len(reads) == 1 and len(calls) == 3
+
+
+@pytest.mark.parametrize('field', ['ownership', 'source', 'checkout_session_id', 'payment'])
+async def test_provider_error_wrong_or_partial_identity_never_retries(monkeypatch, records, field):
+    def mutate(body):
+        body[field] = {'payment_id': 'untrusted'} if field == 'payment' else {} if field == 'ownership' else 'wrong'
+    target, observed, fixture, calls, reads = identity_fixture(
+        monkeypatch, records, mismatch_reads=0, provider_error_reads=1, provider_error_mutation=mutate)
+    result = await target.frame_context(observed, {'id': 'r', 'revision': 'rev'}, fixture)
+    assert result['approved'] is False and len(reads) == 1 and len(calls) == 3
+
+
+@pytest.mark.parametrize('change', ['source', 'order', 'checkout', 'amount', 'currency', 'product', 'customer'])
+async def test_provider_recovery_cannot_substitute_otherwise_consistent_source_order(monkeypatch, records, change):
+    def replace(readiness, order, receipt):
+        if change == 'source':
+            readiness['manifest']['source_sha256'] = 'c' * 64
+        elif change == 'order':
+            order['order_id'] = receipt['ownership']['order_id'] = receipt['payment']['metadata']['order_id'] = 'other_order'
+        elif change == 'checkout':
+            order['checkout_session_id'] = receipt['checkout_session_id'] = receipt['checkout']['id'] = receipt['payment']['checkout_session_id'] = 'other_checkout'
+        elif change in ('amount', 'currency'):
+            key, value = ('amount_minor', 1300) if change == 'amount' else ('currency', 'EUR')
+            order[key] = receipt['payment'][key] = value
+        elif change == 'product':
+            order['expected_product_id'] = receipt['ownership']['expected_product_id'] = 'other_product'
+            receipt['payment']['metadata']['product_id'] = 'other_product'
+            receipt['payment']['product_cart'][0]['product_id'] = 'other_product'
+        elif change == 'customer':
+            order['customer_id'] = receipt['payment']['customer_id'] = 'other_customer'
+    target, observed, fixture, calls, reads = identity_fixture(monkeypatch, records, mismatch_reads=0,
+        provider_error_reads=1, after_first=replace)
+    result = await target.frame_context(observed, {'id': 'r', 'revision': 'rev'}, fixture)
+    assert result['approved'] is False and len(reads) == 2 and len(calls) == 6
+    assert result['identity_diagnostics']['reads'][-1]['first_failed_predicate'] == 'same_identity_across_convergence_reads'
+
+
+async def test_ordinary_provider_error_denies_without_retry(monkeypatch, records):
+    target, observed, fixture, calls, reads = identity_fixture(monkeypatch, records,
+        mismatch_reads=0, provider_error_reads=1)
+    observed.pop('identity_stage')
+    result = await target.frame_context(observed, {'id': 'r', 'revision': 'rev'}, fixture)
+    assert result['approved'] is False and len(reads) == 1 and len(calls) == 3
+
+
+async def test_provider_read_recovery_cannot_change_captured_observed_payment(monkeypatch, records):
+    def change_observation(*_):
+        observed['payment_id'] = 'changed_observed_payment'
+    target, observed, fixture, calls, reads = identity_fixture(monkeypatch, records,
+        mismatch_reads=0, provider_error_reads=1, after_first=change_observation)
+    result = await target.frame_context(observed, {'id': 'r', 'revision': 'rev'}, fixture)
+    assert result['approved'] is False and len(reads) == 2 and len(calls) == 6
+    assert result['identity_diagnostics']['reads'][-1]['first_failed_predicate'] == 'exact_observed_payment'
+
+
+async def test_provider_read_retry_remains_inside_existing_capture_deadline(monkeypatch, records):
+    target, observed, fixture, calls, _ = identity_fixture(monkeypatch, records,
+        mismatch_reads=0, provider_error_reads=1)
+    real_timeout = asyncio.timeout
+    monkeypatch.setattr(asyncio, 'timeout', lambda _: real_timeout(0.02))
+    with pytest.raises(TimeoutError) as raised:
+        await target.frame_context(observed, {'id': 'r', 'revision': 'rev'}, fixture)
+    assert len(calls) == 3
+    assert raised.value.identity_diagnostics['retry_bound_exhausted'] is True

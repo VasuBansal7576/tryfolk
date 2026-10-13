@@ -16,7 +16,8 @@ def stale(data=None):
 @pytest.mark.parametrize('change',[{'same_url':False},{'same_generation':False},{'executed':True},
     {'executed':0},{'nonfinancial':False},{'field':'card_number'},{'extra':'foreign'}])
 def test_only_closed_same_document_nonfinancial_unexecuted_signal_can_retry(change):
-    error=stale();error.sdk_data.update(change)
+    error=stale()
+    error.sdk_data.update(change)
     action={'method':'fill','_tryfolk':{'field':'address'}}
     assert not FreshActionRetry().allow(error,action)
 
@@ -38,11 +39,18 @@ async def test_real_journey_reobserves_reselects_and_executes_only_fresh_replace
     url='https://test.checkout.dodopayments.com/session-fixture'
     control={'present':True,'visible':True,'disabled':False,'tag':'INPUT','type':'text','label':'Street address','autocomplete':'address-line1','value':''}
     actions=[policy.bind({'selector':selector,'method':'fill','description':'Address'},control,url) for selector in ('#old','#replacement')]
-    requests=[];executed=[];closed=[];events=[]
+    requests=[]
+    executed=[]
+    closed=[]
+    events=[]
     class SDK:
-        def __init__(self,name,*args,**kwargs):self.name=name;self.process=SimpleNamespace(returncode=None);self.observed=0
+        def __init__(self,name,*args,**kwargs):
+            self.name=name
+            self.process=SimpleNamespace(returncode=None)
+            self.observed=0
         async def request(self,data,timeout=180):
-            op=data['op'];requests.append((self.name,op))
+            op=data['op']
+            requests.append((self.name,op))
             if self.name=='tinytroupe':
                 if op=='decide':
                     choices=data['observation']['actions']
@@ -55,23 +63,29 @@ async def test_real_journey_reobserves_reselects_and_executes_only_fresh_replace
             if op=='act':
                 if data['action']['selector']=='#old':
                     error=stale()
-                    if change:error.sdk_data.update(change)
+                    if change:
+                        error.sdk_data.update(change)
                     raise error
                 executed.append(data['action'])
                 return {'data':{'success':True}}
             return {}
-        async def close(self):closed.append(self.name);self.process.returncode=0
+        async def close(self):
+            closed.append(self.name)
+            self.process.returncode=0
     monkeypatch.setattr(module,'SDKProcess',SDK)
     runtime=Runtime(SimpleNamespace())
     async def provision(*args):return {'login_url':'http://127.0.0.1:3301/target/login','account_id':'fixture-account'}
     async def revision(*args):return {}
     async def verify(*args):return {'outcome':'pending','measured':False}
     async def emit(kind,data,persona):events.append((kind,data))
-    runtime.provision=provision;runtime.check_revision=revision;runtime.verification=verify
+    runtime.provision=provision
+    runtime.check_revision=revision
+    runtime.verification=verify
     run={'id':'fixture-run','provider':'dodo','preview_url':'http://127.0.0.1:3301','revision':'fixture-rev'}
     persona={'id':'fixture-persona','conditions':{},'initial_snapshot':{},'profile':{}}
     if change:
-        with pytest.raises(RuntimeError):await runtime.journey(run,persona,lambda:False,emit)
+        with pytest.raises(RuntimeError):
+            await runtime.journey(run,persona,lambda:False,emit)
         assert executed==[] and requests.count(('stagehand','observe'))==1
     else:
         result=await runtime.journey(run,persona,lambda:False,emit)

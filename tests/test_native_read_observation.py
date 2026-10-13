@@ -188,3 +188,24 @@ async def test_generation_change_after_executed_card_stops_before_any_read_retry
             stop_on_change=True,
         )
     assert len(reads) == 1
+
+
+@pytest.mark.parametrize("missing", [False, True])
+async def test_failed_read_cannot_hide_generation_change_after_executed_card(missing):
+    from tryfolk.native_read_observation import NativeControlMissing
+
+    states, reads, events = iter([state(1), state(2)]), [], []
+
+    async def current():
+        return next(states)
+
+    async def failed_read():
+        reads.append(True)
+        error = NativeControlMissing("private missing candidate") if missing else TimeoutError("private timeout")
+        error.control_observation = {"operation": "stagehand_visibility"}
+        raise error
+
+    with pytest.raises(NativeObservationGate, match="native_changed_after_executed_card"):
+        await read_current_native_controls(failed_read, current,
+            deadline=asyncio.get_running_loop().time()+1, on_event=events.append, stop_on_change=True)
+    assert len(reads) == 1 and "private" not in json.dumps(events)

@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime, timedelta, timezone
 import secrets
 import os
+import json
 from pathlib import Path
 
 from .config import Settings
@@ -172,13 +173,42 @@ def create_app(settings=None, *, checkpoint_transport=None):
                 "detail": "CLI 0.11.4 enabled locally; protected hooks retained. Real transcript attach/checkpoint verification required.",
             },
             "neatlogs": {
-                "status": "processing",
-                "detail": "Real doctor trace visible, backend processing; finalization/readback not yet verified.",
+                "status": "pending",
+                "detail": "Real workflow trace delivery and finalized readback have not been verified.",
             },
         }
         manifest = Path("runtime/integration-readiness.json")
         if manifest.exists():
             integrations.update(__import__("json").loads(manifest.read_text())["integrations"])
+        from .budget import load_plan
+
+        try:
+            cfo_plan = load_plan(service.settings.cfo_plan_path)
+        except (ValueError, TypeError, KeyError, OSError):
+            cfo_plan = None
+        if cfo_plan:
+            integrations["cfo"] = {
+                "status": "configured",
+                "detail": "Inspected native CFO forecast imported. The local quote reserves both passes; this does not accept or fund the native draft.",
+                "source_url": cfo_plan["source_url"],
+            }
+        dodo_targets = [target for target in service.settings.targets if target.provider == "dodo"]
+        if dodo_targets:
+            provider_ready = any(target.execution_ready and not target.setup_gates for target in dodo_targets)
+            integrations["dodo"] = {
+                "status": "configured" if provider_ready else "pending",
+                "detail": "Registered owned Test Mode target. Checkout, payment, entitlement and file access require bound live validation."
+                if not provider_ready else "Owned Test Mode target has credential-backed runtime validation; inspect each journey's independent payment and access evidence.",
+            }
+        from .telemetry import neatlogs_key
+
+        configured = bool(neatlogs_key())
+        integrations["neatlogs"] = {
+            "status": "pending" if configured else "blocked",
+            "configured": configured,
+            "detail": "Project credential configured. Inspect each run's trace receipts and authenticated readback."
+            if configured else "Configure NEATLOGS_API_KEY or TRYFOLK_NEATLOGS_ENV before sending real traces.",
+        }
         return {
             "integrations": integrations,
             "gates": list(service.settings.gates),
@@ -207,6 +237,15 @@ def create_app(settings=None, *, checkpoint_transport=None):
     def baseline_retry_quote(run_id: str, body: CheckpointAccessRequest, request: Request):
         return service.baseline_retry_quote(run_id, credential(request))
 
+    @app.post("/runs/{run_id}/after-retry/quote")
+    def after_retry_quote(run_id: str, body: CheckpointAccessRequest, request: Request):
+        return service.after_retry_quote(run_id, credential(request))
+
+    @app.post("/runs/{run_id}/after-retry", status_code=201)
+    def after_retry(run_id: str, body: BaselineRetryRequest, request: Request,
+                    idempotency_key: str = Header(min_length=1, max_length=200)):
+        return service.after_retry(run_id, body.quote_id, idempotency_key, credential(request))
+
     @app.post("/runs/{run_id}/baseline-retry", status_code=201)
     def baseline_retry(
         run_id: str,
@@ -232,6 +271,117 @@ def create_app(settings=None, *, checkpoint_transport=None):
                 path=f"/runs/{run_id}/evidence",
             )
         return result
+
+    def owned_traces(run_id, token):
+        from .trace_policy import HEX_ID
+        from .telemetry import viewer_url
+        from urllib.parse import urlparse
+
+        with service.store.transaction() as db:
+            service.authorize(db, run_id, token)
+            events = db.execute(
+                "SELECT persona_id,trace_url FROM events WHERE run_id=? AND trace_url IS NOT NULL ORDER BY id",
+                (run_id,),
+            ).fetchall()
+        root = Path(os.environ.get("TRYFOLK_EVIDENCE_ROOT", "runtime/evidence"))
+        traces = {}
+        for persona_id, url in events:
+            trace_id = urlparse(url).path.rsplit("/", 1)[-1]
+            if not HEX_ID.fullmatch(trace_id) or trace_id in traces:
+                continue
+            receipt_path = root / f"{run_id}-{trace_id}-trace.json"
+            receipt = json.loads(receipt_path.read_text()) if receipt_path.is_file() else {}
+            traces[trace_id] = {
+                "trace_id": trace_id, "persona_id": receipt.get("persona_id", persona_id),
+                "viewer_url": viewer_url(trace_id),
+                "delivery_flushed": receipt.get("delivery_flushed") is True,
+                "finalized_readback": receipt.get("finalized_readback", "not_verified"),
+                "readback_url": f"/runs/{run_id}/traces/{trace_id}",
+                "payload_gates": receipt.get("payload_gates", []),
+            }
+        return traces
+
+    def recorded_incidents(run_id, traces):
+        """Expose only explicit, bounded official incident observations for this run."""
+        from .trace_policy import HEX_ID
+        from urllib.parse import urlparse
+        from uuid import UUID
+
+        if not HEX_ID.fullmatch(run_id):
+            return []
+        path = Path(os.environ.get("TRYFOLK_EVIDENCE_ROOT", "runtime/evidence")) / (
+            run_id + "-neatlogs-incident.json"
+        )
+        try:
+            if not path.is_file() or path.stat().st_size > 100_000:
+                return []
+            item = json.loads(path.read_text())
+            if not isinstance(item, dict) or item.get("run_id") != run_id:
+                return []
+            incident_id = str(UUID(item.get("incident_id", "")))
+            url = item.get("viewer_url", "")
+            if not isinstance(url, str) or len(url) > 2000:
+                return []
+            parsed = urlparse(url)
+            if (parsed.scheme != "https" or parsed.netloc != "app.neatlogs.com"
+                    or incident_id not in (parsed.path + "?" + parsed.query)):
+                return []
+            if item.get("source") != "official_neatlogs_ui":
+                return []
+            scope = item.get("scope")
+            if scope not in {"current_run", "prior_supporting_incident"}:
+                return []
+            trace_ids = item.get("trace_ids")
+            if (not isinstance(trace_ids, list) or not 1 <= len(trace_ids) <= 64
+                    or any(not isinstance(value, str) or not HEX_ID.fullmatch(value) for value in trace_ids)):
+                return []
+            if scope == "current_run" and not set(trace_ids).issubset(traces):
+                return []
+            if any(not isinstance(item.get(key), str) or not 0 < len(item[key]) <= 100
+                   for key in ("status", "observed_at")):
+                return []
+        except (OSError, ValueError, TypeError, AttributeError):
+            return []
+        result = {key: item[key] for key in (
+            "run_id", "source", "incident_id", "status", "scope", "viewer_url", "trace_ids", "observed_at",
+        )}
+        if scope == "current_run":
+            with service.store.transaction() as db:
+                result["provider"] = service.store.load(db, "runs", run_id)["provider"]
+        elif item.get("provider") in {"local-fixture", "dodo"}:
+            result["provider"] = item["provider"]
+        else:
+            return []
+        for key in ("title", "evidence"):
+            if isinstance(item.get(key), str) and len(item[key]) <= 2000:
+                result[key] = item[key]
+        # This is observed vendor state, never an inference from a local failure or repair.
+        evidence = item.get("resolution_evidence")
+        if isinstance(evidence, str) and len(evidence) <= 2000:
+            result["resolution_evidence"] = evidence
+        return [result]
+
+    @app.get("/runs/{run_id}/traces")
+    def trace_receipts(run_id: str, request: Request):
+        traces = owned_traces(run_id, credential(request))
+        return JSONResponse({
+            "run_id": run_id, "traces": list(traces.values()),
+            "incidents": recorded_incidents(run_id, traces),
+        }, headers={"Cache-Control": "private, no-store"})
+
+    @app.get("/runs/{run_id}/traces/{trace_id}")
+    async def inspect_trace(run_id: str, trace_id: str, request: Request):
+        traces = owned_traces(run_id, credential(request))
+        if trace_id not in traces:
+            raise DomainError(404, "trace_missing", "No recorded Neatlogs trace for this run.")
+        from .telemetry import read_trace
+
+        result = await read_trace(run_id, trace_id)
+        result["incidents"] = [
+            item for item in recorded_incidents(run_id, traces)
+            if item["scope"] == "current_run" and trace_id in item["trace_ids"]
+        ]
+        return JSONResponse(result, headers={"Cache-Control": "private, no-store"})
 
     @app.get("/runs/{run_id}/evidence/{filename}")
     def screenshot(run_id: str, filename: str, request: Request):

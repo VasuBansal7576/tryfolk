@@ -64,7 +64,7 @@ class Worker:
             telemetry = getattr(self.io, "telemetry", None)
             if telemetry:
                 telemetry.event(kind, data, persona_id)
-                trace_url = trace_url or telemetry.url
+                trace_url = trace_url or telemetry.persona_url(persona_id) or telemetry.url
             with self.store.transaction() as db:
                 db.execute(
                     "INSERT INTO events(run_id,persona_id,kind,created_at,data,trace_url) VALUES (?,?,?,?,?,?)",
@@ -188,7 +188,23 @@ class Worker:
             from .scenarios import validate_population
 
             validate_population(population, run.get("scenario_plan"))
-            if hasattr(self.io, "known_replay"):
+            if run.get("after_retry_of_run_id"):
+                from .after_retry import validate_reuse
+                with self.store.transaction() as db:
+                    proof = validate_reuse(self.service, db, run, population)
+                await emit("known_replay_reused", {
+                    "source_run_id": proof["source_run_id"], "trace_id": proof["trace_id"],
+                    "original_events": proof["events"],
+                    "recorded_at": proof["completed_diagnostic_recorded_at"],
+                    "reused": True, "new_diagnostic_execution": False,
+                    "not_in_population_denominator": True,
+                })
+                await emit("held_out_checks", {
+                    "cases": proof["held_out_cases"], "reused": True,
+                    "source_run_id": proof["source_run_id"], "recorded_at": proof["held_out_recorded_at"],
+                    "not_in_population_denominator": True, "no_additional_provider_checkout": True,
+                })
+            elif hasattr(self.io, "known_replay"):
                 if not run.get("known_replay_allowance_consumed"):
                     self.debit(run_id, self.estimate(run, "known_replay_microusd", 10_000))
                     with self.store.transaction() as db:
@@ -209,7 +225,13 @@ class Worker:
                     run, f"{run['pass']}_per_persona_microusd", self.service.settings.per_persona_microusd
                 ),
             )
-            return await self.io.journey(run, persona, lambda: self.cancelled(run_id), emit)
+            telemetry = getattr(self.io, "telemetry", None)
+            with telemetry.persona(persona["id"]) if telemetry else nullcontext():
+                result = await self.io.journey(run, persona, lambda: self.cancelled(run_id), emit)
+                # Keep the independently observed verification inside this persona's
+                # active trace, before its root ends and the SDK finalizes it.
+                await emit("verification", result, persona["id"])
+                return result
 
         async def persist_persona(job, result):
             persona = job["persona"]
@@ -234,7 +256,6 @@ class Worker:
                     db.execute(
                         "INSERT INTO findings VALUES (?,?,?)", (finding["id"], run_id, json.dumps(finding))
                     )
-            await emit("verification", result, persona["id"])
         from .bulk_policy import bounded_journeys
 
         try:
@@ -265,7 +286,8 @@ class Worker:
                     "same_personas": True,
                     "before_counts": b["counts"],
                     "after_counts": a["counts"],
-                    "known_failure_replay": "recorded" if hasattr(self.io, "known_replay") else "not_run",
+                    "known_failure_replay": "reused_recorded" if run.get("known_replay_reused") else
+                    "recorded" if hasattr(self.io, "known_replay") else "not_run",
                     "total_spent_microusd": a["budget"]["spent_microusd"],
                     "unused_microusd": a["budget"]["unused_microusd"],
                 }

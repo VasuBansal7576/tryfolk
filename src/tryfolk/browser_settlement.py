@@ -32,7 +32,7 @@ DOCUMENT_STATE = r"""(() => {const controls=[...document.querySelectorAll('butto
   el.getClientRects().length && getComputedStyle(el).visibility!=='hidden' && el.innerText.trim()==='Test Mode'),
  visible_controls:controls.length,
  busy:controls.some(el=>el.getAttribute('aria-busy')==='true' ||
-  (el.tagName==='BUTTON' && (el.disabled || el.getAttribute('aria-disabled')==='true') && /^(processing|loading|please wait)\b/i.test(el.innerText.trim()))),
+  (el.tagName==='BUTTON' && (el.disabled || el.getAttribute('aria-disabled')==='true') && /^(processing|loading|please wait|confirming purchase)\b/i.test(el.innerText.trim()))),
  error_signature:JSON.stringify([...document.querySelectorAll('[role=alert],[aria-live=assertive]')]
   .filter(el=>el.getClientRects().length && getComputedStyle(el).visibility!=='hidden' && el.innerText.trim())
   .map(el=>el.innerText.trim().slice(0,1000))),
@@ -145,6 +145,9 @@ async def settle(page, policy, action, *, timeout=10, previous_document=None):
                 and document.get("ready_state") in ("interactive", "complete")
                 and document.get("visible_controls", 0) > 0
                 and (not transition or not document.get("busy"))
+                # A disabled Confirm button is an in-progress UI change, not
+                # completion of the owned app reconciliation POST.
+                and (not owned_confirm or status_changed(document))
                 and (
                     not transition
                     or not previous_document

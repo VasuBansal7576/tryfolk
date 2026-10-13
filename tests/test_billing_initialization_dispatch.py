@@ -21,7 +21,7 @@ def observation_initialization():
                 if isinstance(n, ast.AsyncFunctionDef) and n.name == "infer")
     wrapper = ast.parse("async def initialize(page, policy, billing_initialized_binding, guard):\n    return billing_initialized_binding\n")
     wrapper.body[0].body = branch.body[:stop] + wrapper.body[0].body
-    namespace = {"asyncio": asyncio, "DOCUMENT_STATE": DOCUMENT_STATE,
+    namespace = {"op": "observe", "asyncio": asyncio, "DOCUMENT_STATE": DOCUMENT_STATE,
                  "exact_origin": exact_origin, "DODO_CHECKOUT": DODO_CHECKOUT,
                  "wait_for_billing_initialization": wait_for_billing_initialization}
     exec(compile(ast.fix_missing_locations(wrapper), str(source), "exec"), namespace)

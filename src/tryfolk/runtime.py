@@ -8,11 +8,14 @@ import time
 from pathlib import Path
 import httpx
 from .codex_bridge import clean_env
-from .process import SDKProcess, PersonaChannel, BrowserLease, ROOT
+from .process import SDKProcess, PersonaPool, BrowserLease, ROOT
 from .verification import Payment, Entitlement, verify
 from .worker import Cancelled
 from .browser_policy import BrowserPolicy
 from .decisions import validated_action
+
+NATIVE_PAY_START_SPACING_SECONDS = 0
+HOSTED_CHECKOUT_QUEUE_TIMEOUT_SECONDS = 300
 
 
 class FreshActionRetry:
@@ -89,10 +92,16 @@ class Runtime:
         self.bulk_minds = {}
         self.browser_pools = {}
         self.browser_hosts = {}
+        self.native_pay_permits = {}
+        self.hosted_checkout_permits = {}
+        self.native_pay_started = {}
+        self.native_pay_clock = time.monotonic
 
     def bulk_mind(self, run_id):
         if run_id not in self.bulk_minds:
-            self.bulk_minds[run_id] = SDKProcess("tinytroupe", lambda: self.cancelled(run_id), evidence_root=self.evidence)
+            self.bulk_minds[run_id] = PersonaPool(
+                self.journey_concurrency, run_id, lambda: self.cancelled(run_id), evidence_root=self.evidence,
+            )
         return self.bulk_minds[run_id]
 
     async def lease_browser(self, run_id, cancelled, frame_verify):
@@ -118,6 +127,10 @@ class Runtime:
         return BrowserLease(host, release)
 
     async def close_run(self, run_id):
+        for mapping in (self.native_pay_permits, self.hosted_checkout_permits, self.native_pay_started):
+            for key in tuple(mapping):
+                if key == run_id or (isinstance(key, tuple) and key[0] == run_id):
+                    mapping.pop(key, None)
         mind = self.bulk_minds.pop(run_id, None)
         if mind:
             await mind.close()
@@ -219,10 +232,12 @@ class Runtime:
         raise RuntimeError("Browser Use produced no observed AppBrief.")
 
     async def generate(self, brief, count):
-        if self.bulk_execution and brief.get("provider") == "dodo":
-            if not brief.get("generation_plan"):
-                raise RuntimeError("Bulk Dodo generation requires exact accepted licensed seed/case assignments.")
-            mind = self.bulk_mind(self.active_run_id)
+        if self.bulk_execution and brief.get("provider") == "dodo" and brief.get("generation_plan"):
+            # Generation has no active journey memory and must not occupy one of
+            # the independently leased decision lanes.
+            mind = SDKProcess(
+                "tinytroupe", lambda: self.cancelled(self.active_run_id), evidence_root=self.evidence,
+            )
             population = []
             try:
                 index, capacity = 0, 64
@@ -255,15 +270,38 @@ class Runtime:
                         db.execute("UPDATE populations SET payload=? WHERE id=?",
                                    (json.dumps(population), run["population_id"]))
                 return population
-            except BaseException:
-                await self.close_run(self.active_run_id)
-                raise
+            finally:
+                await mind.close()
         persona = SDKProcess("tinytroupe", lambda: self.cancelled(self.active_run_id), evidence_root=self.evidence)
         try:
             value = await persona.request(
                 {"op": "generate", "brief": brief, "count": count}, timeout=180 * count
             )
-            return value["population"]
+            population = value["population"]
+            if self.bulk_execution and brief.get("provider") == "dodo":
+                from copy import deepcopy
+                from .bulk_personas import validated_purchase_plan
+
+                original = deepcopy(population)
+                value = await persona.request(
+                    {"op": "prepare_intents", "brief": brief, "population": population},
+                    timeout=max(180, 60 * count),
+                )
+                population = value["population"]
+                if len(population) != count or len(original) != count:
+                    raise RuntimeError("Intention preparation cannot reduce the requested population.")
+                for before, prepared in zip(original, population, strict=True):
+                    if any(prepared.get(key) != before.get(key) for key in
+                           ("id", "index", "name", "profile", "conditions")):
+                        raise RuntimeError("Intention preparation must preserve each exact generated customer.")
+                    memory = before.get("initial_semantic_memory")
+                    prepared_memory = prepared.get("initial_semantic_memory")
+                    if (not isinstance(memory, list) or not isinstance(prepared_memory, list)
+                            or prepared_memory[:len(memory)] != memory
+                            or not prepared.get("initial_snapshot")):
+                        raise RuntimeError("Intention preparation must retain original memory in a real initial snapshot.")
+                    validated_purchase_plan(prepared)
+            return population
         finally:
             await persona.close()
 
@@ -356,7 +394,7 @@ class Runtime:
             from .bulk_personas import validated_purchase_plan
 
             plan = validated_purchase_plan(persona)
-            mind = PersonaChannel(self.bulk_mind(run["id"]), run["id"], persona["id"])
+            mind = await self.bulk_mind(run["id"]).acquire(persona["id"])
             browser = await self.lease_browser(run["id"], cancelled, frame_verify)
         else:
             browser = SDKProcess(
@@ -371,6 +409,20 @@ class Runtime:
         mind_initialized = False
         scenario_binding = None
         condition_emitted = False
+        pay_permit = None
+        hosted_permit = None
+        hosted_started = False
+
+        async def release_hosted_permit(result):
+            nonlocal hosted_permit
+            lease, hosted_permit = hosted_permit, None
+            await self.release_hosted_checkout(lease, result, emit, persona["id"])
+
+        async def release_pay_permit(result):
+            nonlocal pay_permit
+            lease, pay_permit = pay_permit, None
+            await self.release_native_admission(lease, result, emit, persona["id"])
+
         try:
             # Separate SDK processes can initialize together. No observation or
             # decision proceeds until the complete saved memory and browser are ready.
@@ -419,6 +471,7 @@ class Runtime:
                     persona["id"],
                 )
             if bulk:
+                self.telemetry.bind_purchase_persona(persona)
                 await emit("conditional_purchase_plan", {
                     "plan": plan,
                     "execution": "disclosed deterministic Stagehand controls; unexpected state uses TinyPerson",
@@ -430,8 +483,39 @@ class Runtime:
                 await self.check_revision(run)
                 if fresh_retry is None:
                     fresh_retry = FreshActionRetry()
+                if (run["provider"] == "dodo" and pay_permit is None
+                        and not any(a.get("_tryfolk", {}).get("kind") == "pay" for a in actions_executed)
+                        and {"card_number", "card_expiry", "card_cvc"}.issubset({
+                            a.get("_tryfolk", {}).get("field") for a in actions_executed
+                        })):
+                    # Shared native Continue/Pay admission remains separate from
+                    # the hosted resource queue and its fresh action deadline.
+                    # Continue/Pay admission waits before fresh observe/select.
+                    pay_permit = await self.acquire_native_admission(run["id"], "pay", fresh_retry, emit, persona["id"])
+                    if cancelled():
+                        raise Cancelled()
                 observation = await browser.request({"op": "observe_native" if bulk else "observe"},
                     timeout=fresh_retry.remaining())
+                if (run["provider"] == "dodo" and hosted_permit is None
+                        and any(a.get("_tryfolk", {}).get("kind") == "purchase" for a in observation["actions"])):
+                    # Own only the hosted navigation-to-return window. All saved
+                    # minds/browsers initialize on the owned app concurrently.
+                    # No selection or stale control crosses the permit wait.
+                    hosted_permit = await self.acquire_hosted_checkout(run["id"], emit, persona["id"])
+                    if cancelled():
+                        raise Cancelled()
+                    # Resource admission carried no selected action. Start the
+                    # unchanged action deadline only now, then observe afresh.
+                    fresh_retry = FreshActionRetry()
+                    observation = await browser.request({"op": "observe_native" if bulk else "observe"}, timeout=fresh_retry.remaining())
+                if (run["provider"] == "dodo" and pay_permit is None
+                        and any(a.get("_tryfolk", {}).get("kind") == "billing_continue" for a in observation["actions"])):
+                    # This first observation discovers a boundary, not a selected
+                    # action. Discard it, wait, then observe and decide afresh.
+                    pay_permit = await self.acquire_native_admission(run["id"], "billing_continue", fresh_retry, emit, persona["id"])
+                    if cancelled():
+                        raise Cancelled()
+                    observation = await browser.request({"op": "observe_native" if bulk else "observe"}, timeout=fresh_retry.remaining())
                 policy.check_url(observation["url"])
                 observed_actions = observation.pop("actions")
                 actions = [
@@ -490,15 +574,36 @@ class Runtime:
                 policy.validate(action, observation["url"])
                 if not fresh_retry.accepts_replacement(action, observation.get("document")):
                     raise RuntimeError("Fresh inner manual choice must match the original document; no action executed.")
+                boundary_kind = action.get("_tryfolk", {}).get("kind")
+                if run["provider"] == "dodo" and boundary_kind == "purchase" and hosted_permit is None:
+                    raise RuntimeError("Hosted checkout requires admission before a fresh observation; no action executed.")
+                if hosted_permit is not None and not hosted_started and boundary_kind != "purchase":
+                    await release_hosted_permit("unused")
+                is_native_boundary = run["provider"] == "dodo" and boundary_kind in ("pay", "billing_continue")
+                if is_native_boundary and (pay_permit is None or pay_permit["boundary_kind"] != boundary_kind):
+                    raise RuntimeError("Native boundary requires admission before a fresh observation; no action executed.")
+                if pay_permit is not None and not is_native_boundary:
+                    await release_pay_permit("unused")
+                settled = False
                 try:
-                    result = await browser.request({"op": "act", "action": action},
-                        timeout=fresh_retry.remaining())
+                    if run["provider"] == "dodo" and boundary_kind == "purchase":
+                        hosted_started = True
+                    if is_native_boundary:
+                        self.native_pay_started[(run["id"], persona["id"])] = self.native_pay_clock()
+                    result = await browser.request({"op": "act", "action": action}, timeout=fresh_retry.remaining())
+                    settled = (result.get("settlement", {}).get("url", "").split("?", 1)[0] == policy.origin + "/checkout/return"
+                               if boundary_kind == "pay" else result.get("success", result.get("data", {}).get("success", True)) is True)
                 except RuntimeError as error:
                     if run["provider"] == "dodo" and fresh_retry.allow(error, action, observation.get("document")):
-                        # The adapter cleared its stale action list. Return to a
-                        # new observation and selection; never resend old action.
                         continue
                     raise
+                finally:
+                    if is_native_boundary:
+                        interrupted = cancelled() or asyncio.current_task().cancelling() > 0
+                        await release_pay_permit("cancelled" if interrupted else
+                            ("owned_return_settled" if boundary_kind == "pay" else "billing_controls_settled") if settled else "failed")
+                        if boundary_kind == "pay" and settled:
+                            await release_hosted_permit("owned_return_settled")
                 fresh_retry = None
                 if not result.get("success", result.get("data", {}).get("success", True)):
                     raise RuntimeError("Stagehand reported browser action failure; no payment assumption.")
@@ -562,14 +667,47 @@ class Runtime:
             raise
         finally:
             try:
+                interrupted = cancelled() or asyncio.current_task().cancelling() > 0
+                await release_pay_permit("cancelled" if interrupted else "unused")
+                await release_hosted_permit("cancelled" if interrupted else "failed" if hosted_started else "unused")
                 if mind_initialized and not cancelled() and mind.process and mind.process.returncode is None:
                     snapshot = await mind.request({"op": "snapshot"})
                     await emit("persona_memory", snapshot, persona["id"])
             finally:
                 try:
-                    await browser.close()
+                    interrupted = cancelled() or asyncio.current_task().cancelling() > 0
+                    await release_hosted_permit("cancelled" if interrupted else "failed" if hosted_started else "unused")
                 finally:
-                    await mind.close()
+                    try:
+                        await browser.close()
+                    finally:
+                        await mind.close()
+
+    async def acquire_hosted_checkout(self, run_id, emit, persona_id):
+        permit = self.hosted_checkout_permits.setdefault((run_id, persona_id), asyncio.Lock())
+        waiting_at = time.monotonic()
+        common = {"capacity": 1, "ownership_scope": "persona", "queue_bound_ms": int(HOSTED_CHECKOUT_QUEUE_TIMEOUT_SECONDS * 1000),
+                  "payment_outcome_inferred": False}
+        await emit("hosted_checkout_admission", {**common, "phase": "wait"}, persona_id)
+        await asyncio.wait_for(permit.acquire(), HOSTED_CHECKOUT_QUEUE_TIMEOUT_SECONDS)
+        lease = {"permit": permit, "entered_at": time.monotonic()}
+        try:
+            await emit("hosted_checkout_admission", {**common, "phase": "enter",
+                       "wait_ms": int((time.monotonic() - waiting_at) * 1000)}, persona_id)
+            return lease
+        except BaseException:
+            await self.release_hosted_checkout(lease, "cancelled" if asyncio.current_task().cancelling() else "failed", emit, persona_id)
+            raise
+
+    async def release_hosted_checkout(self, lease, result, emit, persona_id):
+        if lease is None or lease.get("released"):
+            return
+        lease["released"] = True
+        lease["permit"].release()
+        await emit("hosted_checkout_admission", {"phase": "exit", "result": result, "capacity": 1, "ownership_scope": "persona",
+                   "queue_bound_ms": int(HOSTED_CHECKOUT_QUEUE_TIMEOUT_SECONDS * 1000),
+                   "duration_ms": int((time.monotonic() - lease["entered_at"]) * 1000),
+                   "payment_outcome_inferred": False}, persona_id)
 
     async def repair(self, run, emit):
         from .repair import repair_target
@@ -580,6 +718,42 @@ class Runtime:
         from .repair import recover_target
 
         await recover_target(self, run, emit)
+
+    async def acquire_native_admission(self, run_id, boundary_kind, retry, emit, persona_id):
+        if boundary_kind not in ("pay", "billing_continue"):
+            raise ValueError("Unsupported native admission boundary.")
+        permit = self.native_pay_permits.setdefault((run_id, persona_id), asyncio.Lock())
+        waiting_at = time.monotonic()
+        common = {"capacity": 1, "ownership_scope": "persona", "boundary_kind": boundary_kind,
+                  "configured_minimum_spacing_ms": int(NATIVE_PAY_START_SPACING_SECONDS * 1000),
+                  "spacing_basis": "independent_persona_worker", "payment_outcome_inferred": False}
+        await emit("native_pay_admission", {**common, "phase": "wait"}, persona_id)
+        await asyncio.wait_for(permit.acquire(), retry.remaining())
+        lease = {"permit": permit, "entered_at": time.monotonic(), "boundary_kind": boundary_kind}
+        try:
+            previous = self.native_pay_started.get((run_id, persona_id))
+            delay = max(0, previous + NATIVE_PAY_START_SPACING_SECONDS - self.native_pay_clock()) if previous is not None else 0
+            cooldown_at = time.monotonic()
+            if delay:
+                await asyncio.wait_for(asyncio.sleep(delay), retry.remaining())
+            lease["entered_at"] = time.monotonic()
+            await emit("native_pay_admission", {**common, "phase": "enter",
+                       "wait_ms": int((time.monotonic() - waiting_at) * 1000),
+                       "cooldown_ms": int((time.monotonic() - cooldown_at) * 1000)}, persona_id)
+            return lease
+        except BaseException:
+            await self.release_native_admission(lease, "cancelled" if asyncio.current_task().cancelling() else "failed", emit, persona_id)
+            raise
+
+    async def release_native_admission(self, lease, result, emit, persona_id):
+        if lease is None or lease.get("released"):
+            return
+        lease["released"] = True
+        lease["permit"].release()
+        await emit("native_pay_admission", {"phase": "exit", "result": result, "capacity": 1, "ownership_scope": "persona",
+                   "boundary_kind": lease["boundary_kind"],
+                   "duration_ms": int((time.monotonic() - lease["entered_at"]) * 1000),
+                   "payment_outcome_inferred": False}, persona_id)
 
     async def known_replay(self, run, population, emit):
         if run["provider"] == "dodo":

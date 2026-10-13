@@ -334,6 +334,19 @@ def allocated_plan():
     return plan
 
 
+def test_repeated_same_size_cohorts_keep_complete_pair_prices_and_additional_ceiling():
+    from tryfolk.budget import validate_plan
+    plan = allocated_plan()
+    allocation = plan["operator_allocation"]
+    allocation.update(cohorts=[{"persona_count": 4, "reserved_microusd": 264000}] * 2,
+                      additional_microusd=528000, lifetime_budget_microusd=1528000,
+                      quote_budget_microusd=264000)
+    assert validate_plan(plan)["operator_allocation"]["additional_microusd"] == 528000
+    allocation["additional_microusd"] -= 1
+    with pytest.raises(ValueError, match="lifetime ceiling"):
+        validate_plan(plan)
+
+
 def test_explicit_owner_allocation_retains_native_history_and_both_pass_prices(tmp_path):
     base = client_at(tmp_path / "runs.sqlite", budget=78_016_000)
     base = TestClient(create_app(replace(base.app.state.service.settings, max_personas=1000)))

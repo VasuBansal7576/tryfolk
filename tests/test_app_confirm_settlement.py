@@ -90,7 +90,8 @@ async def test_status_is_not_a_general_transition_or_readiness_bypass(condition)
 
 async def test_healthy_confirm_removing_button_keeps_existing_ready_path():
     result = await settle(
-        Page([BASE | {"control_signature": "only owned link", "visible_controls": 1}]),
+        Page([BASE | {"control_signature": "only owned link", "visible_controls": 1,
+                      "completion_status_sha256": SUPPRESSED}]),
         BrowserPolicy(ORIGIN, "dodo"),
         ACTION,
         previous_document=BASE,
@@ -122,3 +123,23 @@ process.stdout.write(JSON.stringify(eval(data.reader)));
         state=__import__('json').loads(output)
         assert state['completion_status_sha256']==expected
         assert 'private contact' not in output and PUBLIC_SUPPRESSED not in output
+
+
+async def test_changed_confirming_button_cannot_finish_before_owned_app_response():
+    # The real app changes the button to disabled 'Confirming purchase…'.
+    # This changed signature previously settled even with no public completion.
+    in_progress = BASE | {"control_signature": "disabled Confirming purchase and owned link"}
+    with pytest.raises(SettlementDeadline):
+        await settle(Page([in_progress]), BrowserPolicy(ORIGIN, "dodo"), ACTION,
+                     previous_document=BASE, timeout=.02)
+
+
+async def test_confirming_signature_is_discarded_until_source_bound_completion():
+    in_progress = BASE | {"control_signature": "disabled Confirming purchase and owned link"}
+    complete = BASE | {"control_signature": "only owned link", "visible_controls": 1,
+                       "completion_status_sha256": SUPPRESSED}
+    result = await settle(Page([in_progress, in_progress, complete, complete]),
+                          BrowserPolicy(ORIGIN, "dodo"), ACTION,
+                          previous_document=BASE, timeout=.2)
+    assert result["completion_status_sha256"] == SUPPRESSED
+    assert result["control_signature"] == "only owned link"

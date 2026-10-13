@@ -22,7 +22,8 @@ KINDS = frozenset({
     "discovery", "persona_initialized", "scenario_fixture", "observation", "decision",
     "browser_action", "scenario_payment_condition", "capability", "persona_memory", "verification",
     "repair", "known_replay_action", "known_replay_capability", "known_failure_replay",
-    "held_out_checks", "connection_recovery", "baseline_population_reused", "conditional_purchase_plan",
+    "held_out_checks", "connection_recovery", "baseline_population_reused", "conditional_purchase_plan", "known_replay_reused",
+    "native_pay_admission", "hosted_checkout_admission",
 })
 CLASSIFICATIONS = frozenset({
     "verification_unavailable", "correlation_mismatch", "payment_unsettled", "payment_and_entitlement",
@@ -126,6 +127,7 @@ class TracePolicy:
     def __init__(self, run, evidence_root=None):
         self.evidence_root = Path(evidence_root).resolve() if evidence_root else None
         self.context = {"policy": POLICY}
+        copy_bool(self.context, run, ("diagnostic", "not_in_population_denominator"))
         for key, field in (("run_id", "id"), ("population_id", "population_id")):
             if isinstance(run.get(field), str) and HEX_ID.fullmatch(run[field]):
                 self.context[key] = run[field]
@@ -156,11 +158,24 @@ class TracePolicy:
             }
         self._gates = set()
         self._lock = Lock()
+        self._persona_intents = {}
         assignments = mapping(run.get("scenario_plan")).get("assignments", [])
         self._scenario_hashes = {
             a["scenario_sha256"] for a in assignments if isinstance(a, dict)
             and isinstance(a.get("scenario_sha256"), str) and HASH.fullmatch(a["scenario_sha256"])
         } if isinstance(assignments, list) else set()
+
+    def bind_purchase_persona(self, persona):
+        """Bind an inferred intention to its saved persona, before emitting it."""
+        from .bulk_personas import validated_purchase_plan
+
+        plan = validated_purchase_plan(persona)
+        binding = (plan["profile_sha256"], plan["scenario_sha256"])
+        with self._lock:
+            previous = self._persona_intents.get(persona["id"])
+            if previous is not None and previous != binding:
+                raise ValueError("Saved persona intention binding changed within the run.")
+            self._persona_intents[persona["id"]] = binding
 
     @property
     def gates(self):
@@ -208,6 +223,28 @@ class TracePolicy:
             copy_enum(result, plan, "unexpected_state", {"reconsider", "abandon"})
             copy_enum(result, plan, "source", {"genuine_codex_batch_intent"})
             copy_bool(result, data, ("payment_outcome_inferred",))
+        elif kind == "hosted_checkout_admission":
+            copy_enum(result, data, "phase", {"wait", "enter", "exit"})
+            copy_enum(result, data, "result", {"owned_return_settled", "failed", "cancelled", "unused"})
+            if data.get("capacity") == 1 and type(data.get("capacity")) is int:
+                result["capacity"] = 1
+            copy_count(result, data, ("wait_ms", "duration_ms"))
+            copy_enum(result, data, "ownership_scope", {"persona"})
+            if type(data.get("queue_bound_ms")) is int and data["queue_bound_ms"] == 300_000:
+                result["queue_bound_ms"] = 300_000
+            if data.get("payment_outcome_inferred") is False:
+                result["payment_outcome_inferred"] = False
+        elif kind == "native_pay_admission":
+            copy_enum(result, data, "phase", {"wait", "enter", "exit"})
+            copy_enum(result, data, "result", {"owned_return_settled", "billing_controls_settled", "failed", "cancelled", "unused"})
+            copy_enum(result, data, "boundary_kind", {"pay", "billing_continue"})
+            if data.get("capacity") == 1 and type(data.get("capacity")) is int:
+                result["capacity"] = 1
+            copy_count(result, data, ("wait_ms", "duration_ms", "cooldown_ms", "configured_minimum_spacing_ms"))
+            copy_enum(result, data, "spacing_basis", {"conservative_experiment", "independent_persona_worker"})
+            copy_enum(result, data, "ownership_scope", {"persona"})
+            if data.get("payment_outcome_inferred") is False:
+                result["payment_outcome_inferred"] = False
         elif kind == "baseline_population_reused":
             copy_hashes(result, data, ("population_sha256",))
             copy_count(result, data, ("requested",))
@@ -293,6 +330,22 @@ class TracePolicy:
                 "additional_estimated_consumption_microusd", "measured_cash_microusd",
             ))
             list_count(result, data, "prior_gates", "prior_gate_count")
+        elif kind == "known_replay_reused":
+            for key in ("source_run_id", "trace_id"):
+                if isinstance(data.get(key), str) and HEX_ID.fullmatch(data[key]):
+                    result[key] = data[key]
+            copy_bool(result, data, ("reused", "new_diagnostic_execution", "not_in_population_denominator"))
+            list_count(result, data, "original_events", "original_event_count")
+            original = []
+            for item in data.get("original_events", []) if isinstance(data.get("original_events"), list) else []:
+                item = mapping(item)
+                safe = {}
+                copy_count(safe, item, ("event_id",))
+                copy_hashes(safe, item, ("payload_sha256",))
+                copy_enum(safe, item, "kind", {"known_replay_capability", "known_failure_replay", "held_out_checks"})
+                if safe:
+                    original.append(safe)
+            result["original_events"] = original[:3]
         elif kind == "held_out_checks":
             cases = []
             allowed = {"unpaid_access_denied", "duplicate_payment_grants_once", "healthy_revision_control",
@@ -305,6 +358,14 @@ class TracePolicy:
                     cases.append(safe)
             result["cases"] = cases
             copy_bool(result, data, ("no_additional_provider_checkout",))
+            copy_bool(result, data, ("reused", "not_in_population_denominator"))
+            if isinstance(data.get("source_run_id"), str) and HEX_ID.fullmatch(data["source_run_id"]):
+                result["source_run_id"] = data["source_run_id"]
+        if kind in {"known_replay_reused", "held_out_checks"}:
+            recorded_at = data.get("recorded_at")
+            if isinstance(recorded_at, str) and re.fullmatch(
+                    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)", recorded_at):
+                result["recorded_at"] = recorded_at
         if kind in ("verification", "known_failure_replay"):
             for key, allowed in (("outcome", OUTCOMES), ("classification", CLASSIFICATIONS)):
                 copy_enum(result, data, key, allowed)
@@ -345,7 +406,7 @@ class TracePolicy:
                 "neatlogs.trace.complete": True, "neatlogs.internal": True,
                 "neatlogs.span.kind": "Neatlogs.INTERNAL",
             }
-        elif name == "tryfolk.persona_run" or name in {"tryfolk." + kind for kind in KINDS}:
+        elif name in {"tryfolk.persona_run", "tryfolk.persona_journey"} or name in {"tryfolk." + kind for kind in KINDS}:
             incoming = json_mapping(original.get("input.value"))
             identity = dict(self.context)
             persona = incoming.get("persona_id")
@@ -355,10 +416,14 @@ class TracePolicy:
             data = json_mapping(original.get("output.value"))
             if kind == "conditional_purchase_plan":
                 plan = mapping(data.get("plan"))
+                with self._lock:
+                    bound = self._persona_intents.get(identity.get("persona_id"))
+                bound_intent = bound == (plan.get("profile_sha256"), plan.get("scenario_sha256"))
                 if (
                     self.context.get("provider") != "dodo" or not identity.get("persona_id")
                     or plan.get("persona_id") != identity["persona_id"]
-                    or plan.get("scenario_sha256") not in self._scenario_hashes
+                    or (not bound_intent and plan.get("scenario_sha256") not in self._scenario_hashes)
+                    or (bound is not None and not bound_intent)
                     or not isinstance(plan.get("profile_sha256"), str) or not HASH.fullmatch(plan["profile_sha256"])
                     or plan.get("source") != "genuine_codex_batch_intent" or type(plan.get("purchase")) is not bool
                     or type(plan.get("max_steps")) is not int or not 1 <= plan["max_steps"] <= 48
@@ -380,7 +445,7 @@ class TracePolicy:
                     original["output.value"].encode()
                 ).hexdigest()
             attributes = {
-                "openinference.span.kind": "AGENT" if kind == "persona_run" else "TOOL"
+                "openinference.span.kind": "AGENT" if kind in {"persona_run", "persona_journey"} else "TOOL"
                 if kind in {"browser_action", "verification", "known_replay_action", "known_replay_capability"}
                 else "CHAIN",
                 "input.value": json.dumps(identity, sort_keys=True),

@@ -466,6 +466,47 @@ def conditional_plan_event():
     return run, event
 
 
+def ordinary_purchase_persona():
+    from tryfolk.scenarios import digest
+
+    profile = {"name": "Saved buyer", "description": POISON}
+    scenario = {"condition": "ordinary_purchase", "description": POISON}
+    _, event = conditional_plan_event()
+    event["plan"].update(profile_sha256=digest(profile), scenario_sha256=digest(scenario))
+    return {"id": "3" * 32, "profile": profile, "bulk_scenario_snapshot": scenario,
+            "purchase_plan": event["plan"]}, event
+
+
+def test_real_sdk_exports_ordinary_intent_bound_to_saved_persona(otlp, tmp_path):
+    persona, event = ordinary_purchase_persona()
+    telemetry = Telemetry()
+    with telemetry.run(RUN):
+        telemetry.bind_purchase_persona(persona)
+        telemetry.event("conditional_purchase_plan", event, persona["id"])
+    assert any(s.name == "tryfolk.conditional_purchase_plan" for s in spans(otlp))
+    assert POISON.encode() not in b"".join(data for data, _ in otlp)
+    receipt = json.loads(next(tmp_path.glob("*-trace.json")).read_text())
+    assert receipt["delivery_flushed"] is True
+
+
+@pytest.mark.parametrize("tamper", ["unbound", "profile", "scenario", "persona"])
+def test_real_sdk_drops_unbound_or_swapped_ordinary_intent(otlp, tmp_path, tamper):
+    persona, event = ordinary_purchase_persona()
+    telemetry = Telemetry()
+    with telemetry.run(RUN):
+        if tamper != "unbound":
+            telemetry.bind_purchase_persona(deepcopy(persona))
+        if tamper in {"profile", "scenario"}:
+            event["plan"][tamper + "_sha256"] = "e" * 64
+        if tamper == "persona":
+            event["plan"]["persona_id"] = "9" * 32
+        telemetry.event("conditional_purchase_plan", event, persona["id"])
+    assert not any(s.name == "tryfolk.conditional_purchase_plan" for s in spans(otlp))
+    receipt = json.loads(next(tmp_path.glob("*-trace.json")).read_text())
+    assert receipt["delivery_flushed"] is False
+    assert "conditional_plan_binding" in receipt["payload_gates"]
+
+
 def test_real_sdk_exports_closed_conditional_plan_without_rationale_or_payment_claim(otlp, tmp_path):
     run, event = conditional_plan_event()
     telemetry = Telemetry()

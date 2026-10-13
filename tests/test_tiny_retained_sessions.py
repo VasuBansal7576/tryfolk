@@ -89,7 +89,8 @@ def sdk_probe(count):
     assert all(r['ok'] for r in replies[:count])
     assert len({id(created[f'person-{i}'].episodic_memory) for i in range(count)})==count
     for offset,i,round_no in snapshots:
-        reply=replies[offset];assert reply['ok']
+        reply=replies[offset]
+        assert reply['ok']
         text=json.dumps(reply['data']['snapshot'])
         assert f'initial-person-{i}' in text and f'only-{i}-round-{round_no}' in text
         assert all(f'only-{other}-round-' not in text for other in range(count) if other!=i)

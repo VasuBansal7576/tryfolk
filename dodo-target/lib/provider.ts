@@ -1,4 +1,5 @@
 import DodoPayments from 'dodopayments';
+import { APIError, APIConnectionError, APIConnectionTimeoutError, APIUserAbortError } from 'dodopayments';
 import type { CheckoutSessionCreateParams } from 'dodopayments/resources/checkout-sessions';
 import { z } from 'zod';
 import { PROVIDER_ORIGIN, type Config, type SetupError } from './config';
@@ -12,6 +13,23 @@ export interface Provider {
   getPayment(id:string):Promise<unknown>;
 }
 
+/** Private closed diagnostics: never retain SDK text, body, headers or keys. */
+export function providerReadDiagnostic(error:unknown, stage:'checkout'|'payment') {
+  if (error instanceof z.ZodError) return {stage,kind:'schema_error',http_status:null};
+  if (error instanceof APIConnectionTimeoutError) return {stage,kind:'sdk_timeout',http_status:null};
+  if (error instanceof APIUserAbortError) return {stage,kind:'sdk_aborted',http_status:null};
+  if (error instanceof APIConnectionError) return {stage,kind:'sdk_connection_error',http_status:null};
+  if (error instanceof APIError) {
+    const status=typeof error.status === 'number' && Number.isInteger(error.status)
+      && error.status >= 400 && error.status <= 599 ? error.status : null;
+    const kind=status === 401 || status === 403 ? 'sdk_authentication_error'
+      : status === 429 ? 'sdk_rate_limit_error' : status !== null && status >= 500 ? 'sdk_server_error'
+      : status !== null ? 'sdk_client_error' : 'sdk_api_error';
+    return {stage,kind,http_status:status};
+  }
+  return {stage,kind:'unrecognized_error',http_status:null};
+}
+
 function client(key:string, webhookKey?:string) {
   return new DodoPayments({
     bearerToken:key, webhookKey, environment:'test_mode', baseURL:null,
@@ -19,7 +37,7 @@ function client(key:string, webhookKey?:string) {
     fetch:async (input,init)=>{
       const url=new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
       if (url.origin !== PROVIDER_ORIGIN) throw new Error('provider_origin_forbidden');
-      return fetch(input,{...init,redirect:'error'});
+      return fetch(input,{...init,redirect:'error',cache:'no-store'});
     },
   });
 }

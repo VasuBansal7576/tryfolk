@@ -234,11 +234,13 @@ async def test_browser_lease_failure_quarantines_host_before_release(failed_oper
     host=Host()
     lease=BrowserLease(host,lambda host,reusable: releases.append((host,reusable,host.closed)))
     if failed_operation=='begin_session':
-        with pytest.raises(RuntimeError):await lease.request({'op':'goto'})
+        with pytest.raises(RuntimeError):
+            await lease.request({'op':'goto'})
         await lease.close()
     else:
         await lease.request({'op':'goto'})
-        with pytest.raises(RuntimeError):await lease.close()
+        with pytest.raises(RuntimeError):
+            await lease.close()
     assert releases==[(host,False,True)] and host.frame_verify is None
 
 
@@ -252,7 +254,43 @@ async def test_browser_lease_success_requires_actual_context_close_receipt():
         closed=False
         async def request(self,data,timeout):return {}
         async def close(self):self.closed=True
-    host=Host();lease=BrowserLease(host,lambda host,reusable: releases.append(reusable))
+    host=Host()
+    lease=BrowserLease(host,lambda host,reusable: releases.append(reusable))
     await lease.request({'op':'goto'})
-    with pytest.raises(RuntimeError,match='context close'):await lease.close()
+    with pytest.raises(RuntimeError,match='context close'):
+        await lease.close()
     assert releases==[False] and host.closed
+
+
+async def test_four_sdk_processes_have_independent_workspaces_and_state(tmp_path, monkeypatch):
+    """Actual independent JSONL processes; controlled SDK stand-in, no provider call."""
+    from pathlib import Path
+
+    monkeypatch.setattr(transport, "ROOT", tmp_path)
+    original_spawn = asyncio.create_subprocess_exec
+    script = '''import json,sys,time,os
+from pathlib import Path
+command=json.loads(sys.stdin.readline())
+Path("owned-state.json").write_text(json.dumps(command))
+time.sleep(.05)
+print(json.dumps({"ok":True,"data":{"cwd":os.getcwd(),"pid":os.getpid(),"state":json.loads(Path("owned-state.json").read_text())}}),flush=True)
+sys.stdin.read()
+'''
+
+    async def external_fixture(*args, **kwargs):
+        return await original_spawn(sys.executable, "-c", script, **kwargs)
+
+    monkeypatch.setattr(transport.asyncio, "create_subprocess_exec", external_fixture)
+    workers = [transport.SDKProcess("stagehand") for _ in range(4)]
+    commands = [{"op": "controlled", "persona_id": str(i)} for i in range(4)]
+    try:
+        receipts = await asyncio.gather(*(worker.request(command, timeout=2)
+                                         for worker, command in zip(workers, commands)))
+        assert len({receipt["pid"] for receipt in receipts}) == 4
+        assert len({receipt["cwd"] for receipt in receipts}) == 4
+        assert [receipt["state"] for receipt in receipts] == commands
+        assert all(Path(receipt["cwd"]).parent == tmp_path / "runtime/sdk" for receipt in receipts)
+        assert len({worker.log.name for worker in workers}) == 4
+    finally:
+        await asyncio.gather(*(worker.close() for worker in workers))
+    assert all(worker.process.returncode is not None for worker in workers)

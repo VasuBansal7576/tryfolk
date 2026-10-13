@@ -85,6 +85,15 @@ async def repair(runtime, run, emit, *, reconcile_only=False):
         finding = service.store.load(db, "findings", saved["finding_id"])
         if not finding.get("measured") or finding["evidence"].get("provider") != "dodo":
             raise ValueError("Dodo source repair requires independently measured Dodo failure evidence.")
+        trace_row = db.execute(
+            "SELECT trace_url FROM events WHERE run_id=? AND persona_id=? AND kind='verification' "
+            "ORDER BY id DESC LIMIT 1", (run["id"], finding["persona_id"]),
+        ).fetchone()
+        failure_reference = {
+            "run_id": run["id"], "finding_id": finding["id"], "persona_id": finding["persona_id"],
+            "neatlogs_trace_url": trace_row[0] if trace_row else None,
+            "scope": "actual_Dodo_Test_Mode_failure_not_live_payment",
+        }
         saved["status"] = "running"
         current["repair"] = saved
         service.store.save(db, "repairs", saved)
@@ -164,7 +173,7 @@ async def repair(runtime, run, emit, *, reconcile_only=False):
             "Keep the broken mode and all product/amount/currency configuration unchanged. All payment matching, auth, SQL, read-only oracles, tests, regressions, package files and licensed provenance are protected. "
             "Run the immutable npm run test:repair regression; make the minimal source fix. Never edit tests or any other file. "
             "Do not read outside this workspace, delegate, use network, browse, access keys, push or create remote repos. Leave committing and checkpoint capture to the outer worker. Entire is enabled locally; hooks are disabled for this Codex launch, so the outer worker will attach your exact transcript.\nSanitized finding: "
-            + json.dumps(summary)
+            + json.dumps({"observed_failure": summary, "recorded_failure_reference": failure_reference})
         )
         code, stdout = await command(
             runtime,

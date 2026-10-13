@@ -24,6 +24,7 @@ ADAPTER_FILES = (
     "integrations/stagehand/pyproject.toml",
     "integrations/stagehand/uv.lock",
     "integrations/stagehand/local_session.py",
+    "integrations/stagehand/native_cache.py",
     "src/tryfolk/secure_frame.py",
     "src/tryfolk/dodo.py",
     "src/tryfolk/checkout_timing.py",
@@ -47,7 +48,12 @@ ADAPTER_FILES = (
     "src/tryfolk/verification.py",
     "src/tryfolk/bulk_personas.py",
     "src/tryfolk/bulk_policy.py",
+    "src/tryfolk/purchase_intents.py",
+    "src/tryfolk/after_retry.py",
+    "src/tryfolk/budget.py",
     "src/tryfolk/runtime.py",
+    "src/tryfolk/dodo_replay.py",
+    "src/tryfolk/trace_policy.py",
     "src/tryfolk/worker.py",
     "integrations/tinytroupe/adapter.py",
     "integrations/tinytroupe/bulk_adapter.py",
@@ -269,6 +275,13 @@ def execution_ready(manifest, validation, root):
     try:
         digest(validation)
         proof = json.loads(Path(validation).read_text())
+        if proof.get("schema") == "tryfolk.dodo-runtime-validation.v2":
+            from .dodo_commissioning_validation import commissioning_execution_ready
+            import subprocess
+            try:
+                return commissioning_execution_ready(manifest, proof, root)
+            except (AttributeError, IndexError, subprocess.SubprocessError):
+                return False
         if proof.get("schema") != "tryfolk.dodo-runtime-validation.v1" or len(proof.get("evidence", [])) != 4:
             return False
         values = []

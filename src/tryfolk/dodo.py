@@ -243,6 +243,7 @@ class DodoTarget:
         async def observe():
             nonlocal active_trace
             initial_binding = None
+            initial_source_order = None
             for attempt in range(3 if bounded else 1):
                 trace = active_trace = []
                 try:
@@ -257,7 +258,9 @@ class DodoTarget:
                     raise
                 facts = result.pop("_identity_read")
                 binding = result.pop("_identity_binding", None)
-                if initial_binding is not None and binding is not None and binding != initial_binding:
+                source_order = result.pop("_identity_source_order_binding", None)
+                changed = initial_source_order is not None and source_order is not None and source_order != initial_source_order
+                if changed or (initial_binding is not None and binding is not None and binding != initial_binding):
                     result = {"approved": False, "reason": "independent_frame_context_mismatch",
                               "secret_authenticated": False}
                     facts.update(stage="identity_binding", outcome="denied",
@@ -265,10 +268,12 @@ class DodoTarget:
                     facts["checks"]["same_identity_across_convergence_reads"] = False
                 elif binding is not None:
                     initial_binding = binding
+                if source_order is not None and initial_source_order is None:
+                    initial_source_order = source_order
                 facts["HTTP_reads"] = trace
                 reads.append(facts)
                 active_trace = []
-                retry = facts["outcome"] == "checkout_status_convergence_pending"
+                retry = facts["outcome"] in ("checkout_status_convergence_pending", "provider_read_pending")
                 result["identity_diagnostics"] = {"reads": list(reads),
                     "retry_bound_exhausted": bounded and retry and attempt == 2}
                 if not (bounded and retry and attempt < 2):
@@ -325,10 +330,13 @@ class DodoTarget:
                   "exact_order_ownership": all(order.get(key) == fixture[key] for key in OWNERSHIP)}
         if not all(checks.values()):
             return decision(checks, "orders")
-        receipt = await self.request("GET", "/api/target/receipts", params={"order_id": order["order_id"], "browser_parent": "1"}, _trace=trace)
+        operation = observed.get("operation", "bootstrap")
+        read_purpose = "pre_payment_identity" if operation in ("bootstrap", "session_tokens") \
+            and observed.get("identity_stage") != "native_response_capture" else "fresh"
+        receipt = await self.request("GET", "/api/target/receipts", params={"order_id": order["order_id"],
+            "browser_parent": "1", "read_purpose": read_purpose}, _trace=trace)
         payment, checkout = receipt.get("payment") or {}, receipt.get("checkout") or {}
         metadata = payment.get("metadata") or {}
-        operation = observed.get("operation", "bootstrap")
         allowed_status = (
             {"requires_payment_method", "requires_confirmation", "processing", "succeeded", "failed", "cancelled", "requires_capture", "partially_captured"}
             if operation == "poll" else {"requires_payment_method"}
@@ -342,6 +350,8 @@ class DodoTarget:
                       "checkout_session_id", "customer_id", "amount_minor", "currency")},
             "payment_id": payment.get("payment_id"), "payment_link": receipt.get("private_payment_link"),
         }
+        source_order = {**{key: binding[key] for key in ("source", "order")},
+                        "observed_payment_id": observed.get("payment_id")}
         checks = {
             "receipt_Test_API_source": receipt.get("source") == "dodo_test_api",
             "supported_identity_operation": operation in ("bootstrap", "session_tokens", "confirm", "poll"),
@@ -370,15 +380,31 @@ class DodoTarget:
                 and receipt.get("mismatches") == ["checkout.payment_status"] \
                 and payment.get("status") == "succeeded" and checkout.get("payment_status") == "requires_payment_method" \
                 and all(value for key, value in checks.items() if key not in status_checks)
-            result = decision(checks, "receipt", "checkout_status_convergence_pending" if temporary else "denied")
+            # The owned controller can report an unavailable provider GET. It
+            # supplies no payment proof in that case; only this closed error
+            # may use the existing native-response read convergence budget.
+            # A later receipt must still pass every identity predicate above.
+            unavailable = operation == "poll" and receipt.get("state") == "provider_error" \
+                and receipt.get("reason") == "provider_read_failed" \
+                and all(checks[key] for key in ("receipt_Test_API_source", "supported_identity_operation",
+                    "receipt_exact_owned_order", "receipt_exact_checkout", "observed_payment_present")) \
+                and not receipt.get("mismatches") and not payment and not checkout \
+                and receipt.get("private_payment_link") is None
+            outcome = "checkout_status_convergence_pending" if temporary else "provider_read_pending" if unavailable else "denied"
+            result = decision(checks, "receipt", outcome)
             if temporary:
                 result["_identity_binding"] = binding
+            if temporary or unavailable:
+                result["_identity_source_order_binding"] = source_order
+            if unavailable:
+                result["_identity_read"]["provider_error_reason"] = "provider_read_failed"
             result["_identity_read"]["provider_HTTP_status_available"] = False
             result["_identity_read"]["receipt_state"] = receipt.get("state") if receipt.get("state") in (
                 "pending", "succeeded", "failed", "mismatch", "provider_error", "setup_required") else "unrecognized"
             return result
         return {
             "_identity_binding": binding,
+            "_identity_source_order_binding": source_order,
             "_identity_read": {"stage": "receipt", "outcome": "approved", "checks": checks,
                                "first_failed_predicate": None},
             "approved": True,
