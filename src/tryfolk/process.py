@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import signal
+from uuid import uuid4
 from .codex_bridge import clean_env
 from .worker import Cancelled
 
@@ -22,6 +23,8 @@ class SDKProcess:
             evidence_root or os.environ.get("TRYFOLK_EVIDENCE_ROOT", "runtime/evidence")
         ).resolve()
         self.process = None
+        self.worker_id = uuid4().hex
+        self.working = ROOT / "runtime" / "sdk" / (name + "-" + self.worker_id)
         self.request_lock = asyncio.Lock()
 
     async def start(self):
@@ -32,9 +35,11 @@ class SDKProcess:
             "TRYFOLK_EVIDENCE_ROOT": str(self.evidence_root),
         }
         env["TRYFOLK_STAGEHAND_REUSE"] = "true" if self.reuse_browser else "false"
-        working = ROOT / "runtime" / "sdk"
+        working = self.working
         working.mkdir(parents=True, exist_ok=True)
+        os.chmod(working, 0o700)
         self.log = (working / f"{self.name}.log").open("a")
+        os.chmod(self.log.name, 0o600)
         self.process = await asyncio.create_subprocess_exec(
             str(ROOT / f"integrations/{self.name}/.venv/bin/python"),
             str(ROOT / f"integrations/{self.name}/adapter.py"),
@@ -73,7 +78,7 @@ class SDKProcess:
                     f"{self.name} SDK response exceeds the {RESPONSE_LIMIT}-byte limit; ambiguous actions are not retried."
                 ) from error
             if not line:
-                raise RuntimeError(f"{self.name} SDK process exited; inspect runtime/sdk/{self.name}.log")
+                raise RuntimeError(f"{self.name} SDK process exited; inspect {self.log.name}")
             try:
                 result = json.loads(line)
             except ValueError:

@@ -14,7 +14,7 @@ from .worker import Cancelled
 from .browser_policy import BrowserPolicy
 from .decisions import validated_action
 
-NATIVE_PAY_START_SPACING_SECONDS = 33
+NATIVE_PAY_START_SPACING_SECONDS = 0
 HOSTED_CHECKOUT_QUEUE_TIMEOUT_SECONDS = 300
 
 
@@ -127,9 +127,10 @@ class Runtime:
         return BrowserLease(host, release)
 
     async def close_run(self, run_id):
-        self.native_pay_permits.pop(run_id, None)
-        self.hosted_checkout_permits.pop(run_id, None)
-        self.native_pay_started.pop(run_id, None)
+        for mapping in (self.native_pay_permits, self.hosted_checkout_permits, self.native_pay_started):
+            for key in tuple(mapping):
+                if key == run_id or (isinstance(key, tuple) and key[0] == run_id):
+                    mapping.pop(key, None)
         mind = self.bulk_minds.pop(run_id, None)
         if mind:
             await mind.close()
@@ -588,7 +589,7 @@ class Runtime:
                     if run["provider"] == "dodo" and boundary_kind == "purchase":
                         hosted_started = True
                     if is_native_boundary:
-                        self.native_pay_started[run["id"]] = self.native_pay_clock()
+                        self.native_pay_started[(run["id"], persona["id"])] = self.native_pay_clock()
                     result = await browser.request({"op": "act", "action": action}, timeout=fresh_retry.remaining())
                     settled = (result.get("settlement", {}).get("url", "").split("?", 1)[0] == policy.origin + "/checkout/return"
                                if boundary_kind == "pay" else result.get("success", result.get("data", {}).get("success", True)) is True)
@@ -683,9 +684,9 @@ class Runtime:
                         await mind.close()
 
     async def acquire_hosted_checkout(self, run_id, emit, persona_id):
-        permit = self.hosted_checkout_permits.setdefault(run_id, asyncio.Lock())
+        permit = self.hosted_checkout_permits.setdefault((run_id, persona_id), asyncio.Lock())
         waiting_at = time.monotonic()
-        common = {"capacity": 1, "queue_bound_ms": int(HOSTED_CHECKOUT_QUEUE_TIMEOUT_SECONDS * 1000),
+        common = {"capacity": 1, "ownership_scope": "persona", "queue_bound_ms": int(HOSTED_CHECKOUT_QUEUE_TIMEOUT_SECONDS * 1000),
                   "payment_outcome_inferred": False}
         await emit("hosted_checkout_admission", {**common, "phase": "wait"}, persona_id)
         await asyncio.wait_for(permit.acquire(), HOSTED_CHECKOUT_QUEUE_TIMEOUT_SECONDS)
@@ -703,7 +704,7 @@ class Runtime:
             return
         lease["released"] = True
         lease["permit"].release()
-        await emit("hosted_checkout_admission", {"phase": "exit", "result": result, "capacity": 1,
+        await emit("hosted_checkout_admission", {"phase": "exit", "result": result, "capacity": 1, "ownership_scope": "persona",
                    "queue_bound_ms": int(HOSTED_CHECKOUT_QUEUE_TIMEOUT_SECONDS * 1000),
                    "duration_ms": int((time.monotonic() - lease["entered_at"]) * 1000),
                    "payment_outcome_inferred": False}, persona_id)
@@ -721,16 +722,16 @@ class Runtime:
     async def acquire_native_admission(self, run_id, boundary_kind, retry, emit, persona_id):
         if boundary_kind not in ("pay", "billing_continue"):
             raise ValueError("Unsupported native admission boundary.")
-        permit = self.native_pay_permits.setdefault(run_id, asyncio.Lock())
+        permit = self.native_pay_permits.setdefault((run_id, persona_id), asyncio.Lock())
         waiting_at = time.monotonic()
-        common = {"capacity": 1, "boundary_kind": boundary_kind,
+        common = {"capacity": 1, "ownership_scope": "persona", "boundary_kind": boundary_kind,
                   "configured_minimum_spacing_ms": int(NATIVE_PAY_START_SPACING_SECONDS * 1000),
-                  "spacing_basis": "conservative_experiment", "payment_outcome_inferred": False}
+                  "spacing_basis": "independent_persona_worker", "payment_outcome_inferred": False}
         await emit("native_pay_admission", {**common, "phase": "wait"}, persona_id)
         await asyncio.wait_for(permit.acquire(), retry.remaining())
         lease = {"permit": permit, "entered_at": time.monotonic(), "boundary_kind": boundary_kind}
         try:
-            previous = self.native_pay_started.get(run_id)
+            previous = self.native_pay_started.get((run_id, persona_id))
             delay = max(0, previous + NATIVE_PAY_START_SPACING_SECONDS - self.native_pay_clock()) if previous is not None else 0
             cooldown_at = time.monotonic()
             if delay:
@@ -749,7 +750,7 @@ class Runtime:
             return
         lease["released"] = True
         lease["permit"].release()
-        await emit("native_pay_admission", {"phase": "exit", "result": result, "capacity": 1,
+        await emit("native_pay_admission", {"phase": "exit", "result": result, "capacity": 1, "ownership_scope": "persona",
                    "boundary_kind": lease["boundary_kind"],
                    "duration_ms": int((time.monotonic() - lease["entered_at"]) * 1000),
                    "payment_outcome_inferred": False}, persona_id)

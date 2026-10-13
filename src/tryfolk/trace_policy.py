@@ -229,6 +229,7 @@ class TracePolicy:
             if data.get("capacity") == 1 and type(data.get("capacity")) is int:
                 result["capacity"] = 1
             copy_count(result, data, ("wait_ms", "duration_ms"))
+            copy_enum(result, data, "ownership_scope", {"persona"})
             if type(data.get("queue_bound_ms")) is int and data["queue_bound_ms"] == 300_000:
                 result["queue_bound_ms"] = 300_000
             if data.get("payment_outcome_inferred") is False:
@@ -240,7 +241,8 @@ class TracePolicy:
             if data.get("capacity") == 1 and type(data.get("capacity")) is int:
                 result["capacity"] = 1
             copy_count(result, data, ("wait_ms", "duration_ms", "cooldown_ms", "configured_minimum_spacing_ms"))
-            copy_enum(result, data, "spacing_basis", {"conservative_experiment"})
+            copy_enum(result, data, "spacing_basis", {"conservative_experiment", "independent_persona_worker"})
+            copy_enum(result, data, "ownership_scope", {"persona"})
             if data.get("payment_outcome_inferred") is False:
                 result["payment_outcome_inferred"] = False
         elif kind == "baseline_population_reused":

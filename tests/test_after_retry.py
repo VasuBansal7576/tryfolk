@@ -69,6 +69,59 @@ def test_owner_reviewed_after_only_quote_and_accept_preserve_history_and_hold(tm
         assert dict(db.execute("SELECT * FROM reservations WHERE id=?", (fresh["id"],)).fetchone())["reserved"] == 96000
 
 
+@pytest.mark.parametrize("phase,recorded", [("completed", 4), ("blocked", 2)])
+def test_completed_after_can_repeat_with_fresh_hold_without_relabeling_prior_outcomes(tmp_path, monkeypatch, phase, recorded):
+    client, old = prepared(tmp_path, monkeypatch)
+    service = client.app.state.service
+    with service.store.transaction() as db:
+        previous = service.store.load(db, "runs", old["id"])
+        people = service.store.load(db, "populations", old["population_id"])
+        previous.update(phase=phase, gates=[], outcomes={p["id"]: {
+            "outcome": "completed", "classification": "payment_and_entitlement",
+            "provider": "dodo", "measured": True, "payment_verified": True,
+            "entitlement_verified": True, "capability_checked": True, "capability_available": True,
+        } for p in people[:recorded]})
+        service.store.save(db, "runs", previous)
+        if phase == "completed":
+            db.execute("UPDATE reservations SET released=reserved-spent WHERE id=?", (old["reservation_id"],))
+    path = f"/runs/{old['id']}/after-retry"
+    quoted = client.post(path + "/quote", json={}, headers=OWNER)
+    assert quoted.status_code == 200, quoted.text
+    q = quoted.json()
+    assert q["retry_budget"]["release_microusd"] == (0 if phase == "completed" else 34000)
+    response = client.post(path, json={"quote_id": q["id"]}, headers={**OWNER, "Idempotency-Key": "repeat-completed"})
+    assert response.status_code == 201, response.text
+    fresh = response.json()
+    assert fresh["id"] != old["id"] and fresh["status"]["counts"]["executed"] == 0
+    with service.store.transaction() as db:
+        retained = service.store.load(db, "runs", old["id"])
+        assert retained["phase"] == phase and retained["outcomes"] == previous["outcomes"]
+        assert service.store.load(db, "runs", fresh["id"])["outcomes"] == {}
+        assert db.execute("SELECT spent,released FROM reservations WHERE id=?", (old["reservation_id"],)).fetchone()[:] == (230000, 34000)
+
+
+@pytest.mark.parametrize("field", ["measured", "payment_verified", "entitlement_verified", "capability_checked", "capability_available"])
+def test_completed_repeat_rejects_one_unverified_customer_without_queue_or_ledger_mutation(tmp_path, monkeypatch, field):
+    client, old = prepared(tmp_path, monkeypatch)
+    service = client.app.state.service
+    with service.store.transaction() as db:
+        run = service.store.load(db, "runs", old["id"])
+        people = service.store.load(db, "populations", old["population_id"])
+        run.update(phase="completed", outcomes={p["id"]: {
+            "outcome": "completed", "classification": "payment_and_entitlement", "provider": "dodo",
+            "measured": True, "payment_verified": True, "entitlement_verified": True,
+            "capability_checked": True, "capability_available": True,
+        } for p in people})
+        run["outcomes"][people[-1]["id"]][field] = False
+        service.store.save(db, "runs", run)
+        before = db.execute("SELECT sum(reserved),sum(spent),sum(released) FROM reservations").fetchone()[:]
+    response = client.post(f"/runs/{old['id']}/after-retry/quote", json={}, headers=OWNER)
+    assert response.status_code == 409 and "every original customer" in response.text
+    with service.store.transaction() as db:
+        assert db.execute("SELECT sum(reserved),sum(spent),sum(released) FROM reservations").fetchone()[:] == before
+        assert not db.execute("SELECT 1 FROM jobs WHERE status='queued'").fetchone()
+
+
 @pytest.mark.asyncio
 async def test_worker_reuses_bound_diagnostic_without_new_known_checkout_or_debit(tmp_path, monkeypatch):
     client, old = prepared(tmp_path, monkeypatch)
@@ -204,3 +257,21 @@ def test_hosted_checkout_admission_is_closed_and_never_reports_inferred_payment(
     invalid = policy.summary("hosted_checkout_admission", {"phase": "invalid", "result": "success",
         "capacity": 4, "queue_bound_ms": 999999, "payment_outcome_inferred": True})
     assert not any(k in invalid for k in ("phase", "result", "capacity", "queue_bound_ms", "payment_outcome_inferred"))
+
+
+def test_admission_capacity_one_can_be_scoped_to_independent_persona_without_private_identity():
+    from tryfolk.trace_policy import TracePolicy
+    policy = TracePolicy({"id": "a" * 32, "provider": "dodo", "pass": "after"})
+    data = {"phase": "enter", "capacity": 1, "ownership_scope": "persona",
+            "spacing_basis": "independent_persona_worker", "configured_minimum_spacing_ms": 0,
+            "cooldown_ms": 0, "wait_ms": 0, "payment_outcome_inferred": False,
+            "account_id": "private-account", "lock_key": "private-lock"}
+    for kind in ("native_pay_admission", "hosted_checkout_admission"):
+        safe = policy.summary(kind, data)
+        assert safe["capacity"] == 1 and safe["ownership_scope"] == "persona"
+        assert "private" not in json.dumps(safe)
+        if kind == "native_pay_admission":
+            assert safe["configured_minimum_spacing_ms"] == 0
+            assert safe["spacing_basis"] == "independent_persona_worker"
+        rejected = policy.summary(kind, {**data, "ownership_scope": "arbitrary-owner", "spacing_basis": "unproven-provider-quota"})
+        assert "ownership_scope" not in rejected and "spacing_basis" not in rejected

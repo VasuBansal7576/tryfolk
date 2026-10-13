@@ -118,12 +118,14 @@ def snapshot(service, db, run_id):
     old = service.store.load(db, "runs", run_id)
     before = service.store.load(db, "runs", old.get("parent_run_id"))
     repair = service.store.load(db, "repairs", (old.get("repair") or {}).get("id"))
-    require(old["pass"] == "after" and old["provider"] == "dodo" and old["phase"] == "blocked"
-            and not old.get("after_retry_child_run_id") and not old.get("outcomes")
+    completed_repeat = old["phase"] == "completed"
+    require(old["pass"] == "after" and old["provider"] == "dodo"
+            and (completed_repeat or old["phase"] == "blocked")
+            and not old.get("after_retry_child_run_id")
             and before and before["pass"] == "before" and before["phase"] == "completed"
             and repair and repair.get("status") == "completed" and repair.get("provider") == "dodo"
             and not db.execute("SELECT 1 FROM jobs WHERE status IN ('queued','running') LIMIT 1").fetchone(),
-            "One blocked after pass with zero outcomes and its completed before/repair are required with no active jobs.")
+            "A blocked or verified completed after and its completed before/repair are required with no active jobs. Every recorded result must remain in history.")
     pins = ("id", "run_id", "head_revision", "preview_url", "checkpoint_id", "source_digest", "target_revision")
     require(all((old.get("repair") or {}).get(k) == repair.get(k)
                 and (before.get("repair") or {}).get(k) == repair.get(k) for k in pins)
@@ -140,8 +142,22 @@ def snapshot(service, db, run_id):
                     for p in population), "Exactly the complete original saved cohort is required.")
     service.validate_count(old["persona_count"])
     validate_population(population, old.get("scenario_plan"))
+    if completed_repeat or old.get("outcomes"):
+        outcomes = old.get("outcomes") or {}
+        expected = {p["id"] for p in population}
+        require((set(outcomes) == expected if completed_repeat else set(outcomes) <= expected)
+                and all(o.get("outcome") == "completed"
+                        and o.get("classification") == "payment_and_entitlement"
+                        and o.get("provider") == "dodo"
+                        and all(o.get(k) is True for k in ("measured", "payment_verified",
+                                "entitlement_verified", "capability_checked", "capability_available"))
+                        for o in outcomes.values()),
+                "Repeating requires every original customer result already recorded to have verified payment, access and download. Historical outcomes remain unchanged; unfinished accounts are never resubmitted.")
     money = db.execute("SELECT * FROM reservations WHERE id=?", (old["reservation_id"],)).fetchone()
-    require(money and money["after_started"] and not money["released"], "The historical remaining hold must be intact.")
+    require(money and money["after_started"]
+            and (money["released"] == money["reserved"] - money["spent"]
+                 if completed_repeat else not money["released"]),
+            "A completed comparison must have a closed hold; a blocked attempt's remaining hold must be intact.")
     proof = retained_proof(service, db, old)
     target = replace(service.target(before["app_url"]), url=repair["preview_url"], revision=repair["target_revision"],
                      source_commit=repair["head_revision"], source_digest=repair["source_digest"],

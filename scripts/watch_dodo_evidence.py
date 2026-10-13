@@ -55,7 +55,7 @@ def main():
                     "phase", "capacity", "wait_ms", "duration_ms", "result", "payment_outcome_inferred",
                     "cooldown_ms", "configured_minimum_spacing_ms", "spacing_basis",
                     "boundary_kind",
-                    "queue_bound_ms",
+                    "queue_bound_ms", "ownership_scope",
                 ) if key in data},
             })
             seen_runtime_events.add(event_id)

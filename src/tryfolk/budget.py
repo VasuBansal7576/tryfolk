@@ -109,15 +109,14 @@ def validate_operator_allocation(plan):
     cohorts = allocation["cohorts"]
     if not isinstance(cohorts, list) or not 1 <= len(cohorts) <= 1000:
         raise ValueError("Operator allocation requires complete bounded before/after cohort forecasts.")
-    counts, reserves = set(), []
+    reserves = []
     for cohort in cohorts:
         if (
             not isinstance(cohort, dict) or set(cohort) != {"persona_count", "reserved_microusd"}
             or type(cohort["persona_count"]) is not int or not 1 <= cohort["persona_count"] <= 1000
-            or cohort["persona_count"] in counts or type(cohort["reserved_microusd"]) is not int
+            or type(cohort["reserved_microusd"]) is not int
         ):
-            raise ValueError("Each operator forecast needs a distinct unchanged integer N and both-pass reservation.")
-        counts.add(cohort["persona_count"])
+            raise ValueError("Each operator forecast needs an unchanged integer N and complete both-pass reservation.")
         subtotal = cohort["persona_count"] * sum(values[k] for k in PERSONA_FIELDS) + overhead
         reserve = subtotal + contingency(subtotal, values["contingency_basis_points"])
         if cohort["reserved_microusd"] != reserve:

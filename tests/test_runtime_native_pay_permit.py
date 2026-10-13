@@ -65,28 +65,27 @@ def harness(tmp_path, monkeypatch, *, count=4, failing_lane=None, hold_pay=None,
             if op == "act":
                 offset = int(include_billing) + int(include_purchase)
                 if include_purchase and self.step == 0:
-                    assert runtime.hosted_checkout_permits[run["id"]].locked()
+                    assert runtime.hosted_checkout_permits[(run["id"], self.lane)].locked()
                     lane_reads = [entry for entry in reads if entry[0] == self.lane and entry[1] == 0]
                     assert len(lane_reads) == 2  # Discovery is discarded; selection uses a fresh read.
                     hosted_active += 1
                     hosted_maximum = max(hosted_maximum, hosted_active)
                     runtime.test_hosted_maximum = hosted_maximum
                 if include_billing and self.step == int(include_purchase):
-                    runtime.test_boundary_dispatches.append(("billing_continue", runtime.native_pay_started[run["id"]]))
+                    runtime.test_boundary_dispatches.append(("billing_continue", runtime.native_pay_started[(run["id"], self.lane)]))
                 if self.step == 2 + offset:
                     prepared.add(self.lane)
                     if len(prepared) == count:
                         all_prepared.set()
-                    if not include_purchase:
-                        await asyncio.wait_for(all_prepared.wait(), 1)
+                    await asyncio.wait_for(all_prepared.wait(), 1)
                 if self.step == 3 + offset:
                     if not include_purchase:
                         assert len(prepared) == count  # Partial SDK harness starts at card work.
                     else:
-                        assert hosted_active == 1 and runtime.hosted_checkout_permits[run["id"]].locked()
+                        assert hosted_active >= 1 and runtime.hosted_checkout_permits[(run["id"], self.lane)].locked()
                     pay_calls.append(self.lane)
-                    runtime.test_dispatch_times.append(runtime.native_pay_started[run["id"]])
-                    runtime.test_boundary_dispatches.append(("pay", runtime.native_pay_started[run["id"]]))
+                    runtime.test_dispatch_times.append(runtime.native_pay_started[(run["id"], self.lane)])
+                    runtime.test_boundary_dispatches.append(("pay", runtime.native_pay_started[(run["id"], self.lane)]))
                     active += 1
                     maximum = max(maximum, active)
                     try:
@@ -134,10 +133,10 @@ def harness(tmp_path, monkeypatch, *, count=4, failing_lane=None, hold_pay=None,
     return runtime, run, people, emit, events, reads, pay_calls, lambda: maximum
 
 
-async def test_four_card_preparations_overlap_but_pay_return_windows_do_not(tmp_path, monkeypatch):
+async def test_four_card_preparations_and_pay_return_windows_overlap(tmp_path, monkeypatch):
     runtime, run, people, emit, events, reads, pays, maximum = harness(tmp_path, monkeypatch)
     results = await asyncio.gather(*(runtime.journey(run, p, lambda: False, emit) for p in people))
-    assert len(pays) == 4 and maximum() == 1
+    assert len(pays) == 4 and maximum() == 4
     assert all(not r["measured"] for r in results)
     assert all(admitted for _, step, admitted in reads if step == 3)
     assert all(not admitted for _, step, admitted in reads if step < 3)
@@ -145,22 +144,22 @@ async def test_four_card_preparations_overlap_but_pay_return_windows_do_not(tmp_
     assert phases.count("wait") == phases.count("enter") == phases.count("exit") == 4
     assert all(d["result"] == "owned_return_settled" for k, d, _ in events
                if k == "native_pay_admission" and d["phase"] == "exit")
-    assert not runtime.native_pay_permits[run["id"]].locked()
+    assert not runtime.native_pay_permits[(run["id"], people[0]["id"])].locked()
 
 
-async def test_four_sdk_startups_overlap_but_complete_hosted_windows_are_admitted_one_at_a_time(tmp_path, monkeypatch):
+async def test_four_sdk_startups_and_complete_hosted_windows_overlap(tmp_path, monkeypatch):
     runtime, run, people, emit, events, reads, pays, maximum = harness(
         tmp_path, monkeypatch, include_purchase=True, include_billing=True)
     results = await asyncio.gather(*(runtime.journey(run, p, lambda: False, emit) for p in people))
     assert len(results) == len(pays) == 4
-    assert runtime.test_hosted_maximum == maximum() == 1
+    assert runtime.test_hosted_maximum == maximum() == 4
     admissions = [data for kind, data, _ in events if kind == "hosted_checkout_admission"]
     assert [d["phase"] for d in admissions].count("wait") == 4
     assert [d["phase"] for d in admissions].count("enter") == 4
     assert [d["phase"] for d in admissions].count("exit") == 4
     assert all(d["result"] == "owned_return_settled" for d in admissions if d["phase"] == "exit")
     assert all(d["capacity"] == 1 and d["payment_outcome_inferred"] is False for d in admissions)
-    assert not runtime.hosted_checkout_permits[run["id"]].locked()
+    assert not runtime.hosted_checkout_permits[(run["id"], people[0]["id"])].locked()
 
 
 @pytest.mark.parametrize("cancel", [False, True])
@@ -168,7 +167,7 @@ async def test_hosted_resource_wait_is_bounded_without_selection_or_other_lease_
     runtime, run, people, emit, events, reads, pays, maximum = harness(tmp_path, monkeypatch, count=1, include_purchase=True)
     permit = asyncio.Lock()
     await permit.acquire()
-    runtime.hosted_checkout_permits[run["id"]] = permit
+    runtime.hosted_checkout_permits[(run["id"], people[0]["id"])] = permit
     monkeypatch.setattr(module, "HOSTED_CHECKOUT_QUEUE_TIMEOUT_SECONDS", .03)
     task = asyncio.create_task(runtime.journey(run, people[0], lambda: False, emit))
     if cancel:
@@ -197,7 +196,7 @@ async def test_hosted_window_failure_or_cancellation_releases_without_resubmitti
     with pytest.raises(asyncio.CancelledError if cancel else RuntimeError):
         await task
     assert pays == ["0"]
-    assert not runtime.hosted_checkout_permits[run["id"]].locked()
+    assert not runtime.hosted_checkout_permits[(run["id"], people[0]["id"])].locked()
     assert [d["result"] for k, d, _ in events if k == "hosted_checkout_admission" and d["phase"] == "exit"] == [
         "cancelled" if cancel else "failed"]
 
@@ -238,9 +237,9 @@ async def test_ambiguous_pay_failure_releases_next_lane_without_retry(tmp_path, 
     runtime, run, people, emit, events, reads, pays, maximum = harness(tmp_path, monkeypatch, count=2, failing_lane="0")
     results = await asyncio.gather(*(runtime.journey(run, p, lambda: False, emit) for p in people), return_exceptions=True)
     assert sum(isinstance(r, RuntimeError) for r in results) == 1
-    assert sorted(pays) == ["0", "1"] and maximum() == 1
+    assert sorted(pays) == ["0", "1"] and maximum() == 2
     assert any(d.get("result") == "failed" for k, d, _ in events if k == "native_pay_admission")
-    assert not runtime.native_pay_permits[run["id"]].locked()
+    assert not runtime.native_pay_permits[(run["id"], people[0]["id"])].locked()
 
 
 async def test_cancellation_inside_pay_releases_owned_permit_without_resubmission(tmp_path, monkeypatch):
@@ -252,7 +251,7 @@ async def test_cancellation_inside_pay_releases_owned_permit_without_resubmissio
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert pays == ["0"] and not runtime.native_pay_permits[run["id"]].locked()
+    assert pays == ["0"] and not runtime.native_pay_permits[(run["id"], people[0]["id"])].locked()
     assert any(d.get("result") == "cancelled" for k, d, _ in events if k == "native_pay_admission")
 
 
@@ -261,7 +260,7 @@ async def test_permit_wait_obeys_original_deadline_and_never_keeps_a_pay_selecti
     runtime, run, people, emit, events, reads, pays, maximum = harness(tmp_path, monkeypatch, count=1)
     permit = asyncio.Lock()
     await permit.acquire()
-    runtime.native_pay_permits[run["id"]] = permit
+    runtime.native_pay_permits[(run["id"], people[0]["id"])] = permit
     monkeypatch.setattr(module, "FreshActionRetry", lambda: FreshActionRetry(timeout=.03))
     task = asyncio.create_task(runtime.journey(run, people[0], lambda: False, emit))
     if cancel:
@@ -289,7 +288,7 @@ def test_admission_trace_projection_is_closed_and_recognized():
                       "spacing_basis": "conservative_experiment"}
 
 
-async def test_four_tasks_record_actual_dispatch_spacing_with_controlled_clock(tmp_path, monkeypatch):
+async def test_four_tasks_use_distinct_dispatch_clocks(tmp_path, monkeypatch):
     runtime, run, people, emit, events, reads, pays, maximum = harness(tmp_path, monkeypatch)
     monkeypatch.setattr(module, "NATIVE_PAY_START_SPACING_SECONDS", 33)
     # Advance only the admission clock after each genuine invented SDK boundary
@@ -303,8 +302,8 @@ async def test_four_tasks_record_actual_dispatch_spacing_with_controlled_clock(t
             clock[0] += 33
 
     await asyncio.gather(*(runtime.journey(run, p, lambda: False, advance_clock) for p in people))
-    assert runtime.test_dispatch_times == [0, 33, 66, 99]
-    assert len(pays) == 4 and maximum() == 1
+    assert runtime.test_dispatch_times == [0, 0, 0, 0]
+    assert len(pays) == 4 and maximum() == 4
     assert all(admitted for _, step, admitted in reads if step == 3)
     assert all(d["configured_minimum_spacing_ms"] == 33000
                for k, d, _ in events if k == "native_pay_admission" and d["phase"] == "enter")
@@ -316,12 +315,12 @@ async def test_cooldown_before_fresh_observation_is_bounded_and_cancellation_rel
     monkeypatch.setattr(module, "NATIVE_PAY_START_SPACING_SECONDS", 33)
     started = time.monotonic()
     runtime.native_pay_clock = lambda: 32.9 + time.monotonic() - started
-    runtime.native_pay_started[run["id"]] = 0.0
+    runtime.native_pay_started[(run["id"], people[0]["id"])] = 0.0
     if mode == "deadline":
         monkeypatch.setattr(module, "FreshActionRetry", lambda: FreshActionRetry(timeout=.02))
     task = asyncio.create_task(runtime.journey(run, people[0], lambda: False, emit))
     if mode == "cancel":
-        while run["id"] not in runtime.native_pay_permits or not runtime.native_pay_permits[run["id"]].locked():
+        while (run["id"], people[0]["id"]) not in runtime.native_pay_permits or not runtime.native_pay_permits[(run["id"], people[0]["id"])].locked():
             await asyncio.sleep(0)
         task.cancel()
     if mode == "complete":
@@ -333,12 +332,12 @@ async def test_cooldown_before_fresh_observation_is_bounded_and_cancellation_rel
         with pytest.raises(asyncio.CancelledError if mode == "cancel" else TimeoutError):
             await task
         assert not pays and not any(step == 3 for _, step, _ in reads)
-    assert not runtime.native_pay_permits[run["id"]].locked()
+    assert not runtime.native_pay_permits[(run["id"], people[0]["id"])].locked()
 
 
-async def test_four_actual_tasks_share_one_continue_and_pay_dispatch_clock(tmp_path, monkeypatch):
+async def test_four_actual_tasks_have_independent_continue_and_pay_dispatch_clocks(tmp_path, monkeypatch):
     runtime, run, people, emit, events, reads, pays, maximum = harness(tmp_path, monkeypatch, include_billing=True)
-    monkeypatch.setattr(module, "NATIVE_PAY_START_SPACING_SECONDS", 33)
+    monkeypatch.setattr(module, "NATIVE_PAY_START_SPACING_SECONDS", 0)
     clock = [0.0]
     runtime.native_pay_clock = lambda: clock[0]
 
@@ -348,10 +347,11 @@ async def test_four_actual_tasks_share_one_continue_and_pay_dispatch_clock(tmp_p
             clock[0] += 33
 
     await asyncio.gather(*(runtime.journey(run, p, lambda: False, advance) for p in people))
-    assert [t for _, t in runtime.test_boundary_dispatches] == list(range(0, 8 * 33, 33))
+    assert [t for kind, t in runtime.test_boundary_dispatches if kind == "billing_continue"] == [0, 33, 66, 99]
+    assert len({key[1] for key in runtime.native_pay_started}) == 4
     assert [k for k, _ in runtime.test_boundary_dispatches].count("billing_continue") == 4
     assert [k for k, _ in runtime.test_boundary_dispatches].count("pay") == 4
-    assert len(pays) == 4 and maximum() == 1
+    assert len(pays) == 4 and maximum() == 4
     for lane in range(4):
         billing_reads = [admitted for p, step, admitted in reads if p == str(lane) and step == 0]
         assert billing_reads == [False, True]  # Discovery is discarded before fresh selection.
@@ -361,14 +361,14 @@ async def test_four_actual_tasks_share_one_continue_and_pay_dispatch_clock(tmp_p
     assert sum(d["boundary_kind"] == "pay" and d["result"] == "owned_return_settled" for d in exits) == 4
 
 
-async def test_known_replay_and_next_cohort_boundary_share_same_run_clock(tmp_path, monkeypatch):
+async def test_known_replay_cannot_delay_a_different_persona_clock(tmp_path, monkeypatch):
     from tryfolk.dodo_replay import execute_replay_action
     runtime, run, people, emit, events, *_ = harness(tmp_path, monkeypatch, count=1)
     # Seed a previous normal/diagnostic actual dispatch and admit this replay
     # against the same global clock. A short remaining cooldown keeps this real
     # asyncio test fast without changing the production33s setting.
     monkeypatch.setattr(module, "NATIVE_PAY_START_SPACING_SECONDS", .025)
-    runtime.native_pay_started[run["id"]] = runtime.native_pay_clock()
+    runtime.native_pay_started[(run["id"], "other-persona")] = runtime.native_pay_clock()
     action = {"method":"click", "selector":"#invented", "description":"Observed Continue", "_tryfolk":{"kind":"billing_continue"}}
     calls = []
 
@@ -383,8 +383,41 @@ async def test_known_replay_and_next_cohort_boundary_share_same_run_clock(tmp_pa
 
     await execute_replay_action(ReplaySDK(), action, module.BrowserPolicy(run["preview_url"], "dodo"), "observe", runtime=runtime, run=run, emit=emit, persona_id=people[0]["id"])
     assert calls == ["observe", "act"]
-    assert runtime.native_pay_started[run["id"]] > 0
+    assert runtime.native_pay_started[(run["id"], people[0]["id"])] > 0
     assert events[-1][1]["boundary_kind"] == "billing_continue"
     assert events[-1][1]["result"] == "billing_controls_settled"
-    assert next(d for k, d, _ in events if d.get("phase") == "enter")["cooldown_ms"] > 0
-    assert not runtime.native_pay_permits[run["id"]].locked()
+    assert next(d for k, d, _ in events if d.get("phase") == "enter")["cooldown_ms"] == 0
+    assert not runtime.native_pay_permits[(run["id"], people[0]["id"])].locked()
+
+
+async def test_four_independent_checkout_windows_overlap(tmp_path, monkeypatch):
+    """Real Runtime journeys with controlled SDK I/O, not provider evidence."""
+    runtime, run, people, emit, events, reads, pays, maximum = harness(
+        tmp_path, monkeypatch, include_billing=True, include_purchase=True,
+    )
+    await asyncio.gather(*(runtime.journey(run, person, lambda: False, emit) for person in people))
+    assert runtime.test_hosted_maximum == 4, "All four isolated checkout windows must overlap"
+
+
+async def test_cancelling_one_checkout_does_not_cancel_or_release_another(tmp_path, monkeypatch):
+    hold = asyncio.Event()
+    runtime, run, people, emit, events, reads, pays, maximum = harness(
+        tmp_path, monkeypatch, count=2, include_purchase=True, include_billing=True, hold_pay=hold,
+    )
+    tasks = [asyncio.create_task(runtime.journey(run, person, lambda: False, emit)) for person in people]
+    while len(pays) < 2:
+        await asyncio.sleep(0)
+    tasks[0].cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tasks[0]
+    assert runtime.hosted_checkout_permits[(run["id"], people[1]["id"])].locked()
+    assert runtime.native_pay_permits[(run["id"], people[1]["id"])].locked()
+    hold.set()
+    await tasks[1]
+    assert sorted(pays) == ["0", "1"] and maximum() == 2
+    assert not any(permit.locked() for permit in runtime.hosted_checkout_permits.values())
+    assert not any(permit.locked() for permit in runtime.native_pay_permits.values())
+
+
+def test_production_has_no_cross_persona_dispatch_cooldown():
+    assert module.NATIVE_PAY_START_SPACING_SECONDS == 0

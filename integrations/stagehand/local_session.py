@@ -13,6 +13,7 @@ from uuid import uuid4
 from playwright.async_api import async_playwright
 from stagehand import Stagehand, local_browser
 from stagehand.extension_assets import extension_directory
+from native_cache import configure as configure_native_http_cache
 
 from tryfolk.browser_network import ResourceGuard
 from tryfolk.response_boundary import ResponseBoundary
@@ -94,6 +95,9 @@ def chrome_executable():
 
 
 async def open_routed_browser(stack, *, model, logging, downloads, session_stack=None, pooled=False):
+    # Verified source customization retains every request/response guard and
+    # lets genuine Chrome honor provider HTTP cache headers in this profile.
+    cache_configuration = configure_native_http_cache()
     playwright = await async_playwright().start()
     stack.push_async_callback(playwright.stop)
     profile = Path(tempfile.mkdtemp(prefix="stagehand-profile-", dir=downloads.parent))
@@ -140,21 +144,23 @@ async def open_routed_browser(stack, *, model, logging, downloads, session_stack
             accept_downloads=True, service_workers="block",
         )
         owned_stack.push_async_callback(isolated.close)
-        return await routed_context(browser, isolated, pooled=True)
+        return await routed_context(browser, isolated, pooled=True, cache_configuration=cache_configuration)
 
     if pooled:
         session = await new_session(session_stack, downloads)
     else:
         await context.unroute(re.compile(r"^https?://"))
-        session = await routed_context(browser, context, pooled=False)
+        session = await routed_context(browser, context, pooled=False, cache_configuration=cache_configuration)
     if pooled:
         return browser, stagehand, *session, new_session
     return browser, stagehand, *session
 
 
-async def routed_context(browser, context, *, pooled):
+async def routed_context(browser, context, *, pooled, cache_configuration=None):
     await context.add_init_script(observer_script())
     guard = ResourceGuard()
+    if cache_configuration:
+        guard.events.append({"decision": "native_http_cache_source_bound", **cache_configuration})
     await context.route(re.compile(r"^https?://"), guard.route)
     await context.route_web_socket("**/*", lambda ws: ws.close(code=1008, reason="Unapproved socket"))
     marker = "about:blank#tryfolk-" + uuid4().hex

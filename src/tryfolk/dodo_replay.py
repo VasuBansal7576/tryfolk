@@ -137,7 +137,7 @@ async def execute_replay_action(browser, recorded, policy, operation, *, after_c
                 raise RuntimeError("Replay admission boundary changed; no action dispatched.")
             try:
                 if lease is not None:
-                    runtime.native_pay_started[run["id"]] = runtime.native_pay_clock()
+                    runtime.native_pay_started[(run["id"], persona_id)] = runtime.native_pay_clock()
                 result = await asyncio.wait_for(browser.request({"op": "act", "action": action}), retry.remaining())
             except Exception as error:
                 if not retry.allow(error, action, document):
