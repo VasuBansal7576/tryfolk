@@ -84,4 +84,5 @@ def test_fixed_configuration_cannot_silently_queue_the_four_buyers(tmp_path, mon
     assert Settings.from_env().fixed_persona_count == 4
     for bad in ('5','04','','true'):
         monkeypatch.setenv('TRYFOLK_FIXED_PERSONAS',bad)
-        with pytest.raises(ValueError):Settings.from_env()
+        with pytest.raises(ValueError):
+            Settings.from_env()

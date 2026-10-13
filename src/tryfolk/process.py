@@ -157,6 +157,94 @@ class PersonaChannel:
             self.initialized = False
 
 
+class PersonaPool:
+    """Run-owned decision lanes, each leased for one persona's entire journey."""
+
+    def __init__(self, size, run_id, cancelled=lambda: False, *, evidence_root=None):
+        if size < 1:
+            raise ValueError("At least one decision lane is required.")
+        self.run_id = run_id
+        self.cancelled = cancelled
+        self.evidence_root = evidence_root
+        self.available = asyncio.Queue()
+        self.services = []
+        self.closed = False
+        for _ in range(size):
+            self.available.put_nowait(self._new_service())
+
+    def _new_service(self):
+        service = SDKProcess("tinytroupe", self.cancelled, evidence_root=self.evidence_root)
+        self.services.append(service)
+        return service
+
+    async def acquire(self, persona_id):
+        while True:
+            if self.closed:
+                raise RuntimeError("Decision pool is already closed.")
+            if self.cancelled():
+                raise Cancelled()
+            try:
+                service = await asyncio.wait_for(self.available.get(), 0.25)
+            except TimeoutError:
+                continue
+            # Closing/cancellation can happen while a lane becomes available.
+            if self.closed or self.cancelled():
+                self.available.put_nowait(service)
+                if self.closed:
+                    raise RuntimeError("Decision pool is already closed.")
+                raise Cancelled()
+            return PersonaLease(self, service, persona_id)
+
+    def release(self, service, reusable):
+        if not self.closed:
+            self.available.put_nowait(service if reusable else self._new_service())
+
+    async def close(self):
+        self.closed = True
+        await asyncio.gather(*(service.close() for service in self.services))
+
+
+class PersonaLease(PersonaChannel):
+    """A persona retains one lane until its state is explicitly released."""
+
+    def __init__(self, pool, service, persona_id):
+        super().__init__(service, pool.run_id, persona_id)
+        self.pool = pool
+        self.broken = False
+        self.closed = False
+
+    async def request(self, data, timeout=180):
+        if self.closed or self.pool.closed:
+            raise RuntimeError("Owned persona lease is already closed.")
+        try:
+            return await super().request(data, timeout)
+        except BaseException:
+            # An interrupted JSONL exchange may leave an unread reply or partly
+            # initialized memory. Never hand that process to another customer.
+            self.broken = True
+            raise
+
+    async def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        reusable = False
+        try:
+            if not self.pool.closed and not self.broken:
+                if self.initialized:
+                    receipt = await self.service.request({
+                        "op": "bulk_release", "run_id": self.run_id, "persona_id": self.persona_id,
+                    }, timeout=20)
+                    if receipt.get("released") is not True:
+                        raise RuntimeError("Persona state release receipt is required before lane reuse.")
+                    self.initialized = False
+                reusable = True
+        finally:
+            if not reusable:
+                await self.service.close()
+            self.pool.release(self.service, reusable)
+
+
 class BrowserLease:
     """One persona's fresh context; failed lifecycle hosts are quarantined."""
 

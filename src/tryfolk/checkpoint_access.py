@@ -177,7 +177,7 @@ def seal_capture_binding(
     )
 
 
-def load_capture_binding(settings, run, repair):
+def load_capture_binding(settings, run, repair, *, original_only=False):
     try:
         require(re.fullmatch(r"[a-f0-9]{32}", repair["id"]))
         path = settings.checkpoint_evidence_root / (repair["id"] + "-checkpoint-access-binding.json")
@@ -225,7 +225,13 @@ def load_capture_binding(settings, run, repair):
             )
         repository = repository_slug(settings.checkpoint_repository)
         require(payload["repository"] in (None, repository), "checkpoint_repository_unapproved")
-        return payload, digest(encoded(envelope)), repository
+        binding_digest = digest(encoded(envelope))
+        from .checkpoint_privacy_export import load_privacy_export
+
+        exported = None if original_only else load_privacy_export(settings, payload, binding_digest)
+        if exported is not None:
+            return exported[0], exported[1], repository
+        return payload, binding_digest, repository
     except CheckpointAccessError:
         raise
     except (OSError, KeyError, TypeError, ValueError, AttributeError):
@@ -270,7 +276,7 @@ def verify_public_access(binding, binding_digest, repository, *, transport=None)
                 urls.append(url)
     except httpx.HTTPError:
         raise CheckpointAccessError("checkpoint_public_access_unverified") from None
-    return {
+    result = {
         "kind": "github_git_checkpoint",
         "status": "anonymous_verified",
         "repository": repository,
@@ -286,3 +292,7 @@ def verify_public_access(binding, binding_digest, repository, *, transport=None)
         "hosted_entire_url": None,
         "hosted_entire_status": "unverified",
     }
+    if "privacy_export" in binding:
+        result["privacy_export"] = binding["privacy_export"]
+        result["privacy_export_url"] = urls[4]
+    return result

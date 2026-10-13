@@ -1,9 +1,13 @@
 import { z } from 'zod';
-import { quoteSchema, baselineRetryQuoteSchema } from './contracts.ts';
+import { quoteSchema, baselineRetryQuoteSchema, afterRetryQuoteSchema } from './contracts.ts';
 import type { CreatedRun, Run } from './contracts.ts';
 
 // Approval is recorded before dispatch. Closing a dialog or reloading never replaces its key/body.
 const pendingSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('after-retry'), key: z.string().min(1), approvedAt: z.string(), runId: z.string().min(1),
+    request: z.object({ quote_id: z.string().min(1) }).strict(), quote: afterRetryQuoteSchema,
+  }),
   z.object({
     kind: z.literal('create'), key: z.string().min(1), approvedAt: z.string(),
     request: z.object({ quote_id: z.string().min(1) }).strict(), quote: quoteSchema,
@@ -29,6 +33,7 @@ const journalKey = 'tryfolk.pending.v1';
 
 function sameRequest(first: PendingRequest, second: PendingRequest): boolean {
   if (first.kind === 'create' && second.kind === 'create') return first.request.quote_id === second.request.quote_id;
+  if (first.kind === 'after-retry' && second.kind === 'after-retry') return first.runId === second.runId && first.request.quote_id === second.request.quote_id;
   if (first.kind === 'baseline-retry' && second.kind === 'baseline-retry') return first.runId === second.runId && first.request.quote_id === second.request.quote_id;
   return first.kind === 'replay' && second.kind === 'replay' && first.runId === second.runId && first.request.repair_id === second.request.repair_id;
 }
@@ -55,7 +60,8 @@ export class RequestJournal {
     }
     const pending = pendingSchema.parse(candidate);
     if (pending.kind === 'create' && pending.quote.id !== pending.request.quote_id) throw new Error('The saved request must use its original approved quote.');
-    if (pending.kind === 'create' && pending.quote.kind === 'baseline_retry') throw new Error('A saved-customer retry requires its owner baseline retry endpoint.');
+    if (pending.kind === 'create' && ['baseline_retry', 'after_retry'].includes(pending.quote.kind || '')) throw new Error('A saved-customer retry requires its owner baseline retry endpoint.');
+    if (pending.kind === 'after-retry' && (pending.quote.id !== pending.request.quote_id || pending.quote.retry_of_run_id !== pending.runId)) throw new Error('The after retry must keep its approved quote and blocked source attempt.');
     if (pending.kind === 'baseline-retry' && (pending.quote.id !== pending.request.quote_id || pending.quote.retry_of_run_id !== pending.runId)) throw new Error('The retry request must use its original approved quote and blocked attempt.');
     this.write({ pending, declined: null });
     return pending;
@@ -99,6 +105,22 @@ export async function recoverRequest(
   let matches = result.id === current.id;
   if (pending.kind === 'create') matches &&= !current.retry_of_run_id && current.pass === 'before' && current.persona_count === pending.quote.persona_count && current.app_url === pending.quote.app_url;
   else if (pending.kind === 'replay') matches &&= current.pass === 'after' && current.parent_run_id === pending.runId && current.population_id === pending.populationId && current.persona_count === pending.personaCount && current.revision === pending.repairRevision && (!pending.repairSourceCommit || current.source_commit === pending.repairSourceCommit);
+  else if (pending.kind === 'after-retry') {
+    const quote = pending.quote;
+    matches &&= current.id !== pending.runId && current.pass === 'after'
+      && current.parent_run_id === quote.before_run_id && current.population_id === quote.population_id
+      && current.persona_count === quote.persona_count && current.source_commit === quote.head_revision
+      && current.source_digest === quote.source_digest && current.revision === quote.target_revision
+      && current.budget_contract?.id === quote.id && current.budget.reserved_microusd === quote.reserved_microusd
+      && current.after_retry?.original_run_id === pending.runId
+      && current.after_retry.retry_run_id === current.id
+      && current.after_retry.population_sha256 === quote.population_sha256
+      && current.repair?.id === quote.repair_id
+      && current.after_retry.repair_id === quote.repair_id
+      && current.after_retry.known_replay_source_run_id === (quote.known_replay_source_run_id || pending.runId)
+      && current.personas.length === quote.persona_ids.length
+      && current.personas.every((person, index) => person.id === quote.persona_ids[index]);
+  }
   else {
     const quote = pending.quote;
     const budget = current.retry_budget;

@@ -6,6 +6,22 @@ Warm paper, ink, teal and the accepted illustrated crowd are preserved in `front
 
 ## Run locally
 
+The current private demo configuration is `runtime/demo.env`. From this checkout,
+launch the owned servers and then the worker in separate terminals:
+
+```sh
+uv run python scripts/demo.py local
+uv run python scripts/demo.py worker
+```
+
+Open **http://127.0.0.1:8000**. This configuration quotes four concurrent customers
+and protects their complete matched after pass. Keys remain in ignored private
+files. It imports the inspected native CFO forecast; the native draft is not
+accepted or funded by importing it. Dodo execution remains gated until actual
+checkout, provider and access commissioning evidence passes. Recorded fixture
+outcomes are labeled separately. See `DELIVERY.md` for demonstrated requirements
+and `EVENT-ACCEPTANCE.md` for official event criteria.
+
 Python 3.12, uv, Node 22.13+, Chrome/Chromium, an existing authenticated Codex CLI (`gpt-6.1-sol`),
 and Entire CLI 0.11.4 are required. Model inference uses the existing authenticated Codex allowance and local browsers.
 
@@ -45,7 +61,8 @@ number from 1 to 1000 before launching the API and worker; invalid configuration
 `GET /readiness` and fresh quotes report the configured `max_personas`. A request above it keeps
 its original N and receives a capacity gate; acceptance creates no job, population or reservation.
 Raising capacity does not raise the budget or clear provider, setup or affordability gates.
-Reserve **both** complete passes before execution. Browser concurrency is one.
+Reserve **both** complete passes before execution. Ordinary mode runs one browser;
+the configured four-persona demo runs four isolated browser and decision lanes.
 The population is generated once, saved to SQLite with initial cognition, and reused at identical
 N against the repaired revision with fresh accounts, cookies and checkout identities.
 Generation/cancellation never silently reduces N. A killed worker blocks ambiguous work rather
@@ -67,6 +84,22 @@ keys and databases stay outside the coding workspace. The worker records failing
 attaches it using Entire without changing protected launcher hooks, starts its exact source
 revision at a registered local preview, replays the known failure, then reruns the entire same
 saved population. Public checkpoint links remain a separate external setup gate.
+
+The four-lane demo preserves independent persona state and browser sessions. All
+four minds and owned browser sessions initialize concurrently. Hosted checkout
+windows use capacity one from freshly observed purchase through the owned return;
+**Continue** and **Pay** also share conservative 33-second dispatch spacing. The
+resource queue is bounded at 300 seconds and precedes fresh action selection;
+actual action and settlement limits remain unchanged. This is a disclosed provider
+traffic mitigation, not an official provider quota. No financial, navigation or
+GET requests are automatically retried.
+
+A blocked after pass with a completed, independently verified diagnostic can offer
+**Review a fresh same-customer after attempt**. Its new quote reserves all original
+customers on the same source with fresh accounts, retains the old spent allowance
+and evidence, and releases only the original unused hold. It explicitly reuses the
+recorded diagnostic and separate controls; those checks are excluded from customer
+results. Insufficient allowance blocks approval instead of reducing the crowd.
 
 Optional Neatlogs configuration is server-side only: set `TRYFOLK_NEATLOGS_ENV` to the private
 env-file path before launching a worker/probe. Keys never enter SDK/model/browser subprocesses.

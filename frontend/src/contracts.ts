@@ -30,6 +30,15 @@ const planBaseSchema = z.object({
   source: z.literal('cfo.ai-inspected-plan'), source_url: z.string(), plan_id: z.string(),
   snapshot_sha256: z.string(), assumptions: z.record(z.string(), money),
 });
+const operatorAllocationSchema = z.object({
+  basis: z.literal('operator_derived_scheduler_estimate_not_ari_approval_or_funded_credit'),
+  reference: z.string(), authorized_at: z.string(), evidence_sha256: z.string(),
+  native_forecast_sha256: z.string(), native_forecast_source_url: z.string(), native_forecast_inspected_at: z.string(),
+  native_forecast_completed: z.literal(true), native_pair_overhead_microusd: money,
+  cohorts: z.array(z.object({ persona_count: count, reserved_microusd: money })),
+  additional_microusd: money, lifetime_budget_microusd: money, quote_budget_microusd: money,
+  funded_credit_microusd: z.null(), incremental_cash_authorized: z.literal(false),
+});
 export const cfoPlanSchema = z.union([
   planBaseSchema.extend({
     schema_version: z.literal(2), status: z.literal('finalized'), currency: z.literal('USD'),
@@ -37,6 +46,7 @@ export const cfoPlanSchema = z.union([
     assumption_provenance: z.record(z.string(), z.object({
       basis: z.literal('forecast'), reference: z.string(), evidence_sha256: z.string(),
     })), native_ledger_snapshot: ledgerSnapshotSchema,
+    operator_allocation: operatorAllocationSchema.optional(),
   }),
   planBaseSchema.extend({ schema_version: z.literal(1).default(1) }),
 ]);
@@ -195,8 +205,20 @@ export const baselineRetryQuoteSchema = ordinaryQuoteDataSchema.and(z.object({
   && new Set(quote.persona_ids).size === quote.persona_count
   && quote.retry_budget.new_reserved_microusd === quote.reserved_microusd,
 'Retry quote must retain the full saved population and its new reservation');
+export const afterRetryQuoteSchema = ordinaryQuoteDataSchema.and(z.object({
+  kind: z.literal('after_retry'), retry_of_run_id: z.string().min(1), before_run_id: z.string().min(1),
+  population_id: z.string().min(1), population_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  persona_ids: z.array(z.string().min(1)), retry_budget: retryBudgetSchema,
+  repair_id: z.string().min(1), head_revision: z.string().regex(/^[a-f0-9]{40}$/),
+  target_revision: z.string().min(1), source_digest: z.string().regex(/^[a-f0-9]{64}$/),
+  known_replay_source_run_id: z.string().min(1).optional(),
+})).refine(quote => quote.persona_ids.length === quote.persona_count
+  && new Set(quote.persona_ids).size === quote.persona_count
+  && quote.retry_budget.new_reserved_microusd === quote.reserved_microusd
+  && quote.before_microusd === 0 && quote.overhead_microusd === 0,
+'After retry keeps the complete saved cohort and only its new after allowance');
 // A malformed explicit retry must never fall through and lose its budget/lineage.
-export const quoteSchema = z.union([baselineRetryQuoteSchema, ordinaryQuoteDataSchema.and(z.object({
+export const quoteSchema = z.union([baselineRetryQuoteSchema, afterRetryQuoteSchema, ordinaryQuoteDataSchema.and(z.object({
   kind: z.undefined().optional(), retry_of_run_id: z.undefined().optional(), population_id: z.undefined().optional(),
   population_sha256: z.undefined().optional(), persona_ids: z.undefined().optional(), retry_budget: z.undefined().optional(),
 }))]);
@@ -219,28 +241,48 @@ const checkpointResourceSchema = z.object({
   object: z.string().regex(/^[a-f0-9]{40}$/), path: z.string().min(1),
   bytes: count, sha256: z.string().regex(/^[a-f0-9]{64}$/),
 });
+const checkpointPrivacyExportSchema = z.object({
+  kind: z.literal('privacy_filtered_publication_derivative'),
+  policy: z.literal('delete_codex_creator_identity_and_rate_limit_account_metadata.v1'),
+  original_bytes_unchanged: z.literal(false), original_private_capture_preserved: z.literal(true),
+  original_binding_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  original_checkpoint_object: z.string().regex(/^[a-f0-9]{40}$/),
+  original_transcript_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  exported_transcript_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  checkpoint_id: z.string(), source_commit: z.string().regex(/^[a-f0-9]{40}$/), session_id: z.string(),
+  removed_fields: z.object({ creator_fields_deleted: count, rate_limit_fields_deleted: count }),
+});
 const checkpointAccessSchema = z.object({
   kind: z.literal('github_git_checkpoint'), status: z.literal('anonymous_verified'),
   repository: z.string().min(1), checkpoint_id: z.string().min(1), checkpoint_ref: z.string().min(1),
   checkpoint_object: z.string().regex(/^[a-f0-9]{40}$/), source_commit: z.string().regex(/^[a-f0-9]{40}$/),
   url: z.string(), transcript_url: z.string(), source_url: z.string(),
   binding_sha256: z.string().regex(/^[a-f0-9]{64}$/), receipt_sha256: z.string().regex(/^[a-f0-9]{64}$/),
-  verified_at: z.iso.datetime({ offset: true }), resource_digests: z.array(checkpointResourceSchema).length(4),
+  verified_at: z.iso.datetime({ offset: true }), resource_digests: z.array(checkpointResourceSchema).min(4).max(5),
+  privacy_export: checkpointPrivacyExportSchema.optional(), privacy_export_url: z.string().optional(),
   hosted_entire_url: z.null(), hosted_entire_status: z.literal('unverified'),
 }).refine(access => {
   const raw = (object: string, path: string) => `https://raw.githubusercontent.com/${access.repository}/${object}/${path}`;
   return /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(access.repository)
     && access.url === raw(access.checkpoint_object, 'metadata.json')
     && ['0/full.jsonl', '0/transcript.jsonl'].some(path => access.transcript_url === raw(access.checkpoint_object, path))
-    && access.source_url === raw(access.source_commit, 'lib/fulfillment-policy.ts');
+    && access.source_url === raw(access.source_commit, 'lib/fulfillment-policy.ts')
+    && (access.privacy_export
+      ? access.resource_digests.length === 5
+        && access.privacy_export_url === raw(access.checkpoint_object, 'privacy-export.json')
+        && access.privacy_export.checkpoint_id === access.checkpoint_id
+        && access.privacy_export.source_commit === access.source_commit
+        && access.privacy_export.original_checkpoint_object !== access.checkpoint_object
+      : access.resource_digests.length === 4 && access.privacy_export_url === undefined);
 }, 'Checkpoint links must match the recorded immutable repository and objects');
 export const repairSchema = z.object({
   id: z.string(), status: z.enum(['queued', 'running', 'completed', 'blocked', 'failed']),
   base_revision: z.string(), head_revision: z.string().nullable(), preview_url: z.string().nullable(),
   checkpoint_id: z.string().nullable(), checkpoint_url: z.string().nullable(), gates: z.array(gateSchema),
   target_revision: z.string().nullable().optional(), source_digest: z.string().nullable().optional(),
+  entire_viewer_url: z.string().regex(/^https:\/\/entire\.io\/gh\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/commit\/[a-f0-9]{40}$/).nullable().optional(),
   checkpoint_access: checkpointAccessSchema.nullable().optional(),
-}).refine(repair => !repair.checkpoint_access || (
+}).refine(repair => !repair.entire_viewer_url || !!repair.head_revision && repair.entire_viewer_url.endsWith('/commit/' + repair.head_revision), 'Entire viewer must belong to the exact repair commit').refine(repair => !repair.checkpoint_access || (
   repair.checkpoint_access.checkpoint_id === repair.checkpoint_id
   && repair.checkpoint_access.source_commit === repair.head_revision
   && repair.checkpoint_access.url === repair.checkpoint_url
@@ -252,8 +294,17 @@ export const comparisonSchema = z.object({
   held_out_checks: z.object({
     total: count, passed: count, failed: count, not_in_population_denominator: z.literal(true),
     cases: z.array(z.object({
-      case: z.string(), passed: z.boolean(), revision: z.string(), preview_url: z.string(),
-      provider: z.string(), measured: z.boolean(), account_id: z.string(), evidence: z.record(z.string(), z.unknown()),
+      case: z.string(), passed: z.boolean(), account_id: z.string(),
+      revision: z.string().optional(), preview_url: z.string().optional(),
+      provider: z.string().optional(), measured: z.boolean().optional(),
+      order_id: z.string().nullable().optional(), method: z.string().optional(),
+      diagnostic: z.union([z.boolean(), z.object({
+        http_status: z.number().int(), state: z.string(), grant_applied: z.boolean(),
+        same_account_order: z.boolean(), order_id: z.string(), payment_id: z.string(),
+        method: z.string(), not_in_population_denominator: z.boolean(), additional_checkout_or_pay: z.boolean(),
+      })]).optional(),
+      download_http: z.number().optional(), orders: z.number().optional(),
+      evidence: z.record(z.string(), z.unknown()).optional(),
     })),
   }).optional(),
 });
@@ -263,6 +314,13 @@ export const baselineRetryLineageSchema = z.object({
   approval_sha256: z.string().regex(/^[a-f0-9]{64}$/), accepted_at: z.iso.datetime({ offset: true }),
   retry_budget: retryBudgetSchema, history_excluded_from_retry_denominator: z.literal(true),
   payment_safety_basis: z.enum(['owner_reviewed_pre_submission_evidence_not_provider_receipt', 'server_recorded_pre_submission_evidence_not_provider_receipt']),
+});
+const afterRetryLineageSchema = z.object({
+  original_run_id: z.string(), retry_run_id: z.string(), parent_before_run_id: z.string(),
+  population_id: z.string(), population_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  persona_ids: z.array(z.string()), repair_id: z.string(), head_revision: z.string().regex(/^[a-f0-9]{40}$/),
+  target_revision: z.string(), source_digest: z.string().regex(/^[a-f0-9]{64}$/),
+  retry_budget: retryBudgetSchema, known_replay_source_run_id: z.string(),
 });
 export const runSchema = z.object({
   id: z.string(), app_url: z.string(), persona_count: count, population_id: z.string(),
@@ -282,8 +340,28 @@ export const runSchema = z.object({
   after_reserve_microusd: money.optional(), after_reserve_includes_known_replay: z.boolean().optional(),
   gates: z.array(gateSchema), personas: z.array(personaSchema), events: z.array(eventSchema),
   repair: repairSchema.nullable(), comparison: comparisonSchema.nullable(),
+  after_retry: afterRetryLineageSchema.optional(), after_retry_of_run_id: z.string().optional(), after_retry_child_run_id: z.string().optional(),
   retry_of_run_id: z.string().min(1).optional(), baseline_retry: baselineRetryLineageSchema.optional(), retry_budget: retryBudgetSchema.optional(),
 }).refine(current => {
+  if (current.after_retry) {
+    const a = current.after_retry; const q = current.budget_contract;
+    return current.pass === 'after' && current.provider === 'dodo'
+      && current.id === a.retry_run_id && current.after_retry_of_run_id === a.original_run_id
+      && current.parent_run_id === a.parent_before_run_id && current.population_id === a.population_id
+      && current.personas.length === a.persona_ids.length && current.persona_count === a.persona_ids.length
+      && current.personas.every((person, index) => person.id === a.persona_ids[index])
+      && current.source_commit === a.head_revision && current.revision === a.target_revision
+      && current.source_digest === a.source_digest && current.repair?.id === a.repair_id
+      && q?.kind === 'after_retry' && q.head_revision === a.head_revision
+      && q.source_digest === a.source_digest && q.target_revision === a.target_revision
+      && q.before_run_id === a.parent_before_run_id && q.repair_id === a.repair_id
+      && q.persona_ids.length === a.persona_ids.length && q.persona_ids.every((id, index) => id === a.persona_ids[index])
+      && q.retry_of_run_id === a.original_run_id && q.population_sha256 === a.population_sha256
+      && a.known_replay_source_run_id === (q.known_replay_source_run_id || q.retry_of_run_id)
+      && q.reserved_microusd === current.budget.reserved_microusd
+      && current.budget.reserved_microusd === a.retry_budget.new_reserved_microusd;
+  }
+  if (current.after_retry_of_run_id || current.budget_contract?.kind === 'after_retry') return false;
   const lineage = current.baseline_retry;
   if (!lineage) return !current.retry_of_run_id && !current.retry_budget && current.budget_contract?.kind !== 'baseline_retry';
   if (current.provider !== 'dodo' || lineage.original_run_id === lineage.retry_run_id
@@ -352,3 +430,5 @@ export type Scenario = z.infer<typeof scenarioSchema>;
 export type SavedScenario = z.infer<typeof savedScenarioSchema>;
 export type ScenarioResult = z.infer<typeof scenarioResultSchema>;
 export type ScenarioCatalog = z.infer<typeof scenarioCatalogSchema>;
+
+export type AfterRetryQuote = z.infer<typeof afterRetryQuoteSchema>;

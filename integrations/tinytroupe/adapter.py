@@ -18,15 +18,31 @@ from tryfolk.codex_bridge import generate
 from tryfolk.scenarios import generation_constraints
 from llama_index.core import Settings as IndexSettings
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from huggingface_hub import snapshot_download
 from pydantic import BaseModel, Field
 
 EMBEDDING_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
+EMBEDDING_CACHE = Path(__file__).resolve().parents[2] / "runtime/embeddings"
+EMBEDDING_FILES = [
+    "config.json", "config_sentence_transformers.json", "model.safetensors", "modules.json",
+    "sentence_bert_config.json", "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json",
+    "vocab.txt", "1_Pooling/config.json",
+]
+embedding_snapshot = EMBEDDING_CACHE / "models--BAAI--bge-small-en-v1.5" / "snapshots" / EMBEDDING_REVISION
+if not all((embedding_snapshot / file).is_file() for file in EMBEDDING_FILES):
+    embedding_snapshot = Path(snapshot_download(
+        "BAAI/bge-small-en-v1.5", revision=EMBEDDING_REVISION,
+        cache_dir=str(EMBEDDING_CACHE), allow_patterns=EMBEDDING_FILES,
+    ))
+# Loading the complete pinned local snapshot preserves its CLS pooling and
+# normalization modules. Remote './modules.json' lookups in SentenceTransformers
+# can fail independently and silently select a different default architecture.
 IndexSettings.embed_model = HuggingFaceEmbedding(
-    model_name="BAAI/bge-small-en-v1.5",
+    model_name=str(embedding_snapshot),
     revision=EMBEDDING_REVISION,
     device="cpu",
     trust_remote_code=False,
-    cache_folder=str(Path(__file__).resolve().parents[2] / "runtime/embeddings"),
+    cache_folder=str(EMBEDDING_CACHE),
 )
 
 
@@ -249,6 +265,14 @@ def main():
                         }
                     )
                 data = {"population": population}
+            elif command["op"] == "prepare_intents":
+                if people:
+                    raise RuntimeError("Intent preparation cannot replace active journey memory.")
+                from tryfolk.purchase_intents import prepare_intents
+
+                data = {"population": prepare_intents(
+                    command["population"], command["brief"], build, TinyPerson, generate,
+                )}
             elif command["op"] == "init":
                 if bulk_key and (bulk_key in people or len(people) >= 10 or command["persona"]["id"] != bulk_key[1]):
                     raise RuntimeError("Distinct at-most-ten owned persona memory sessions are required.")

@@ -234,11 +234,13 @@ async def test_browser_lease_failure_quarantines_host_before_release(failed_oper
     host=Host()
     lease=BrowserLease(host,lambda host,reusable: releases.append((host,reusable,host.closed)))
     if failed_operation=='begin_session':
-        with pytest.raises(RuntimeError):await lease.request({'op':'goto'})
+        with pytest.raises(RuntimeError):
+            await lease.request({'op':'goto'})
         await lease.close()
     else:
         await lease.request({'op':'goto'})
-        with pytest.raises(RuntimeError):await lease.close()
+        with pytest.raises(RuntimeError):
+            await lease.close()
     assert releases==[(host,False,True)] and host.frame_verify is None
 
 
@@ -252,7 +254,9 @@ async def test_browser_lease_success_requires_actual_context_close_receipt():
         closed=False
         async def request(self,data,timeout):return {}
         async def close(self):self.closed=True
-    host=Host();lease=BrowserLease(host,lambda host,reusable: releases.append(reusable))
+    host=Host()
+    lease=BrowserLease(host,lambda host,reusable: releases.append(reusable))
     await lease.request({'op':'goto'})
-    with pytest.raises(RuntimeError,match='context close'):await lease.close()
+    with pytest.raises(RuntimeError,match='context close'):
+        await lease.close()
     assert releases==[False] and host.closed

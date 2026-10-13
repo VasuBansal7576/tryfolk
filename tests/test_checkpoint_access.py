@@ -22,7 +22,13 @@ SESSION = "11111111-2222-4333-8444-555555555555"
 REPOSITORY = "OfflineOwner/repair-demo"
 
 
-def captured_repair(tmp_path, repository=REPOSITORY, response_headers=None, metadata_path="0/metadata.json"):
+def captured_repair(
+    tmp_path,
+    repository=REPOSITORY,
+    response_headers=None,
+    metadata_path="0/metadata.json",
+    privacy_records=False,
+):
     """Invented local capture and public HTTP objects, never a live Entire receipt."""
     from tryfolk.checkpoint_access import seal_capture_binding
 
@@ -64,6 +70,22 @@ def captured_repair(tmp_path, repository=REPOSITORY, response_headers=None, meta
         )
         + "\n"
     ).encode()
+    if privacy_records:
+        initial = json.loads(transcript)
+        initial["payload"].update(
+            creator_user_id="offline-private-user", creator_account_id="offline-private-account"
+        )
+        transcript = (
+            (json.dumps(initial) + "\n").encode()
+            + b"\n".join(
+                [
+                    b'{"type":"response_item","payload":{"role":"user","content":"actual fixture repair request"}}',
+                    b'{"type":"event_msg","payload":{"type":"token_count","info":{"tokens":123},"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":12.5},"credits":{"balance":"offline-private-balance"},"plan_type":"offline-private-plan"}}}',
+                    b'{"type":"response_item","payload":{"role":"tool","content":"actual fixture result: test failed"}}',
+                ]
+            )
+            + b"\n"
+        )
     files = {
         "metadata.json": json.dumps(
             {

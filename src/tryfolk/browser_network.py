@@ -598,6 +598,85 @@ class ResourceGuard:
         self.events.append({"decision": "owned_navigation_prepared", "owned_navigation_checks": checks,
                             "first_failed_predicate": None})
 
+    async def complete_owned_navigation(self, destination, *, sdk_success, settlement):
+        """Attest one acknowledged prepared app transition, including Next SPA links.
+
+        A SPA changes history without producing the primary GET admitted by
+        bind_owned_navigation. Its exact SDK transition must retain the prepared
+        Target/loader and fresh independent payment/session ownership.
+        """
+        prepared = self._owned_navigation
+        capability = self.card_attempt
+        admitted_get = self._owned_download_page_admitted
+        checks = {
+            "acknowledged_actual_SDK_action": sdk_success is True,
+            "exact_owned_art_pack_destination": destination == self.policy.origin + "/special-downloads",
+            "settled_exact_owned_art_pack_document": isinstance(settlement, dict)
+                and settlement.get("url") == destination and settlement.get("transition_state") == "ready"
+                and settlement.get("ready_state") in ("interactive", "complete")
+                and settlement.get("body_present") is True and settlement.get("busy") is False,
+            "explicit_prepared_or_admitted_transition": admitted_get or bool(prepared)
+                and prepared.get("destination") == destination,
+            "accepted_native_CONFIRM": bool(capability) and capability.confirmed,
+            "native_succeeded_response": bool(capability) and capability.response_status == "succeeded",
+            "bounded_confirmed_return": bool(capability) and capability.return_phase_open(),
+            "accepted_owned_provider_redirect": bool(capability) and bool(capability._admitted_owned_redirect),
+        }
+        try:
+            if not all(checks.values()):
+                raise OwnedNavigationError(checks)
+            async with asyncio.timeout(8):
+                before = (await self.protocol_frames())["main"]
+                checks["current_protocol_exact_owned_document"] = bool(before) and before.get("url") == destination
+                if not admitted_get:
+                    source = prepared.get("document") or {}
+                    checks.update({
+                        "prepared_transition_still_fresh": capability.clock() < prepared["expires"],
+                        "prepared_source_is_admitted_owned_return": source.get("url") == capability._admitted_owned_redirect,
+                        "same_original_Target_and_loader": bool(source) and all(
+                            isinstance(source.get(key), str) and bool(source[key])
+                            and source[key] == before.get(key) for key in ("id", "loader_id")),
+                    })
+                if not all(checks.values()):
+                    raise OwnedNavigationError(checks)
+                identity, identity_checks = await self.return_identity()
+                checks.update(identity_checks)
+                checks["independent_payment_succeeded"] = identity.get("payment_status") == "succeeded"
+                session = await self.owned_session_reader()
+                body = session.get("body") if isinstance(session, dict) else None
+                body = body if isinstance(body, dict) else {}
+                orders = body.get("orders") or []
+                order = orders[0] if isinstance(orders, list) and len(orders) == 1 and isinstance(orders[0], dict) else {}
+                ownership = identity.get("ownership") or {}
+                checks.update({
+                    "authenticated_owned_session_HTTP200": isinstance(session, dict) and session.get("http_status") == 200
+                        and session.get("same_origin_no_redirect") is True,
+                    "authenticated_session_same_ownership": bool(ownership) and body.get("ownership") == ownership,
+                    "authenticated_session_single_same_active_order": bool(order) and order.get("active") is True
+                        and all(order.get(key) == value for key, value in ownership.items())
+                        and all(order.get(key) == identity.get(key) for key in ("order_id", "checkout_session_id", "payment_id")),
+                })
+                if not admitted_get:
+                    binding = prepared["download_binding"]
+                    checks["prepared_same_original_payment_and_ownership"] = all(
+                        binding.get(key) == value for key, value in ownership.items()) and all(
+                        binding.get(key) == identity.get(key) for key in ("order_id", "checkout_session_id", "payment_id"))
+                after = (await self.protocol_frames())["main"]
+                checks["same_owned_document_during_independent_reads"] = before == after
+                if not all(checks.values()):
+                    raise OwnedNavigationError(checks)
+                self._owned_download_page_admitted = True
+                self._owned_navigation = None
+        except Exception as error:
+            self._owned_navigation = None
+            self.events.append({"decision": "deny_owned_app_transition_completion", "owned_navigation_checks": checks,
+                                "first_failed_predicate": getattr(error, "first_failed_predicate", None),
+                                "error_type": type(error).__name__})
+            raise
+        self.events.append({"decision": "owned_app_transition_completed", "owned_navigation_checks": checks,
+                            "admitted_by_primary_GET": admitted_get, "first_failed_predicate": None})
+        return checks
+
     async def bind_owned_navigation(self, request):
         prepared, self._owned_navigation = self._owned_navigation, None
         checks = {

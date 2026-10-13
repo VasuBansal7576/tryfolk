@@ -47,6 +47,8 @@ ADAPTER_FILES = (
     "src/tryfolk/verification.py",
     "src/tryfolk/bulk_personas.py",
     "src/tryfolk/bulk_policy.py",
+    "src/tryfolk/purchase_intents.py",
+    "src/tryfolk/after_retry.py",
     "src/tryfolk/runtime.py",
     "src/tryfolk/worker.py",
     "integrations/tinytroupe/adapter.py",
@@ -269,6 +271,13 @@ def execution_ready(manifest, validation, root):
     try:
         digest(validation)
         proof = json.loads(Path(validation).read_text())
+        if proof.get("schema") == "tryfolk.dodo-runtime-validation.v2":
+            from .dodo_commissioning_validation import commissioning_execution_ready
+            import subprocess
+            try:
+                return commissioning_execution_ready(manifest, proof, root)
+            except (AttributeError, IndexError, subprocess.SubprocessError):
+                return False
         if proof.get("schema") != "tryfolk.dodo-runtime-validation.v1" or len(proof.get("evidence", [])) != 4:
             return False
         values = []

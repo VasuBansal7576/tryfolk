@@ -19,6 +19,57 @@ from tryfolk.response_boundary import ResponseBoundary
 from tryfolk.native_card_observation import observer_script
 
 
+async def reconcile_duplicate(request, session_reader, origin, *, ownership, order_id, payment_id, checkout_id):
+    """One owned HTTP idempotency diagnostic in the actual browser cookie jar."""
+    from tryfolk.dodo import OWNERSHIP
+
+    expected = {key: ownership[key] for key in OWNERSHIP}
+    if (set(ownership) != set(OWNERSHIP) or any(not isinstance(v, str) or not v for v in expected.values())
+            or any(not isinstance(v, str) or not 0 < len(v) <= 128 for v in (order_id, payment_id, checkout_id))):
+        raise ValueError("Exact independently verified account, order and payment identity required.")
+
+    async def read_owned():
+        observed = await session_reader()
+        body = observed.get("body", {})
+        orders = body.get("orders", [])
+        if (observed.get("http_status") != 200 or observed.get("same_origin_no_redirect") is not True
+                or body.get("ownership") != expected or body.get("has_access") is not True
+                or not isinstance(orders, list) or len(orders) != 1):
+            raise ValueError("Current browser account is not the exact already-paid diagnostic account.")
+        order = orders[0]
+        if (any(order.get(key) != value for key, value in expected.items())
+                or order.get("order_id") != order_id or order.get("checkout_session_id") != checkout_id
+                or order.get("payment_id") != payment_id
+                or order.get("active") is not True or order.get("granted") is not True):
+            raise ValueError("Current browser order changed; no reconciliation dispatched.")
+        return {key: order[key] for key in (*OWNERSHIP, "order_id", "checkout_session_id")}
+
+    before = await read_owned()
+    url = origin + "/api/target/reconcile"
+    response = await request.post(url, data={"order_id": order_id}, headers={"Origin": origin},
+                                  max_redirects=0, timeout=5000)
+    try:
+        raw = await response.body()
+        if (response.status != 200 or response.url != url or response.headers.get("location")
+                or response.headers.get("content-type", "").split(";", 1)[0] != "application/json"
+                or len(raw) > 64_000):
+            raise ValueError("Same-order diagnostic response is unavailable; no retry.")
+        result = json.loads(raw)
+        if (not isinstance(result, dict) or result.get("source") != "dodo_test_api_reconciliation"
+                or result.get("state") != "already_granted" or result.get("grant_applied") is not False
+                or result.get("has_access") is not True or result.get("payment_id") != payment_id
+                or result.get("ownership") != {**expected, "order_id": order_id}):
+            raise ValueError("Same-order diagnostic did not prove already-granted idempotency.")
+    finally:
+        await response.dispose()
+    if await read_owned() != before:
+        raise ValueError("Browser account/order changed during diagnostic.")
+    return {"http_status": 200, "state": result["state"], "grant_applied": False,
+            "same_account_order": True, "order_id": order_id, "payment_id": payment_id,
+            "method": "owned HTTP idempotency diagnostic in actual browser cookie jar",
+            "not_in_population_denominator": True, "additional_checkout_or_pay": False}
+
+
 def chrome_executable():
     # Match the installed Stagehand launcher's browser selection. Never select
     # an existing Chrome instance or a personal profile; only an executable.

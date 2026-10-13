@@ -1,0 +1,39 @@
+# Actual Dodo repair and matched rerun
+
+Use the running product and `.venv/bin/python scripts/demo.py worker`. The private `runtime/demo.env` must configure `TRYFOLK_CHECKPOINT_REPOSITORY=VasuBansal7576/tryfolk` for both API and worker; the owner restarts them after any immutable control finishes. Keep the local supervisor running so it can start the exact built repair preview.
+
+`scripts/repair_retest.py` is a legacy fixture smoke tool: its separately constructed settings omit the four-lane/CFO/checkpoint configuration and it immediately retests. Use the product's repair and retest controls for the actual Dodo acceptance.
+
+1. Complete the four-person baseline. Inspect the genuine measured `paid_without_access` finding and choose **Repair**, then approve that finding in the UI. The worker exports only approved licensed target files into `runtime/repairs/<actual repair ID>/source`, runs the immutable regressions red, invokes Codex on `lib/fulfillment-policy.ts`, captures the real Entire session, validates the production build and registers the exact repaired preview. Broken mode, amount, currency and provider configuration stay pinned.
+2. Wait for the repair status **Completed**. Retain the actual repair ID, `head_revision`, checkpoint ID and source digest. Its server-sealed private capture is `runtime/evidence/<repair ID>-checkpoint-access-binding.json`; never publish that HMAC envelope or private configuration. The checkpoint ref is unique to this Dodo repair; the earlier local-fixture checkpoint is separate.
+3. Review the exact source tree and exact checkpoint Git blobs for credentials or unrelated private context. Compare against actual locally stored secret values without printing those values. Inspect tracked source paths and the source diff; the only changed source seam must be `lib/fulfillment-policy.ts`. Checkpoint transcripts preserve real context, so review them before publication.
+4. Keep the original captured checkpoint and signed binding private. Raw Codex captures may include creator account IDs, credit balance and account usage metadata even when Entire's secret scanner finds no credentials. The root development/chat checkpoint must never be published. A completed repair alone does not approve publication.
+
+For an explicitly approved privacy export, set `TRYFOLK_DODO_REPAIR_ID` to the completed repair ID and run:
+
+```sh
+PYTHONPATH=src .venv/bin/python scripts/export_dodo_checkpoint.py "$TRYFOLK_DODO_REPAIR_ID"
+```
+
+This command does **not** push. It validates the original signed capture, preserves its bytes and ref, and creates a disclosed publication derivative with the same actual session/checkpoint/source relationship. Only the two creator identity fields and the listed account/financial fields within Codex token-count rate-limit records are deleted. Every other transcript record, actual prompt, tool result and source commit remains intact. The derivative has no parent, so private original checkpoint history cannot be uploaded through its ancestry. `privacy-export.json` records the original and exported hashes, policy and field counts. A separate server-signed private export binding retains this relationship; it never claims the exported bytes are the original bytes.
+
+Review `runtime/evidence/<repair ID>-privacy-export-audit.json` and the exact derived Git blobs before approving its printed `push_argv`. The audit scans every reachable source/derivative blob against actual known credentials, private account/balance values and credential patterns. Its bare publication repository contains only the reviewed source ancestry and orphan privacy derivative; the original checkpoint object is absent. The printed command uses `git -c core.hooksPath=/dev/null` as explicitly approved for this publication, preventing Entire's pre-push auto-discovery from shipping private original refs. Push only those two exact refs, without force or main changes; never run a generic push from the Entire-enabled repair workspace.
+
+5. Run the reviewed printed push command. Read the exact refs from GitHub and the existing Entire mirror:
+
+```sh
+git ls-remote https://github.com/VasuBansal7576/tryfolk.git \
+  "refs/heads/tryfolk-dodo-repair-$TRYFOLK_DODO_REPAIR_ID" 'refs/entire/checkpoints/*'
+git ls-remote entire://aws-ap-south-1.entire.io/gh/VasuBansal7576/tryfolk \
+  "refs/heads/tryfolk-dodo-repair-$TRYFOLK_DODO_REPAIR_ID" 'refs/entire/checkpoints/*'
+```
+
+Use the actual checkpoint ID in `entire checkpoint explain <checkpoint ID> --repo entire://aws-ap-south-1.entire.io/gh/VasuBansal7576/tryfolk --json --no-pager`. Open `https://entire.io/gh/VasuBansal7576/tryfolk/commit/<actual head_revision>` in the in-app browser and inspect its real session before recording the observed `entire_viewer_url` on that exact repair. Existing mirrors are public and ready; no new mirror or billing change is needed.
+
+6. In the product, choose **Review public checkpoint verification**, then **Verify approved public checkpoint**. The owner-only endpoint `/runs/<before ID>/repairs/<repair ID>/checkpoint-access` takes an empty JSON body. For a privacy derivative, it first authenticates both server bindings, locally recomputes the exact allowed transformation, and rejects changed source/session identity, edited coding outcomes or a private parent. It then reads five immutable anonymous GitHub resources and checks exact signed hashes, including the public privacy disclosure. Original captures without an export retain their four-resource verification. A success retains a historical receipt and exposes the published checkpoint, exported transcript, source and privacy-disclosure links. The UI must label the transcript as a privacy-filtered publication derivative and the original capture as private. A 409 preserves the checkpoint as unverified; inspect the named gate. Do not replace the original capture or fabricate a new coding session. Newly pushed Git objects may need to become available through raw GitHub reads before verification succeeds.
+Public verification and retest are separate approvals: a locally completed repair may be retested while public access remains unverified, but publication acceptance still requires the real public readback.
+
+7. Choose **Review same-customer retest**, then approve the original unused after reservation. The service reuses the exact saved population and initial memories. Before the full four-person after pass, a separate diagnostic replays one recorded failure with the same profile on a fresh account. A validated saved purchase plan selects native guarded observations and its original action bound; all recorded intents are rebound to unique fresh controls. The diagnostic retains native frame/financial guards. Immediately after the recorded observed Confirm succeeds, a separate same-paid-order HTTP diagnostic uses that actual browser cookie jar once to verify idempotent reconciliation before artwork navigation. The target hides Confirm after granting access, so a second visible confirmation is not invented. Independent before/after payment and grant reads must retain the same identity and exactly one grant; the original browser then continues to its actual protected download. Unpaid access denial is checked separately. It is excluded from the four-person comparison denominator.
+8. The full after pass uses four isolated fresh accounts and the same saved personas against the exact repaired source. Inspect both per-person Neatlogs readbacks, unresolved counts and the actual comparison. A successful local fixture or held-out check does not satisfy a missing Dodo persona result.
+
+The diagnostic verifies payment and account entitlement before the separate capability audit; `capability=None` at that earlier check is allowed. Final diagnostic acceptance also requires a real protected download, one grant after duplicate reconciliation, and unpaid denial. It never infers those results from a persona intention.

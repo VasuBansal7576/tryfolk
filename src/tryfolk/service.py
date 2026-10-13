@@ -239,6 +239,14 @@ class Service:
 
         return accept_retry(self, run_id, quote_id, key, token)
 
+    def after_retry_quote(self, run_id, token):
+        from .after_retry import quote_retry
+        return quote_retry(self, run_id, token)
+
+    def after_retry(self, run_id, quote_id, key, token):
+        from .after_retry import accept_retry
+        return accept_retry(self, run_id, quote_id, key, token)
+
     def create_run(self, quote_id, key):
         with self.store.transaction() as db:
             request = json.dumps({"quote_id": quote_id}, sort_keys=True)
@@ -255,7 +263,7 @@ class Service:
             if not q:
                 raise DomainError(404, "quote_missing", "Quote not found.")
             self.validate_count(q["persona_count"])
-            if q.get("kind") == "baseline_retry":
+            if q.get("kind") in {"baseline_retry", "after_retry"}:
                 raise DomainError(
                     409, "owner_required", "Use the owner baseline retry endpoint for this quote."
                 )
@@ -387,9 +395,18 @@ class Service:
         comparison = run.get("comparison")
         if comparison:
             comparison = dict(comparison)
-            controls = [c for e in events if e["kind"] == "held_out_checks" for c in e["data"]["cases"]]
+            recorded_controls = [c for e in events if e["kind"] == "held_out_checks" for c in e["data"]["cases"]]
+            controls = []
+            seen_controls = set()
+            for control in recorded_controls:
+                identity = (control.get("case"), control.get("account_id"), control.get("order_id"))
+                if identity not in seen_controls:
+                    controls.append(control)
+                    seen_controls.add(identity)
             comparison["held_out_checks"] = {
                 "total": len(controls),
+                "recorded_total": len(recorded_controls),
+                "deduplicated_repeated_records": len(recorded_controls) - len(controls),
                 "passed": sum(c["passed"] for c in controls),
                 "failed": sum(not c["passed"] for c in controls),
                 "cases": controls,
@@ -480,6 +497,8 @@ class Service:
             run = self.store.load(db, "runs", run_id)
             if run.get("recovery") and run["phase"] == "queued":
                 return self.view(db, run)
+            if run["provider"] == "dodo":
+                return self.recover_dodo_after(db, run)
             action_events = db.execute(
                 "SELECT count(*) FROM events WHERE run_id=? AND kind IN ('persona_initialized','observation','browser_action','verification')",
                 (run_id,),
@@ -544,6 +563,108 @@ class Service:
                 (run_id, "connection_recovery_requested", now(), json.dumps(recovery)),
             )
             return self.view(db, run)
+
+    def recover_dodo_after(self, db, run):
+        """An owner may fund a fresh diagnostic before any adaptive after work."""
+        import hashlib
+        from .scenarios import digest
+
+        events = [dict(row) for row in db.execute(
+            "SELECT id,persona_id,kind,created_at,data,trace_url FROM events WHERE run_id=? ORDER BY id",
+            (run["id"],),
+        )]
+        adaptive = {"persona_initialized", "observation", "browser_action", "verification"}
+        before = self.store.load(db, "runs", run.get("parent_run_id"))
+        repair = self.store.load(db, "repairs", (run.get("repair") or {}).get("id"))
+        population = self.store.load(db, "populations", run["population_id"])
+        money = db.execute("SELECT * FROM reservations WHERE id=?", (run["reservation_id"],)).fetchone()
+        history = list(run.get("recoveries", []))
+        quoted = run.get("budget_contract", {}).get("execution_allowances", {})
+        diagnostic = quoted.get("known_replay_microusd", 10_000)
+        protected = self.remaining_after_reserve(run)
+        safe_gates = {
+            "Recorded intent has no unique freshly observed control; diagnostic stops without navigation substitution.",
+            "stagehand: Document changed after observation; no browser action was executed or retried.",
+        }
+        repair_pins = ("id", "run_id", "status", "provider", "head_revision", "preview_url",
+                       "checkpoint_id", "source_digest", "target_revision")
+        exact_repair = bool(before and repair and repair.get("status") == "completed"
+                            and repair.get("run_id") == before["id"]
+                            and all((before.get("repair") or {}).get(k) == repair.get(k)
+                                    and (run.get("repair") or {}).get(k) == repair.get(k)
+                                    for k in repair_pins)
+                            and repair.get("provider") == "dodo"
+                            and run.get("preview_url") == repair.get("preview_url")
+                            and run.get("revision") == repair.get("target_revision")
+                            and run.get("source_commit") == repair.get("head_revision")
+                            and run.get("source_digest") == repair.get("source_digest"))
+        if (run["pass"] != "after" or run["phase"] != "blocked" or run["outcomes"]
+                or any(event["kind"] in adaptive for event in events)
+                or not any(event["kind"] == "known_replay_action" for event in events)
+                or len(run["gates"]) != 1 or run["gates"][0].get("message") not in safe_gates
+                or len(history) >= 2 or not exact_repair
+                or not before or before["phase"] != "completed"
+                or run["population_id"] != before["population_id"]
+                or len(population or []) != run["persona_count"]
+                or run["persona_count"] != before["persona_count"]
+                or not money or money["released"] or not money["after_started"]
+                or type(diagnostic) is not int or diagnostic <= 0
+                or money["reserved"] - money["spent"] - diagnostic < protected):
+            raise DomainError(409, "recovery_not_safe",
+                              "Recovery requires the exact blocked known-case diagnostic, no adaptive after work, unchanged repair and cohort, and enough original allowance for a fresh diagnostic plus all saved customers.")
+        try:
+            validate_population(population, run.get("scenario_plan"))
+        except ValueError as error:
+            raise DomainError(409, "population_integrity", str(error)) from error
+        jobs = db.execute("SELECT id,status FROM jobs WHERE run_id=? AND kind='run'", (run["id"],)).fetchall()
+        if len(jobs) != 1 or jobs[0]["status"] != "blocked":
+            raise DomainError(409, "recovery_not_safe", "Exactly one blocked after job is required.")
+        attempt = run.get("execution_attempt", 1) + 1
+        trace_artifacts = []
+        evidence = Path(os.environ.get("TRYFOLK_EVIDENCE_ROOT", "runtime/evidence"))
+        for url in sorted({e["trace_url"] for e in events if e["trace_url"]}):
+            trace_id = urlsplit(url).path.rsplit("/", 1)[-1]
+            if not re.fullmatch(r"[a-f0-9]{32}", trace_id):
+                continue
+            for suffix in ("trace", "readback"):
+                source = evidence / f"{run['id']}-{trace_id}-{suffix}.json"
+                if not source.is_file() or source.is_symlink() or source.stat().st_size > 4_000_000:
+                    continue
+                content = source.read_bytes()
+                sha = hashlib.sha256(content).hexdigest()
+                captured = source.with_name(source.stem + "-captured-" + sha[:12] + source.suffix)
+                if captured.is_symlink():
+                    raise DomainError(409, "recovery_not_safe", "Retained trace evidence is unavailable.")
+                if not captured.exists():
+                    captured.write_bytes(content)
+                    captured.chmod(0o600)
+                if captured.read_bytes() != content:
+                    raise DomainError(409, "recovery_not_safe", "Retained trace evidence changed.")
+                trace_artifacts.append({"trace_id": trace_id, "kind": suffix,
+                                        "captured_path": str(captured), "sha256": sha})
+        recovery = {
+            "kind": "fresh_dodo_known_case_diagnostic", "execution_attempt": attempt,
+            "prior_gates": run["gates"], "prior_phase": run["phase"],
+            "prior_events_sha256": digest(events), "prior_event_ids": [e["id"] for e in events],
+            "prior_trace_urls": sorted({e["trace_url"] for e in events if e["trace_url"]}),
+            "prior_trace_artifacts": trace_artifacts,
+            "population_sha256": digest(population),
+            "repair_id": repair["id"], "target_revision": run["revision"],
+            "additional_estimated_consumption_microusd": diagnostic,
+            "protected_after_allowance_microusd": protected,
+            "remaining_after_recovery_microusd": money["reserved"] - money["spent"] - diagnostic,
+            "new_reservation_microusd": 0, "additional_checkout_or_pay_on_old_account": False,
+            "basis": "A fresh diagnostic account uses the original quoted allowance. Prior paid accounts and all recorded evidence remain unchanged; adaptive customers retain their full original allowance.",
+            "requested_at": now(),
+        }
+        db.execute("UPDATE reservations SET spent=spent+? WHERE id=?", (diagnostic, run["reservation_id"]))
+        run.update(phase="queued", gates=[], recovery=recovery, recoveries=[*history, recovery],
+                   execution_attempt=attempt, known_replay_allowance_consumed=True, updated_at=now())
+        self.store.save(db, "runs", run)
+        db.execute("UPDATE jobs SET status='queued',updated_at=? WHERE id=?", (now(), jobs[0]["id"]))
+        db.execute("INSERT INTO events(run_id,kind,created_at,data) VALUES (?,?,?,?)",
+                   (run["id"], "after_diagnostic_recovery_requested", now(), json.dumps(recovery)))
+        return self.view(db, run)
 
     def repair(self, run_id, finding_id, token):
         with self.store.transaction() as db:

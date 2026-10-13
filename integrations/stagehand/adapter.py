@@ -13,13 +13,15 @@ from uuid import uuid4
 from pathlib import Path
 from contextlib import AsyncExitStack
 from urllib.parse import urlsplit, quote
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+from stagehand.rpc_client import RPCError
 from stagehand import (
     LLMStructuredGenerateParams,
     LLMStructuredGenerateResult,
     LLMRole,
     LLMTextContent,
 )
-from local_session import open_routed_browser
+from local_session import open_routed_browser, reconcile_duplicate
 from tryfolk.codex_bridge import agenerate
 from tryfolk.browser_policy import FIELD_METHODS, DODO_CHECKOUT, DODO_SECURE_FRAME, exact_origin
 from tryfolk.browser_network import NetworkPolicy
@@ -30,7 +32,7 @@ from tryfolk.secure_frame import redact_frame_config
 from tryfolk.checkout_timing import CheckoutTiming
 from tryfolk.browser_events import EventCapture
 from tryfolk.payment_privacy import redact_payment
-from tryfolk.native_read_observation import NativeControlReads, NativeObservationGate, read_current_native_controls
+from tryfolk.native_read_observation import NativeControlReads, NativeControlMissing, NativeObservationGate, read_current_native_controls
 from tryfolk.native_card_observation import READ_CONTEXT, native_configuration_facts
 from tryfolk.checkout_discovery import discover_checkout_candidates, include_snapshot_manual_choices
 from tryfolk.manual_address import ManualAddressGate, read_current_manual_controls, resolve_manual_address, wait_for_billing_initialization
@@ -71,12 +73,32 @@ async def control_state(page, selector, network_page=None, guard=None, *, diagno
     trace = NativeControlReads(diagnostic)
     try:
         return await _control_state_read(page, selector, network_page, guard, trace)
-    except TimeoutError as error:
+    except RPCError as error:
+        match = re.search(r"/iframe\[\d+\]", selector.removeprefix("xpath="))
+        frame_path = selector.removeprefix("xpath=")[:match.end()] if match else None
+        # Only the exact read-only visibility RPC after approved direct-child
+        # DOM validation may discard a stale AX iframe path. No SDK action or
+        # input error can enter the native observation recovery.
+        if (error.code != -32603 or trace.operation != "stagehand_visibility"
+                or network_page is None or guard is None or selector.count("/iframe[") != 1
+                or str(error) != "Could not find an element for the given xPath(s): xpath=" + (frame_path or "")):
+            raise
+        evidence = {**trace.timeout_evidence(), "phase": "missing"}
+        if diagnostic:
+            diagnostic(evidence)
+        missing = NativeControlMissing("Current native read-only iframe candidate is missing.")
+        missing.control_observation = evidence
+        raise missing from error
+    except (TimeoutError, PlaywrightTimeoutError) as error:
         evidence = trace.timeout_evidence()
         if diagnostic:
             diagnostic(evidence)
-        error.control_observation = evidence
-        raise
+        # Playwright's locator timeout is a distinct SDK exception. Normalize
+        # this read-only boundary so the existing bounded fresh observation can
+        # discard the whole candidate set and recheck identity/generation.
+        timeout = TimeoutError("Current native read-only control timed out.")
+        timeout.control_observation = evidence
+        raise timeout from error
 
 
 async def read_manual_current(
@@ -115,7 +137,10 @@ async def wait_for_billing_calculation(
     Foreign/stale/failed calculations cannot authorize a checkout transition.
     """
     loop = asyncio.get_running_loop()
-    bound = min(deadline, loop.time() + 10)
+    # The actual provider calculation remained in flight after9.553s in the
+    # fast native route. Observe that same request for a bounded longer window;
+    # no request, action, or payment is retried and all readiness checks remain.
+    bound = min(deadline, loop.time() + 30)
     navigation = guard.checkout_navigation
     binding = original_document.get("url"), original_document.get("generation")
     if (
@@ -572,6 +597,7 @@ async def run(stack):
     financial_started = False
     clicked = set()
     pay_actions = 0
+    duplicate_reconciliation_attempted = False
     try:
         while command := await commands.get():
             boundary = {"op": command.get("op"), "call": "dispatch"}
@@ -604,6 +630,7 @@ async def run(stack):
                     completed_fields, completed_cards, clicked = set(), {}, set()
                     fresh_actions, fresh_document = [], None
                     billing_initialized_binding, financial_started, pay_actions = None, False, 0
+                    duplicate_reconciliation_attempted = False
                     last_billing_completion = None
                     native_parent_binding = None
                     blocked_domains.clear()
@@ -628,6 +655,21 @@ async def run(stack):
                         viewport:{width:innerWidth,height:innerHeight}})""")
                     data["condition_observation"] = {**observed_context,
                         "source":"stagehand_owned_context", "fresh_context":True}
+                elif op == "duplicate_reconcile":
+                    if (set(command) != {"op", "ownership", "order_id", "payment_id", "checkout_id"}
+                            or not session_open or not policy or policy.provider != "dodo"
+                            or "confirm" not in clicked or pay_actions != 1
+                            or not guard.card_attempt or not guard.card_attempt.confirmed
+                            or duplicate_reconciliation_attempted
+                            or exact_origin(await page.url()) != policy.origin):
+                        raise RuntimeError("One diagnostic requires actual accepted Confirm and the same single-paid browser session.")
+                    duplicate_reconciliation_attempted = True  # Never retry an ambiguous POST.
+                    data = await reconcile_duplicate(
+                        network_context.request, guard.owned_session_reader, policy.origin,
+                        ownership=command["ownership"], order_id=command["order_id"],
+                        payment_id=command["payment_id"], checkout_id=command["checkout_id"],
+                    )
+                    fresh_actions, fresh_document = [], None
                 elif op in ("observe", "observe_native"):
                     fresh_actions, fresh_document = [], None
                     observation_deadline = asyncio.get_running_loop().time() + 170
@@ -877,7 +919,20 @@ async def run(stack):
                     sdk_action = {k: v for k, v in action.items() if k != "_tryfolk"}
                     boundary["call"] = "stagehand.act"
                     sdk_action_started_at = time.time()
-                    data = (await stagehand.act(sdk_action, page=page, timeout=10000)).model_dump(mode="json")
+                    fixture_form_submit = (
+                        policy.provider == "local-fixture"
+                        and action.get("method") == "click"
+                        and control.get("tag") == "BUTTON"
+                        and control.get("type") == "submit"
+                    )
+                    if fixture_form_submit:
+                        # A successful SDK click can return before this owned form's
+                        # POST navigation replaces its execution context. Observe that
+                        # one navigation before accepting another diagnostic action.
+                        async with network_page.expect_navigation(wait_until="domcontentloaded", timeout=10000):
+                            data = (await stagehand.act(sdk_action, page=page, timeout=10000)).model_dump(mode="json")
+                    else:
+                        data = (await stagehand.act(sdk_action, page=page, timeout=10000)).model_dump(mode="json")
                     if not data.get("data", {}).get("success"):
                         raise RuntimeError("Stagehand did not execute the observed action successfully.")
                     kind = action.get("_tryfolk", {}).get("kind")
@@ -921,12 +976,22 @@ async def run(stack):
                         policy,
                         action,
                         previous_document=fresh_document,
-                        timeout=30 if action.get("_tryfolk", {}).get("kind") == "billing_continue" else 10,
+                        # Acknowledged Pay includes native confirmation, provider
+                        # status navigation and the owned return's hydration.
+                        # Extend observation only; no click or payment is retried.
+                        timeout=30 if action.get("_tryfolk", {}).get("kind") in ("billing_continue", "pay") else 10,
                     )
                     if data["settlement"].get("transition_state") == "error":
                         boundary["settlement"] = data["settlement"]
                         raise RuntimeError(
                             "Acknowledged checkout transition ended with a stable visible error; no action was retried."
+                        )
+                    if (guard.card_attempt and guard.card_attempt.confirmed
+                            and action.get("_tryfolk", {}).get("kind") == "art_pack"):
+                        boundary["call"] = "owned_navigation.complete"
+                        data["owned_app_transition"] = await guard.complete_owned_navigation(
+                            control["destination"], sdk_success=data.get("data", {}).get("success"),
+                            settlement=data["settlement"],
                         )
                     data["settled_url"] = data["settlement"]["url"]
                     if action.get("method") in FIELD_METHODS:

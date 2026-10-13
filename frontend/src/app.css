@@ -57,3 +57,7 @@ dialog.screenshot-dialog{width:min(1100px,calc(100% - 28px))}.full-screenshot{ma
 .retry-budget .budget-rows>div:nth-child(6){color:var(--teal);font-weight:500}
 .retry-budget .budget-rows>div:last-child{border-bottom:2px solid var(--line)}
 .quote-page [data-action="confirm-baseline-retry"]{white-space:normal;text-align:left}
+.comparison-scroll { overflow-x: auto; }
+.persona-comparison th small { display: block; font-weight: 400; overflow-wrap: anywhere; }
+.persona-comparison td { min-width: 180px; vertical-align: top; }
+.persona-comparison td div { margin-top: 8px; }

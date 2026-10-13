@@ -29,6 +29,10 @@ class NativeObservationGate(RuntimeError):
         super().__init__("Current native read-only observation is unestablished: " + reason)
 
 
+class NativeControlMissing(RuntimeError):
+    """An approved read-only SDK locator lost its current iframe candidate."""
+
+
 class NativeControlReads:
     """Retain static operation and duration, never selector/URL/input values."""
 
@@ -73,6 +77,7 @@ async def read_current_native_controls(
     if max_attempts not in (1, 2):
         raise ValueError("Native diagnostic reads permit at most two attempts")
     loop = asyncio.get_running_loop()
+    discarded_binding = None
     for attempt in range(1, max_attempts + 1):
         if loop.time() >= deadline:
             raise NativeObservationGate("original_deadline_exhausted")
@@ -89,6 +94,8 @@ async def read_current_native_controls(
                         }
                     )
                     raise NativeObservationGate("current_native_identity_or_generation")
+                if stop_on_change and discarded_binding is not None and before.get("binding") != discarded_binding:
+                    raise NativeObservationGate("native_changed_after_executed_card")
                 candidates = await read_controls()
                 after = await recheck()
                 after_checks = after.get("checks", {})
@@ -102,11 +109,11 @@ async def read_current_native_controls(
                         raise NativeObservationGate("native_changed_after_executed_card")
                     continue
                 return candidates
-        except TimeoutError as error:
+        except (TimeoutError, NativeControlMissing) as error:
             private = getattr(error, "control_observation", {})
             operation = private.get("operation")
             event = {
-                "decision": "discard_read_timeout",
+                "decision": "discard_read_missing" if isinstance(error, NativeControlMissing) else "discard_read_timeout",
                 "attempt": attempt,
                 "operation": operation if operation in OPERATIONS else "unretained",
                 "original_deadline_available": loop.time() < deadline,
@@ -119,4 +126,6 @@ async def read_current_native_controls(
                 raise NativeObservationGate("original_deadline_exhausted") from None
             if operation not in OPERATIONS:
                 raise NativeObservationGate("unrecognized_discovery_timeout") from None
+            if stop_on_change:
+                discarded_binding = before.get("binding")
     raise NativeObservationGate("bounded_read_attempts_exhausted")

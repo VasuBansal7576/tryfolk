@@ -114,3 +114,30 @@ test('every published 409 gate stays an actionable error, with no success result
     assert.equal(calls, 1);
   }
 });
+
+test('privacy derivative needs a fifth exact public disclosure and remains visibly distinct from unchanged original bytes', () => {
+  const privacy_export = {
+    kind: 'privacy_filtered_publication_derivative',
+    policy: 'delete_codex_creator_identity_and_rate_limit_account_metadata.v1',
+    original_bytes_unchanged: false, original_private_capture_preserved: true,
+    original_binding_sha256: '1'.repeat(64), original_checkpoint_object: '2'.repeat(40),
+    original_transcript_sha256: '3'.repeat(64), exported_transcript_sha256: '4'.repeat(64),
+    checkpoint_id: repair.checkpoint_id, source_commit: source, session_id: 'test-only-session',
+    removed_fields: { creator_fields_deleted: 2, rate_limit_fields_deleted: 7 },
+  };
+  const derivative = { ...access, privacy_export, privacy_export_url: raw(object, 'privacy-export.json'),
+    resource_digests: [...access.resource_digests, { object, path: 'privacy-export.json', bytes: 30, sha256: '5'.repeat(64) }] };
+  const parsed = repairSchema.parse({ ...verified, checkpoint_access: derivative });
+  const html = renderCheckpointAccess(parsed);
+  assert.match(html, /Verified privacy-filtered transcript/);
+  assert.match(html, /private original is preserved/);
+  assert.match(html, /Verified privacy export disclosure/);
+  assert.doesNotMatch(html, /Verified raw transcript/);
+  for (const invalid of [
+    { ...derivative, resource_digests: access.resource_digests },
+    { ...derivative, privacy_export_url: raw('main', 'privacy-export.json') },
+    { ...derivative, privacy_export: { ...privacy_export, original_bytes_unchanged: true } },
+    { ...derivative, privacy_export: { ...privacy_export, source_commit: '9'.repeat(40) } },
+    { ...derivative, privacy_export: undefined },
+  ]) assert.equal(repairSchema.safeParse({ ...verified, checkpoint_access: invalid }).success, false);
+});

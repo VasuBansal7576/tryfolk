@@ -2,7 +2,7 @@ import './styles.css';
 import './app.css';
 import { api, ApiError } from './api';
 import { fixedPopulationBlocker, LAUNCH_PERSONA_COUNT } from './launch';
-import type { BaselineRetryQuote, Finding, Quote, Readiness, Run, RunEvent } from './contracts';
+import type { AfterRetryQuote, BaselineRetryQuote, Finding, Quote, Readiness, Run, RunEvent } from './contracts';
 import { comparisonTable, escape, eventList, eventSummary, evidence, gates, humanize, link, money, number, outcomes, providerNotice, redact, safeUrl, timestamp, findingEvidenceLabel, repairableFinding } from './presentation';
 import { loadRuns, saveRun } from './session';
 import { affordabilityMessage, forecastSource, quoteBudget } from './budget';
@@ -22,9 +22,12 @@ import type { RefreshState } from './refresh-state';
 import { customerStatus, phaseCopy, renderRunProgress } from './run-progress';
 import { canVerifyCheckpoint, renderCheckpointAccess } from './checkpoint-access';
 import { baselineRetryBlocker, renderBaselineRetryHistory, renderRetryBudget, renderRetryPopulation, retryQuoteApprovalBlocker } from './baseline-retry';
+import { personaTraceLinks, renderPersonaComparison } from './persona-comparison';
+import { renderTraceReceipts, renderTraceReadback } from './traces';
+import type { TraceReadback, TraceState } from './traces';
 
 type View = { kind: 'start' } | { kind: 'setup' } | { kind: 'quote'; quote: Quote } | { kind: 'baseline-retry-quote'; quote: BaselineRetryQuote; original: Run } | { kind: 'run'; id: string };
-type Modal = { kind: 'people'; query: string; page: number } | { kind: 'person'; selection: PersonaSelection } | { kind: 'person-trace'; selection: PersonaSelection } | { kind: 'finding'; id: string } | { kind: 'trace' } | { kind: 'history' } | { kind: 'cancel' } | { kind: 'repair'; findingId: string } | { kind: 'replay' } | { kind: 'checkpoint-access'; runId: string; repairId: string } | { kind: 'pending' } | { kind: 'screenshot'; eventId: number } | { kind: 'about' };
+type Modal = { kind: 'people'; query: string; page: number } | { kind: 'person'; selection: PersonaSelection } | { kind: 'person-trace'; selection: PersonaSelection } | { kind: 'before-person-trace'; afterRunId: string; personaId: string } | { kind: 'remote-trace'; runId: string; traceId: string; result: TraceReadback | null; message: string } | { kind: 'finding'; id: string } | { kind: 'trace' } | { kind: 'history' } | { kind: 'cancel' } | { kind: 'repair'; findingId: string } | { kind: 'replay' } | { kind: 'after-retry-quote'; quote: AfterRetryQuote } | { kind: 'after-recovery' } | { kind: 'checkpoint-access'; runId: string; repairId: string } | { kind: 'pending' } | { kind: 'screenshot'; eventId: number } | { kind: 'about' };
 const main = document.querySelector('#main');
 const context = document.querySelector('#context');
 const dialog = document.querySelector('#dialog');
@@ -42,6 +45,10 @@ let connections: ConnectionState = { kind: 'guest', message: 'Authorize the owne
 let connectionUrl = '';
 let connectionEpoch = 0;
 let run: Run | null = null;
+let comparisonBefore: Run | null = null;
+let comparisonError = '';
+let comparisonEpoch = -1;
+const traceStates = new Map<string, TraceState>();
 let findings: Finding[] = [];
 let findingsError = '';
 let findingsRunId: string | null = null;
@@ -179,7 +186,28 @@ function renderRun(): void {
   const storyText = thought || (storyEvent ? eventSummary(storyEvent) || humanize(storyEvent.kind) : typeof goal === 'string' ? goal : 'This customer has no recorded browser steps yet.');
   const crowd = current.persona_count > 100 ? 'dense' : 'crowd';
   const active = isActive(current);
-  elements.main.innerHTML = `<section class="world run-world"><img class="world-art" src="/assets/${crowd}.png" alt=""><div class="run-heading"><h1>${current.pass === 'after' ? 'The same people. A new try.' : 'Your first customers.'}</h1><p class="run-status">${escape(phaseCopy(current))}</p><p class="run-count">${number(current.counts.executed)} / ${number(current.persona_count)} outcomes recorded · ${number(current.counts.generated)} saved · ${escape(humanize(current.phase))}</p></div><div class="session">${snapshot ? `<button class="snapshot-button" data-action="screenshot" data-id="${snapshot.event.id}" aria-label="Inspect full recorded screenshot"><img src="${escape(snapshot.url)}" alt="Full recorded browser screenshot" referrerpolicy="no-referrer"></button>` : `<div class="empty-snapshot"><span>${escape(host(current.app_url))}</span><h2>${selected ? 'No screenshot saved for this customer.' : current.counts.executed ? 'No browser screenshot saved.' : 'Waiting for browser evidence.'}</h2><p>Only recorded screenshots appear here.</p></div>`}<div class="session-caption"><span>${snapshot ? `Recorded for ${escape(selected?.name || 'this run')} · event ${snapshot.event.id}` : 'No screenshot available'}</span>${snapshot ? `<button data-action="screenshot" data-id="${snapshot.event.id}">Inspect full screenshot</button>` : ''}<button data-action="trace">Inspect activity</button></div></div><div class="customer-moment"><img class="person-art" src="/assets/aditi.png" alt=""><div class="moment-copy">${selected ? `<p class="story-excerpt-label">${escape(storyLabel)}</p><p class="moment-quote">${escape(storyText)}</p><p class="moment-name">${escape(selected.name)} · ${escape(customerStatus(selected, current))}</p><button class="secondary" data-action="person" data-id="${escape(selected.id)}">Read full story</button>` : '<p class="moment-quote">Your crowd is<br>not here yet.</p><p class="moment-name">No customer profiles have been generated.</p>'}</div></div><div class="run-bottom"><button class="primary" data-action="people">All ${number(current.persona_count)} customers</button><p class="crowd-note">Representative artwork. ${number(current.personas.length)} saved profiles are individually inspectable.</p>${canCancel(current) ? '<button class="text-button" data-action="cancel">End this run</button>' : '<button class="text-button" data-action="home">Start another run</button>'}</div></section><section class="page run-details">${providerNotice({ provider: current.provider, provenance: current.provenance, targetProvenance: current.target_provenance, estimate: current.budget.cost_basis.includes("estimate") })}${banner(error)}${banner(pollError, '<button class="secondary" data-action="retry-run">Reconnect</button>')}${renderRunProgress(current)}${renderBaselineRetryHistory(current, owner)}<div class="section-head"><h2>${active ? 'Customer status so far' : 'Service-reported customer status'}</h2><p>Every outcome uses the original ${number(current.persona_count)} customers as its denominator.</p></div>${outcomes(current.counts, current.persona_count)}<p class="small muted incomplete-note">${number(current.counts.queued)} queued · ${number(current.counts.requested - current.counts.generated)} not generated. Pending and blocked customers are not passes. Abandonment is a synthetic customer's decision, not real customer churn.</p><section class="findings-section"><h2>Findings</h2>${banner(findingsError, '<button class="text-button" data-action="retry-findings">Retry findings</button>')}${findings.length ? findings.map(finding => `<button class="finding-row" data-action="finding" data-id="${escape(finding.id)}"><span><strong>${escape(finding.summary)}</strong><small>${escape(humanize(finding.classification))} · ${escape(finding.scope)}</small></span><span>${findingEvidenceLabel(finding)} →</span></button>`).join('') : !findingsError ? `<p class="empty">No customer finding has been recorded. Saved steps alone do not establish that a journey passed or failed.</p>` : ''}</section>${renderScenarioCoverage(current, catalogState)}${renderRepair(current)}${renderComparison(current)}${renderBudget(current)}${renderBaselineRetryEntry(current)}<details class="provenance"><summary>Run and population provenance</summary><div class="evidence-row"><strong>Run</strong><span>${escape(current.id)} · ${current.pass === 'before' ? 'Initial pass' : 'After pass'}</span></div><div class="evidence-row"><strong>Saved population</strong><span>${escape(current.population_id)}</span></div><div class="evidence-row"><strong>Target revision</strong><span>${escape(current.revision)}</span></div><div class="evidence-row"><strong>Recorded source commit</strong><span>${escape(current.source_commit || 'Not reported for this saved run')}</span></div><div class="evidence-row"><strong>Recorded source digest</strong><span>${escape(current.source_digest || 'Not reported for this saved run')}</span></div><div class="evidence-row"><strong>Recorded target mode</strong><span>${escape(current.target_mode || 'Not reported for this saved run')}</span></div><div class="evidence-row"><strong>Fault configuration</strong><span>${escape(current.fault)}</span></div><div class="evidence-row"><strong>Last recorded update</strong><span>${escape(timestamp(current.updated_at))}</span></div>${link(current.preview_url, 'Registered target preview')}<p class="same-population">Retesting uses all ${number(current.persona_count)} of these saved personas and their supported starting conditions. Separate diagnostic attempts never change this denominator.</p></details><div class="actions"><button class="secondary" data-action="trace">Execution trace</button><button class="text-button" data-action="download">Download recorded report</button><button class="text-button" data-action="refresh-run">Refresh results</button></div></section>`;
+  elements.main.innerHTML = `<section class="world run-world"><img class="world-art" src="/assets/${crowd}.png" alt=""><div class="run-heading"><h1>${current.pass === 'after' ? 'The same people. A new try.' : 'Your first customers.'}</h1><p class="run-status">${escape(phaseCopy(current))}</p><p class="run-count">${number(current.counts.executed)} / ${number(current.persona_count)} outcomes recorded · ${number(current.counts.generated)} saved · ${escape(humanize(current.phase))}</p></div><div class="session">${snapshot ? `<button class="snapshot-button" data-action="screenshot" data-id="${snapshot.event.id}" aria-label="Inspect full recorded screenshot"><img src="${escape(snapshot.url)}" alt="Full recorded browser screenshot" referrerpolicy="no-referrer"></button>` : `<div class="empty-snapshot"><span>${escape(host(current.app_url))}</span><h2>${selected ? 'No screenshot saved for this customer.' : current.counts.executed ? 'No browser screenshot saved.' : 'Waiting for browser evidence.'}</h2><p>Only recorded screenshots appear here.</p></div>`}<div class="session-caption"><span>${snapshot ? `Recorded for ${escape(selected?.name || 'this run')} · event ${snapshot.event.id}` : 'No screenshot available'}</span>${snapshot ? `<button data-action="screenshot" data-id="${snapshot.event.id}">Inspect full screenshot</button>` : ''}<button data-action="trace">Inspect activity</button></div></div><div class="customer-moment"><img class="person-art" src="/assets/aditi.png" alt=""><div class="moment-copy">${selected ? `<p class="story-excerpt-label">${escape(storyLabel)}</p><p class="moment-quote">${escape(storyText)}</p><p class="moment-name">${escape(selected.name)} · ${escape(customerStatus(selected, current))}</p><button class="secondary" data-action="person" data-id="${escape(selected.id)}">Read full story</button>` : '<p class="moment-quote">Your crowd is<br>not here yet.</p><p class="moment-name">No customer profiles have been generated.</p>'}</div></div><div class="run-bottom"><button class="primary" data-action="people">All ${number(current.persona_count)} customers</button><p class="crowd-note">Representative artwork. ${number(current.personas.length)} saved profiles are individually inspectable.</p>${canCancel(current) ? '<button class="text-button" data-action="cancel">End this run</button>' : '<button class="text-button" data-action="home">Start another run</button>'}</div></section><section class="page run-details">${providerNotice({ provider: current.provider, provenance: current.provenance, targetProvenance: current.target_provenance, estimate: current.budget.cost_basis.includes("estimate") })}${banner(error)}${banner(pollError, '<button class="secondary" data-action="retry-run">Reconnect</button>')}${renderRunProgress(current)}${renderAfterRecovery(current)}${renderAfterRetry(current)}${renderBaselineRetryHistory(current, owner)}<div class="section-head"><h2>${active ? 'Customer status so far' : 'Service-reported customer status'}</h2><p>Every outcome uses the original ${number(current.persona_count)} customers as its denominator.</p></div>${outcomes(current.counts, current.persona_count)}<p class="small muted incomplete-note">${number(current.counts.queued)} queued · ${number(current.counts.requested - current.counts.generated)} not generated. Pending and blocked customers are not passes. Abandonment is a synthetic customer's decision, not real customer churn.</p><section class="findings-section"><h2>Findings</h2>${banner(findingsError, '<button class="text-button" data-action="retry-findings">Retry findings</button>')}${findings.length ? findings.map(finding => `<button class="finding-row" data-action="finding" data-id="${escape(finding.id)}"><span><strong>${escape(finding.summary)}</strong><small>${escape(humanize(finding.classification))} · ${escape(finding.scope)}</small></span><span>${findingEvidenceLabel(finding)} →</span></button>`).join('') : !findingsError ? `<p class="empty">No customer finding has been recorded. Saved steps alone do not establish that a journey passed or failed.</p>` : ''}</section>${renderScenarioCoverage(current, catalogState)}${renderRepair(current)}${renderComparison(current)}${renderBudget(current)}${renderBaselineRetryEntry(current)}<details class="provenance"><summary>Run and population provenance</summary><div class="evidence-row"><strong>Run</strong><span>${escape(current.id)} · ${current.pass === 'before' ? 'Initial pass' : 'After pass'}</span></div><div class="evidence-row"><strong>Saved population</strong><span>${escape(current.population_id)}</span></div><div class="evidence-row"><strong>Target revision</strong><span>${escape(current.revision)}</span></div><div class="evidence-row"><strong>Recorded source commit</strong><span>${escape(current.source_commit || 'Not reported for this saved run')}</span></div><div class="evidence-row"><strong>Recorded source digest</strong><span>${escape(current.source_digest || 'Not reported for this saved run')}</span></div><div class="evidence-row"><strong>Recorded target mode</strong><span>${escape(current.target_mode || 'Not reported for this saved run')}</span></div><div class="evidence-row"><strong>Fault configuration</strong><span>${escape(current.fault)}</span></div><div class="evidence-row"><strong>Last recorded update</strong><span>${escape(timestamp(current.updated_at))}</span></div>${link(current.preview_url, 'Registered target preview')}<p class="same-population">Retesting uses all ${number(current.persona_count)} of these saved personas and their supported starting conditions. Separate diagnostic attempts never change this denominator.</p></details><div class="actions"><button class="secondary" data-action="trace">Execution trace</button><button class="text-button" data-action="download">Download recorded report</button><button class="text-button" data-action="refresh-run">Refresh results</button></div></section>`;
+}
+function renderAfterRetry(current: Run): string {
+  const history = current.after_retry ? `<section class="repair-section"><h2>Saved after retry</h2><p>This distinct attempt keeps all ${number(current.persona_count)} original customers and the same repaired source. The recorded diagnostic is separate from these new journeys.</p><button class="secondary" data-action="open-saved-after-retry" data-id="${escape(current.after_retry.original_run_id)}">Open original blocked after attempt</button></section>` : '';
+  if (current.after_retry_child_run_id) return `${history}<section class="repair-section"><h2>Saved after retry</h2><button class="secondary" data-action="open-saved-after-retry" data-id="${escape(current.after_retry_child_run_id)}">Open the saved after retry</button><p>The blocked evidence stays in this run.</p></section>`;
+  if (current.provider !== 'dodo' || current.pass !== 'after' || current.phase !== 'blocked' || current.counts.executed !== 0 || !current.repair?.head_revision) return history;
+  return `${history}<section class="repair-section"><h2>A fresh after attempt</h2><p>A new attempt keeps all ${number(current.persona_count)} saved customers and exact repaired source, using fresh accounts. Existing paid or ambiguous sessions remain untouched. Review the complete new forecast before approval.</p><button class="secondary" data-action="after-retry-quote" ${!owner || busy || !!pendingRequest() ? 'disabled' : ''}>Review a fresh same-customer after attempt</button></section>`;
+}
+function renderAfterRetryQuote(quote: AfterRetryQuote): string {
+  const b = quote.retry_budget;
+  const allocation = quote.cfo_plan?.schema_version === 2 ? quote.cfo_plan.operator_allocation : undefined;
+  const allocationDisclosure = allocation ? `<p><strong>Local operator retry forecast.</strong> The inspected native CFO rates and history are preserved. An additional ${money(allocation.additional_microusd)} complete-cohort forecast sets the local scheduler ceiling to ${money(allocation.lifetime_budget_microusd)}. This is not native CFO approval or funded credit and authorizes no cash charges.</p>` : '';
+  return `<p>All ${number(quote.persona_count)} saved customers from population ${escape(quote.population_id)} return on source ${escape(quote.head_revision)}. No profiles or initial memories are regenerated.</p><p>The genuine completed diagnostic and its held-out checks are reused from attempt ${escape(quote.known_replay_source_run_id || quote.retry_of_run_id)} on this exact source. Each customer still needs a new real payment and matching access check.</p>${allocationDisclosure}<div class="budget-rows"><div><span>Prior estimated use, retained</span><strong>${money(b.historical_spent_microusd)}</strong></div><div><span>Prior unused hold released on acceptance</span><strong>${money(b.release_microusd)}</strong></div><div><span>All saved customers after allowance</span><strong>${money(quote.after_microusd)}</strong></div><div><span>Forecast contingency</span><strong>${money(quote.contingency_microusd || 0)}</strong></div><div><span>New after-only reservation</span><strong>${money(quote.reserved_microusd)}</strong></div></div><p class="small muted">Estimated allowance only; incremental cash recorded is ${money(b.measured_cash_microusd)}. Rejected approval changes no reservation.</p>${gates(quote.gates)}`;
+}
+function afterRecoveryAvailable(current: Run): boolean {
+  return current.provider === 'dodo' && current.pass === 'after' && current.phase === 'blocked'
+    && current.counts.executed === 0
+    && current.gates.some(gate => gate.message === 'Recorded intent has no unique freshly observed control; diagnostic stops without navigation substitution.' || gate.message === 'stagehand: Document changed after observation; no browser action was executed or retried.');
+}
+function renderAfterRecovery(current: Run): string {
+  if (!afterRecoveryAvailable(current)) return '';
+  return `<section class="repair-section"><h2>Recover the stopped diagnostic</h2><p>The four saved customers have not started. Review a fresh diagnostic on the same repaired source before their after pass. Earlier payment sessions and blocked evidence stay saved.</p><button class="secondary" data-action="after-recovery-review" ${!owner || busy ? 'disabled' : ''}>Review after-pass recovery</button></section>`;
 }
 function renderBudget(current: Run): string {
   const allowanceUsed = current.budget.estimated_consumed_microusd ?? current.budget.spent_microusd;
@@ -188,7 +216,7 @@ function renderBudget(current: Run): string {
   const original = current.budget_contract
     ? `<details class="accepted-budget"><summary>Original accepted budget · all ${number(current.budget_contract.persona_count)} customers</summary>${quoteBudget(current.budget_contract, true)}${forecastSource(current.budget_contract)}</details>`
     : '<p class="small muted">The original itemized quote was not included in this saved record. Its recorded reservation remains unchanged.</p>';
-  return `<section class="run-budget"><h2>The budget stays with the crowd.</h2><div class="budget-summary"><p><strong>${money(current.budget.reserved_microusd)}</strong>Originally reserved for both passes</p><p><strong>${money(allowanceUsed)}</strong>Estimated allowance used</p><p><strong>${money(current.budget.unused_microusd)}</strong>Unused and still held</p><p><strong>${money(current.budget.released_microusd)}</strong>Released</p></div>${original}<div class="cash-cost"><strong>Incremental cash recorded: ${cash === undefined ? 'Unknown' : money(cash)}</strong><p>${escape(cashBasis)}</p></div><p class="small muted">The saved after pass uses its original reservation. Plan updates cannot reprice this run or replace its saved population. No charges are made by this app.</p></section>`;
+  return `<section class="run-budget"><h2>The budget stays with the crowd.</h2><div class="budget-summary"><p><strong>${money(current.budget.reserved_microusd)}</strong>${current.after_retry ? 'Reserved for this after retry' : 'Originally reserved for both passes'}</p><p><strong>${money(allowanceUsed)}</strong>Estimated allowance used</p><p><strong>${money(current.budget.unused_microusd)}</strong>Unused and still held</p><p><strong>${money(current.budget.released_microusd)}</strong>Released</p></div>${original}<div class="cash-cost"><strong>Incremental cash recorded: ${cash === undefined ? 'Unknown' : money(cash)}</strong><p>${escape(cashBasis)}</p></div><p class="small muted">${current.after_retry ? 'This after retry uses its separately approved forecast; the original attempt retains its spent allowance and evidence.' : 'The saved after pass uses its original reservation.'} Plan updates cannot reprice this run or replace its saved population. No charges are made by this app.</p></section>`;
 }
 function renderRepair(current: Run): string {
   const repair = current.repair;
@@ -200,14 +228,18 @@ function renderRepair(current: Run): string {
 }
 function renderComparison(current: Run): string {
   const comparison = current.comparison;
-  if (!comparison) return '';
+  const paired = current.pass === 'after' ? `<div>${comparisonBefore ? renderPersonaComparison(current, comparisonBefore) : `<p class="small muted">${comparisonError ? escape(comparisonError) : 'Loading the saved initial evidence for each customer…'}</p><button class="secondary" data-action="refresh-comparison">Load initial evidence</button>`}</div>` : '';
+  if (!comparison) return paired ? `<section class="comparison-section"><h2>The same customers, both attempts</h2><p>Aggregate comparison is recorded after the after pass finishes. Unfinished journeys remain unresolved.</p>${paired}</section>` : '';
   const comparable = comparison.same_personas && comparison.population_id === current.population_id && comparison.requested === current.persona_count;
-  return `<section class="comparison-section"><h2>What changed for the same crowd?</h2><p>${comparable ? 'The service reports the same saved personas in both passes.' : 'Population equivalence has not been established. These runs cannot be accepted as a same-population comparison.'}</p><p class="small muted">${escape(comparison.population_id)} · ${number(comparison.requested)} original customers in each pass</p>${comparisonTable(comparison.before_counts, comparison.after_counts, comparison.requested)}<p class="evidence-row"><strong>Known-failure action replay</strong><span>${escape(humanize(comparison.known_failure_replay))}</span></p>${renderHeldOut(current)}<p>Estimated allowance used ${money(comparison.total_spent_microusd)} · Unused ${money(comparison.unused_microusd)}</p><p class="small muted">Initial run ${escape(comparison.before_run_id)} · After run ${escape(comparison.after_run_id)}</p></section>`;
+  return `<section class="comparison-section"><h2>What changed for the same crowd?</h2><p>${comparable ? 'The service reports the same saved personas in both passes.' : 'Population equivalence has not been established. These runs cannot be accepted as a same-population comparison.'}</p><p class="small muted">${escape(comparison.population_id)} · ${number(comparison.requested)} original customers in each pass</p>${comparisonTable(comparison.before_counts, comparison.after_counts, comparison.requested)}${paired}<p class="evidence-row"><strong>Known-failure action replay</strong><span>${escape(humanize(comparison.known_failure_replay))}</span></p>${renderHeldOut(current)}<p>Estimated allowance used ${money(comparison.total_spent_microusd)} · Unused ${money(comparison.unused_microusd)}</p><p class="small muted">Initial run ${escape(comparison.before_run_id)} · After run ${escape(comparison.after_run_id)}</p></section>`;
 }
 function renderHeldOut(current: Run): string {
   const checks = current.comparison?.held_out_checks;
   if (!checks) return '<p class="small muted">No separate diagnostic checks are reported in this saved record.</p>';
-  return `<details class="held-out record"><summary>Separate diagnostic checks · ${number(checks.passed)} passed / ${number(checks.total)} recorded assertions</summary><p class="small muted">${number(checks.failed)} failed. These deterministic controls use separate fresh accounts. They never enter the ${number(current.persona_count)}-customer denominator and do not establish adaptive customer outcomes.</p>${checks.cases.length ? checks.cases.map(item => `<article class="diagnostic-case"><h3>${escape(humanize(item.case))} · ${item.passed ? 'Passed' : 'Failed'}</h3><p class="small muted">${item.measured ? 'Measured diagnostic evidence' : 'Local fixture control · provider not measured'} · ${escape(item.provider)}</p><p class="small muted">Revision ${escape(item.revision)} · separate account ${escape(item.account_id)}</p>${link(item.preview_url, 'Diagnostic preview')}${evidence(item.evidence)}</article>`).join('') : '<p class="empty">No individual diagnostic evidence was included.</p>'}</details>`;
+  const origin = current.after_retry
+    ? `These recorded controls were reused from source attempt ${escape(current.after_retry.known_replay_source_run_id)} on the same repaired source. They were not run again for this retry.`
+    : 'These deterministic controls are separate from the adaptive customer journeys.';
+  return `<details class="held-out record"><summary>Separate diagnostic checks · ${number(checks.passed)} passed / ${number(checks.total)} recorded assertions</summary><p class="small muted">${number(checks.failed)} failed. ${origin} They never enter the ${number(current.persona_count)}-customer denominator and do not establish adaptive customer outcomes.</p>${checks.cases.length ? checks.cases.map(item => `<article class="diagnostic-case"><h3>${escape(humanize(item.case))} · ${item.passed ? 'Passed' : 'Failed'}</h3><p class="small muted">${escape(item.provider || current.provider || 'Provider not recorded')} · ${item.diagnostic ? 'Recorded diagnostic control' : item.measured ? 'Measured diagnostic evidence' : 'Measurement metadata not recorded'}</p><p class="small muted">Revision ${escape(item.revision || current.revision)} · separate account ${escape(item.account_id)}</p>${link(item.preview_url, 'Diagnostic preview')}${evidence(item.evidence || item)}</article>`).join('') : '<p class="empty">No individual diagnostic evidence was included.</p>'}</details>`;
 }
 function openModal(next: Modal): void {
   if (!elements.dialog.open && document.activeElement instanceof HTMLElement) {
@@ -253,6 +285,7 @@ function renderModal(): void {
         const pending = entry.pending;
         const details = pending.kind === 'create'
           ? `<p class="lead">Original approved initial run · ${number(pending.quote.persona_count)} requested customers</p>${quoteBudget(pending.quote, true)}`
+          : pending.kind === 'after-retry' ? renderAfterRetryQuote(pending.quote)
           : pending.kind === 'baseline-retry'
             ? `<p class="lead">Original approved baseline retry · all ${number(pending.quote.persona_count)} saved customers</p><p>Acceptance has not been established in this tab. Recover this request before approving another reservation.</p>${renderRetryBudget(pending.quote.retry_budget)}${renderRetryPopulation(pending.quote)}${quoteBudget(pending.quote)}`
             : `<p class="lead">Original approved retest · all ${number(pending.personaCount)} saved customers</p><div class="evidence-row"><strong>Initial run</strong><span>${escape(pending.runId)}</span></div><div class="evidence-row"><strong>Saved population</strong><span>${escape(pending.populationId)}</span></div><div class="evidence-row"><strong>Exact repair</strong><span>${escape(pending.repairRevision)}</span></div>`;
@@ -271,14 +304,21 @@ function renderModal(): void {
     case 'person-trace': {
       const person = selectedPersona({ run: current, viewRunId: view.kind === 'run' ? view.id : null, epoch: pollEpoch, selection: state.selection });
       if (!current || !person) { modalFrame('Customer trace unavailable', '<p>The selected run changed. Open a customer from the current saved run.</p>'); break; }
-      modalFrame(`${person.name} · recorded trace`, `<p class="sample-label">${escape(current.id)} · ${escape(person.id)}</p><button class="secondary" data-action="person" data-id="${escape(person.id)}">Back to customer details</button>${eventList(current.events.filter(event => event.persona_id === person.id))}`, true); break;
+      modalFrame(`${person.name} · recorded trace`, `<p class="sample-label">${escape(current.id)} · ${escape(person.id)}</p>${renderTraceReceipts(current.id, traceStates.get(current.id), person.id)}<p>${personaTraceLinks(current, person.id)}</p><button class="secondary" data-action="person" data-id="${escape(person.id)}">Back to customer details</button><button class="text-button" data-action="refresh-trace-receipts" data-id="${escape(current.id)}">Refresh trace receipts</button>${eventList(current.events.filter(event => event.persona_id === person.id))}`, true); break;
     }
+    case 'before-person-trace': {
+      const before = comparisonBefore;
+      const person = before?.personas.find(item => item.id === state.personaId);
+      if (!current || current.id !== state.afterRunId || current.parent_run_id !== before?.id || !before || !person) { modalFrame('Initial evidence unavailable', '<p>Reload both-pass evidence from the after run.</p>'); break; }
+      modalFrame(`${person.name} · initial trace`, `<p class="sample-label">Initial run ${escape(before.id)} · ${escape(person.id)}</p>${renderTraceReceipts(before.id, traceStates.get(before.id), person.id)}<p>${personaTraceLinks(before, person.id)}</p><button class="text-button" data-action="refresh-trace-receipts" data-id="${escape(before.id)}">Refresh trace receipts</button>${eventList(before.events.filter(event => event.persona_id === person.id))}`, true); break;
+    }
+    case 'remote-trace': modalFrame('Actual Neatlogs readback', `${state.result ? renderTraceReadback(state.result) : `<p>${escape(state.message || 'Reading the recorded trace from Neatlogs…')}</p>`}<button class="secondary" data-action="remote-trace" data-id="${escape(state.runId + ':' + state.traceId)}">Refresh hosted readback</button>`, true); break;
     case 'finding': {
       const finding = findings.find(item => item.id === state.id);
       if (!finding) { modalFrame('Finding unavailable', '<p>Refresh the run to reload its findings.</p>'); break; }
       modalFrame(finding.summary, `<p class="sample-label">${findingEvidenceLabel(finding)} · ${escape(humanize(finding.classification))}</p><p class="lead">Observed scope: ${escape(finding.scope)}</p>${evidence(finding.evidence)}<p class="small muted">Observed scope applies to the tested conditions. This does not establish a real customer failure rate.</p><div class="actions"><button class="secondary" data-action="person" data-id="${escape(finding.persona_id)}">Customer story</button><button class="primary" data-action="repair-review" data-id="${escape(finding.id)}" ${!current || !repairableFinding(finding, current) ? 'disabled' : ''}>Review repair approval</button></div>`); break;
     }
-    case 'trace': if (current) modalFrame('Recorded execution', `<p class="sample-label">${escape(current.id)} · ${number(current.events.length)} saved events</p><p class="small muted">These are the saved run events. A linked trace does not establish server finalization, and browser steps alone are not customer outcomes.</p><button class="secondary" data-action="refresh-trace">Refresh activity</button>${eventList(current.events)}`, true); break;
+    case 'trace': if (current) modalFrame('Recorded execution', `<p class="sample-label">${escape(current.id)} · ${number(current.events.length)} saved events</p>${renderTraceReceipts(current.id, traceStates.get(current.id))}<p class="small muted">These are the saved run events. A linked trace does not establish server finalization, and browser steps alone are not customer outcomes.</p><button class="secondary" data-action="refresh-trace">Refresh activity</button>${eventList(current.events)}`, true); break;
     case 'cancel': modalFrame('End this run?', '<p>The service will stop further work and release the unused reservation, including the saved retest allowance. Recorded evidence remains available.</p><div class="actions dialog-actions"><button class="primary" data-action="confirm-cancel">End run</button><button class="secondary" data-action="close">Keep watching</button></div>'); break;
     case 'repair': {
       const finding = findings.find(item => item.id === state.findingId);
@@ -289,6 +329,15 @@ function renderModal(): void {
       modalFrame('Verify public checkpoint access', `<p>The local service will anonymously read the approved repository’s immutable checkpoint, transcript and repair source, then retain an access receipt.</p><p>Publication and privacy review happen separately. This action does not publish, repair, retest or reserve another budget.</p><p class="small muted">Hosted Entire UI access remains unverified. A repeated successful request returns the original historical receipt.</p>${current?.repair ? `<div class="evidence-row"><strong>Saved checkpoint</strong><span>${escape(current.repair.checkpoint_id)}</span></div>` : ''}${banner(error)}<div class="actions dialog-actions"><button class="primary" data-action="confirm-checkpoint-access" ${busy || !matches || !current || !canVerifyCheckpoint(current, owner) ? 'disabled' : ''}>Verify approved public checkpoint</button><button class="secondary" data-action="setup">Owner connection</button></div>`);
       break;
     }
+    case 'after-retry-quote': {
+      const quote = state.quote;
+      const enabled = owner && current?.id === quote.retry_of_run_id && quote.ready && quote.affordable && !quote.gates.length && Date.parse(quote.expires_at) > Date.now();
+      const budgetBlocker = !quote.affordable ? `The full reservation exceeds available forecast allowance after release (${money(quote.retry_budget.available_after_release_microusd)}). Release an unused historical hold or review the plan, then request a new quote.` : '';
+      modalFrame('Review a fresh after-only forecast', `${renderAfterRetryQuote(quote)}${banner(budgetBlocker)}${banner(error)}<div class="actions dialog-actions"><button class="primary" data-action="confirm-after-retry" ${busy || !enabled ? 'disabled' : ''}>Run all ${number(quote.persona_count)} saved customers with fresh accounts</button></div>`);
+    } break;
+    case 'after-recovery': if (current) {
+      modalFrame('Recover the same after pass', `<p>Run a new isolated diagnostic account, then release all ${number(current.persona_count)} original saved customers on repair ${escape(current.repair?.head_revision || '')}.</p><p>Old payment sessions are not resubmitted. The original blocked attempt and trace remain recorded. The service checks that the remaining original forecast covers this diagnostic and the full crowd; no new reservation or charge is created.</p>${banner(error)}<div class="actions dialog-actions"><button class="primary" data-action="confirm-after-recovery" ${busy || !owner || !afterRecoveryAvailable(current) ? 'disabled' : ''}>Recover all ${number(current.persona_count)} saved customers</button></div>`);
+    } break;
     case 'replay': if (current) {
       const reason = currentReplayBlocker(current);
       modalFrame('Retest the same saved customers', `<p class="lead">All ${number(current.persona_count)} personas from population ${escape(current.population_id)} will retry the registered repair preview.</p><p>Profiles and supported starting conditions are preserved. Accounts are isolated and decision memory is reset. Known-failure actions are checked separately before adaptive retesting.</p><p class="same-population">The after pass reuses the original reservation. No new crowd and no second reservation.</p><div class="evidence-row"><strong>Exact repair revision</strong><span>${escape(current.repair?.head_revision || 'Unavailable')}</span></div>${reason ? banner(reason) : ''}<p class="small muted">${owner ? 'Owner session connected.' : 'Owner authorization is required to start the retest.'}</p><div class="actions dialog-actions"><button class="primary" data-action="confirm-replay" ${busy || !owner || !!reason || !!pendingRequest() ? 'disabled' : ''}>Retest all ${number(current.persona_count)} saved customers</button><button class="secondary" data-action="setup">Owner connection</button></div>`);
@@ -388,6 +437,7 @@ async function submitSavedRequest(): Promise<void> {
       switch (saved.kind) {
         case 'create': return api.createRun(saved.request.quote_id, saved.key);
         case 'replay': return api.replay(saved.runId, saved.request.repair_id, saved.key);
+        case 'after-retry': return api.afterRetry(saved.runId, saved.request.quote_id, saved.key);
         case 'baseline-retry': return api.baselineRetry(saved.runId, saved.request.quote_id, saved.key);
       }
     },
@@ -403,6 +453,7 @@ async function submitSavedRequest(): Promise<void> {
 async function openRun(entry: SavedRun, initial?: Run): Promise<void> {
   stopPolling(); closeModal(); error = ''; pollError = ''; findings = []; findingsError = ''; findingsRunId = null;
   catalogState = { kind: 'loading' };
+  comparisonBefore = null; comparisonError = ''; comparisonEpoch = -1;
   view = { kind: 'run', id: entry.id };
   location.hash = `run=${encodeURIComponent(entry.id)}`;
   render();
@@ -425,6 +476,54 @@ async function refreshScenarioCatalog(current: Run, epoch: number): Promise<void
   }
   render();
 }
+async function refreshComparisonBefore(current: Run, epoch: number): Promise<void> {
+  if (current.pass !== 'after' || !current.parent_run_id) return;
+  comparisonEpoch = epoch;
+  const originalId = current.parent_run_id;
+  const entry = savedRuns.find(item => item.id === originalId);
+  try {
+    if (!entry && !owner) throw new Error('Authorize the owner or open the initial run in this tab to load its evidence.');
+    const before = await api.run(originalId, entry?.token ?? '');
+    if (epoch !== pollEpoch || view.kind !== 'run' || view.id !== current.id) return;
+    if (before.id !== originalId) throw new Error('The service returned a different initial run.');
+    comparisonBefore = before; comparisonError = '';
+  } catch (value) {
+    if (epoch !== pollEpoch || view.kind !== 'run' || view.id !== current.id) return;
+    comparisonError = `Initial evidence unavailable: ${errorMessage(value)}`;
+  }
+  render();
+}
+async function refreshTraceReceipts(runId: string): Promise<void> {
+  const entry = savedRuns.find(item => item.id === runId);
+  traceStates.set(runId, { kind: 'loading' });
+  if (modal) renderModal();
+  try {
+    if (!entry && !owner) throw new Error('Owner authorization or saved run access is required to read its trace receipts.');
+    const data = await api.traces(runId, entry?.token ?? '');
+    if (data.run_id !== runId) throw new Error('The trace receipts belong to another run.');
+    traceStates.set(runId, { kind: 'ready', data });
+  } catch (value) { traceStates.set(runId, { kind: 'unavailable', message: errorMessage(value) }); }
+  if (modal) renderModal();
+}
+async function inspectRemoteTrace(runId: string, traceId: string): Promise<void> {
+  const state = traceStates.get(runId);
+  if (state?.kind !== 'ready' || !state.data.traces.some(item => item.trace_id === traceId)) return;
+  const entry = savedRuns.find(item => item.id === runId);
+  if (!entry && !owner) return;
+  const inspection: Extract<Modal, { kind: 'remote-trace' }> = { kind: 'remote-trace', runId, traceId, result: null, message: '' };
+  openModal(inspection);
+  try {
+    const result = await api.inspectTrace(runId, traceId, entry?.token ?? '');
+    if (result.trace_id !== traceId || result.run_id && result.run_id !== runId) throw new Error('The hosted trace response differs from the selected run and trace.');
+    if (modal !== inspection) return;
+    inspection.result = result;
+    if (result.finalized_readback === 'verified') {
+      const receipt = state.data.traces.find(item => item.trace_id === traceId);
+      if (receipt) receipt.finalized_readback = 'verified';
+    }
+  } catch (value) { if (modal === inspection) inspection.message = errorMessage(value); }
+  if (modal === inspection) renderModal();
+}
 async function pollRun(epoch: number, initial?: Run): Promise<void> {
   if (view.kind !== 'run' || epoch !== pollEpoch) return;
   const id = view.id;
@@ -446,6 +545,7 @@ async function pollRun(epoch: number, initial?: Run): Promise<void> {
     else findingsError = errorMessage(nextFindings.error);
     if (changed || previousFindings !== JSON.stringify(findings) || previousError !== findingsError || previousFindingsRunId !== findingsRunId) { render(); if (modal?.kind === 'person' || modal?.kind === 'person-trace') renderModal(); }
     if (catalogEpoch !== epoch) void refreshScenarioCatalog(next, epoch);
+    if (next.pass === 'after' && comparisonEpoch !== epoch) void refreshComparisonBefore(next, epoch);
     if (isActive(next) || next.repair?.status === 'queued' || next.repair?.status === 'running') pollTimer = setTimeout(() => void pollRun(epoch), 1000);
   } catch (value) {
     if (epoch !== pollEpoch) return;
@@ -556,17 +656,21 @@ async function action(name: string, id: string): Promise<void> {
       break;
     }
     case 'retry-run': case 'refresh-run': { stopPolling(); await pollRun(pollEpoch); break; }
+    case 'refresh-comparison': if (run) await refreshComparisonBefore(run, pollEpoch); break;
+    case 'before-person-trace': if (run?.pass === 'after' && comparisonBefore?.personas.some(person => person.id === id)) { openModal({ kind: 'before-person-trace', afterRunId: run.id, personaId: id }); await refreshTraceReceipts(comparisonBefore.id); } break;
+    case 'refresh-trace-receipts': if (id === run?.id || id === comparisonBefore?.id) await refreshTraceReceipts(id); break;
+    case 'remote-trace': { const [runId, traceId] = id.split(':'); if (runId && traceId) await inspectRemoteTrace(runId, traceId); break; }
     case 'retry-findings': { if (run) { const entry = savedRuns.find(item => item.id === run?.id); if (entry) { await refreshFindings(entry.id, entry.token); render(); } } break; }
     case 'people': openModal({ kind: 'people', query: '', page: 0 }); break;
     case 'people-prev': case 'people-next': if (modal?.kind === 'people') { modal.page += name === 'people-prev' ? -1 : 1; renderModal(); } break;
     case 'person': case 'person-trace': {
       if (view.kind !== 'run' || !run || run.id !== view.id || !run.personas.some(person => person.id === id)) break;
-      openModal({ kind: name, selection: { runId: run.id, populationId: run.population_id, epoch: pollEpoch, personaId: id } }); break;
+      openModal({ kind: name, selection: { runId: run.id, populationId: run.population_id, epoch: pollEpoch, personaId: id } }); if (name === 'person-trace') await refreshTraceReceipts(run.id); break;
     }
     case 'screenshot': openModal({ kind: 'screenshot', eventId: Number(id) }); break;
     case 'finding': openModal({ kind: 'finding', id }); break;
-    case 'trace': openModal({ kind: 'trace' }); break;
-    case 'refresh-trace': stopPolling(); await pollRun(pollEpoch); if (modal?.kind === 'trace') renderModal(); break;
+    case 'trace': openModal({ kind: 'trace' }); if (run) await refreshTraceReceipts(run.id); break;
+    case 'refresh-trace': stopPolling(); await pollRun(pollEpoch); if (run) await refreshTraceReceipts(run.id); if (modal?.kind === 'trace') renderModal(); break;
     case 'cancel': if (run && canCancel(run)) openModal({ kind: 'cancel' }); break;
     case 'confirm-cancel': {
       const entry = savedRuns.find(item => item.id === run?.id);
@@ -579,6 +683,25 @@ async function action(name: string, id: string): Promise<void> {
       const current = run; const findingId = modal.findingId;
       if (!findings.some(finding => finding.id === findingId && repairableFinding(finding, current))) break;
       await mutate(async () => { current.repair = await api.repair(current.id, findingId); closeModal(); stopPolling(); await pollRun(pollEpoch); }); break;
+    }
+    case 'open-saved-after-retry': { const entry = savedRuns.find(item => item.id === id); if (entry) await openRun(entry); break; }
+    case 'after-retry-quote': {
+      if (!run || !owner || pendingRequest()) break;
+      const current = run;
+      await mutate(async () => { const quote = await api.afterRetryQuote(current.id); if (run?.id !== current.id || quote.retry_of_run_id !== current.id || quote.population_id !== current.population_id || quote.head_revision !== current.source_commit) throw new Error('The forecast differs from this saved cohort or exact source. Refresh before approval.'); openModal({ kind: 'after-retry-quote', quote }); }); break;
+    }
+    case 'confirm-after-retry': {
+      if (!run || !owner || modal?.kind !== 'after-retry-quote' || pendingRequest()) break;
+      const quote = modal.quote;
+      if (run.id !== quote.retry_of_run_id || !quote.ready || !quote.affordable || quote.gates.length || Date.parse(quote.expires_at) <= Date.now()) break;
+      requestJournal.prepare({ kind: 'after-retry', key: crypto.randomUUID(), approvedAt: new Date().toISOString(), runId: run.id, request: { quote_id: quote.id }, quote });
+      await mutate(submitSavedRequest); break;
+    }
+    case 'after-recovery-review': if (run && owner && afterRecoveryAvailable(run)) openModal({ kind: 'after-recovery' }); break;
+    case 'confirm-after-recovery': {
+      if (!run || !owner || modal?.kind !== 'after-recovery' || !afterRecoveryAvailable(run)) break;
+      const current = run;
+      await mutate(async () => { run = await api.recoverAfter(current.id); closeModal(); stopPolling(); await pollRun(pollEpoch); }); break;
     }
     case 'recover-repair': {
       if (!owner || !run || run.repair?.status !== 'blocked') break;
@@ -622,7 +745,11 @@ async function action(name: string, id: string): Promise<void> {
       }); break;
     }
     case 'download': if (run) {
-      const blob = new Blob([JSON.stringify(redact({ product: 'TryFolk', source: 'Recorded local service results', run, findings }), null, 2)], { type: 'application/json' });
+      const blob = new Blob([JSON.stringify(redact({ product: 'TryFolk', source: 'Recorded local service results', run, findings,
+        before_run: run.pass === 'after' ? comparisonBefore : null,
+        trace_receipts: [traceStates.get(run.id), ...(comparisonBefore ? [traceStates.get(comparisonBefore.id)] : [])]
+          .flatMap(state => state?.kind === 'ready' ? [state.data] : []),
+      }), null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `tryfolk-${run.id}.json`; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
     } break;
   }
@@ -631,7 +758,7 @@ document.addEventListener('click', event => {
   if (!(event.target instanceof Element)) return;
   const target = event.target.closest('[data-action]');
   if (!(target instanceof HTMLElement) || target instanceof HTMLButtonElement && target.disabled) return;
-  if (busy && ['confirm-quote', 'confirm-cancel', 'confirm-repair', 'confirm-replay', 'confirm-checkpoint-access', 'confirm-baseline-retry', 'recover-request', 'dismiss-declined'].includes(target.dataset.action || '')) return;
+  if (busy && ['confirm-quote', 'confirm-cancel', 'confirm-repair', 'confirm-replay', 'confirm-checkpoint-access', 'confirm-baseline-retry', 'confirm-after-recovery', 'confirm-after-retry', 'recover-request', 'dismiss-declined'].includes(target.dataset.action || '')) return;
   void action(target.dataset.action || '', target.dataset.id || '');
 });
 document.addEventListener('submit', event => {
